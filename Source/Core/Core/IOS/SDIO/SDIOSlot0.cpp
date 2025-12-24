@@ -301,7 +301,6 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
                       std::feof(m_card.GetHandle()));
         ret = RET_FAIL;
       }
-    }
   }
     memory.Write_U32(0x900, buffer_out);
     break;

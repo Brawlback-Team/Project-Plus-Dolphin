@@ -922,7 +922,7 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
     m_golf_mode_action->setEnabled(enabled);
     m_fixed_delay_action->setEnabled(enabled);
     m_brawlmusic_off->setEnabled(enabled);
-    m_is_spectator->setEnabled(enabled);
+    m_spectator_mode->setEnabled(enabled);
     m_rollback_action->setEnabled(enabled);
   }
 
