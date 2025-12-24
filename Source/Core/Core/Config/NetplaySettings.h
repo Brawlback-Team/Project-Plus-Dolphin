@@ -44,7 +44,7 @@ extern const Info<u32> NETPLAY_PLAYER_BUFFER_SIZE;
 extern const Info<u32> NETPLAY_CLIENT_BUFFER_SIZE;
 
 extern const Info<bool> NETPLAY_BRAWL_MUSIC_OFF;
-extern const Info<bool> NETPLAY_IS_SPECTATOR;
+extern const Info<bool> NETPLAY_SPECTATOR_MODE;
 
 extern const Info<bool> NETPLAY_SAVEDATA_LOAD;
 extern const Info<bool> NETPLAY_SAVEDATA_WRITE;

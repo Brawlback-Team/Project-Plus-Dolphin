@@ -439,6 +439,8 @@ add_library(core
   IOS/USB/Emulated/Skylanders/SkylanderFigure.h
   IOS/USB/Emulated/WiiSpeak.cpp
   IOS/USB/Emulated/WiiSpeak.h
+  IOS/USB/Emulated/LogitechMic.cpp
+  IOS/USB/Emulated/LogitechMic.h
   IOS/USB/Host.cpp
   IOS/USB/Host.h
   IOS/USB/OH0/OH0.cpp
@@ -508,6 +510,8 @@ add_library(core
   PowerPC/Interpreter/Interpreter_Tables.cpp
   PowerPC/Interpreter/Interpreter.cpp
   PowerPC/Interpreter/Interpreter.h
+  PowerPC/JitCommon/ConstantPropagation.cpp
+  PowerPC/JitCommon/ConstantPropagation.h
   PowerPC/JitCommon/DivUtils.cpp
   PowerPC/JitCommon/DivUtils.h
   PowerPC/JitCommon/JitAsmCommon.cpp
@@ -755,7 +759,7 @@ elseif(UNIX)
 endif()
 
 # Bluez doesn't support all the communication modes on FreeBSD, so only using it on Linux
-if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+if(LINUX)
   option(ENABLE_BLUEZ "Enables bluetooth support" ON)
   if(ENABLE_BLUEZ)
     find_package(BlueZ)
@@ -795,6 +799,11 @@ if(UNIX)
     MemoryWatcher.cpp
     MemoryWatcher.h
   )
+endif()
+
+if(WIN32 OR LINUX)
+  target_sources(core PRIVATE HW/EXI/BBA/IPC.cpp)
+  target_link_libraries(core PRIVATE cpp-ipc::ipc)
 endif()
 
 if(MSVC)

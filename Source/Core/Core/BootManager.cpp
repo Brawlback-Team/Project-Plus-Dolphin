@@ -95,7 +95,7 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
 
     Config::AddLayer(ConfigLoaders::GenerateNetPlayConfigLoader(*netplay_settings));
     StartUp.bCopyWiiSaveNetplay = netplay_settings->savedata_load;
-    StartUp.bIsSpectator = netplay_settings->is_spectator;
+    StartUp.bIsSpectator = netplay_settings->spectator_mode;
   }
 
   // Override out-of-region languages/countries to prevent games from crashing or behaving oddly

@@ -1590,7 +1590,7 @@ bool NetPlayServer::SetupNetSettings()
   settings.m_RollbackMode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "rollback";
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
-  settings.is_spectator = Config::Get(Config::NETPLAY_IS_SPECTATOR);
+  settings.spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);
 
   // Unload GameINI to restore things to normal
   Config::RemoveLayer(Config::LayerType::GlobalGame);
@@ -1736,7 +1736,7 @@ bool NetPlayServer::StartGame()
   spac << m_settings.oc_factor;
   spac << m_settings.vi_oc_enable;
   spac << m_settings.vi_oc_factor;
-  spac << m_settings.is_spectator;
+  spac << m_settings.spectator_mode;
 
   for (auto slot : ExpansionInterface::SLOTS)
     spac << static_cast<int>(m_settings.exi_device[slot]);

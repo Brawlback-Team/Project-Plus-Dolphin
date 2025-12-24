@@ -167,7 +167,7 @@ private:
   QAction* m_fixed_delay_action;
   QAction* m_hide_remote_gbas_action;
   QCheckBox* m_brawlmusic_off;
-  QCheckBox* m_is_spectator;
+  QCheckBox* m_spectator_mode;
   QPushButton* m_quit_button;
   QSplitter* m_splitter;
   QActionGroup* m_network_mode_group;

@@ -38,6 +38,7 @@
 #endif
 
 #include "Common/Config/Config.h"
+#include "Common/FileUtil.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Version.h"
 #include "Common/WindowSystemInfo.h"
@@ -100,6 +101,7 @@
 #include "DolphinQt/Debugger/ThreadWidget.h"
 #include "DolphinQt/Debugger/WatchWidget.h"
 #include "DolphinQt/DiscordHandler.h"
+#include "DolphinQt/EmulatedUSB/LogitechMicWindow.h"
 #include "DolphinQt/EmulatedUSB/WiiSpeakWindow.h"
 #include "DolphinQt/FIFO/FIFOPlayerWindow.h"
 #include "DolphinQt/GCMemcardManager.h"
@@ -166,7 +168,7 @@ static void InstallSignalHandler()
   struct sigaction sa;
   sa.sa_handler = &SignalDaemon::HandleInterrupt;
   sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_RESETHAND;
+  sa.sa_flags = SA_RESTART | SA_RESETHAND;
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
 }
@@ -266,12 +268,7 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
           });
 #endif
 
-  connect(m_cheats_manager, &CheatsManager::OpenGeneralSettings, this,
-          &MainWindow::ShowGeneralWindow);
-
 #ifdef USE_RETRO_ACHIEVEMENTS
-  connect(m_cheats_manager, &CheatsManager::OpenAchievementSettings, this,
-          &MainWindow::ShowAchievementSettings);
   connect(m_game_list, &GameList::OpenAchievementSettings, this,
           &MainWindow::ShowAchievementSettings);
 #endif  // USE_RETRO_ACHIEVEMENTS
@@ -493,7 +490,6 @@ void MainWindow::CreateComponents()
   m_watch_widget = new WatchWidget(this);
   m_breakpoint_widget = new BreakpointWidget(this);
   m_code_widget = new CodeWidget(this);
-  m_cheats_manager = new CheatsManager(m_system, this);
   m_assembler_widget = new AssemblerWidget(this);
 
   const auto request_watch = [this](QString name, u32 addr) {
@@ -535,8 +531,6 @@ void MainWindow::CreateComponents()
   });
   connect(m_breakpoint_widget, &BreakpointWidget::ShowMemory, m_memory_widget,
           &MemoryWidget::SetAddress);
-  connect(m_cheats_manager, &CheatsManager::ShowMemory, m_memory_widget, &MemoryWidget::SetAddress);
-  connect(m_cheats_manager, &CheatsManager::RequestWatch, request_watch);
 }
 
 void MainWindow::ConnectMenuBar()
@@ -591,6 +585,7 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::ShowSkylanderPortal, this, &MainWindow::ShowSkylanderPortal);
   connect(m_menu_bar, &MenuBar::ShowInfinityBase, this, &MainWindow::ShowInfinityBase);
   connect(m_menu_bar, &MenuBar::ShowWiiSpeakWindow, this, &MainWindow::ShowWiiSpeakWindow);
+  connect(m_menu_bar, &MenuBar::ShowLogitechMicWindow, this, &MainWindow::ShowLogitechMicWindow);
   connect(m_menu_bar, &MenuBar::ConnectWiiRemote, this, &MainWindow::OnConnectWiiRemote);
 
 #ifdef USE_RETRO_ACHIEVEMENTS
@@ -603,6 +598,7 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::StopRecording, this, &MainWindow::OnStopRecording);
   connect(m_menu_bar, &MenuBar::ExportRecording, this, &MainWindow::OnExportRecording);
   connect(m_menu_bar, &MenuBar::ShowTASInput, this, &MainWindow::ShowTASInput);
+  connect(m_menu_bar, &MenuBar::ConfigureOSD, this, &MainWindow::ShowOSDWindow);
 
   // View
   connect(m_menu_bar, &MenuBar::ShowList, m_game_list, &GameList::SetListView);
@@ -1211,7 +1207,7 @@ void MainWindow::SetFullScreenResolution(bool fullscreen)
   DEVMODE screen_settings;
   memset(&screen_settings, 0, sizeof(screen_settings));
   screen_settings.dmSize = sizeof(screen_settings);
-  sscanf(Config::Get(Config::MAIN_FULLSCREEN_DISPLAY_RES).c_str(), "%dx%d",
+  sscanf(Config::Get(Config::MAIN_FULLSCREEN_DISPLAY_RES).c_str(), "%lux%lu",
          &screen_settings.dmPelsWidth, &screen_settings.dmPelsHeight);
   screen_settings.dmBitsPerPel = 32;
   screen_settings.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
@@ -1350,6 +1346,12 @@ void MainWindow::ShowGeneralWindow()
 {
   ShowSettingsWindow();
   m_settings_window->SelectPane(SettingsWindowPaneIndex::General);
+}
+
+void MainWindow::ShowOSDWindow()
+{
+  ShowSettingsWindow();
+  m_settings_window->SelectPane(SettingsWindowPaneIndex::OnScreenDisplay);
 }
 
 void MainWindow::ShowAboutDialog()
@@ -1514,13 +1516,25 @@ void MainWindow::ShowWiiSpeakWindow()
   m_wii_speak_window->activateWindow();
 }
 
+void MainWindow::ShowLogitechMicWindow()
+{
+  if (!m_logitech_mic_window)
+  {
+    m_logitech_mic_window = new LogitechMicWindow();
+  }
+
+  m_logitech_mic_window->show();
+  m_logitech_mic_window->raise();
+  m_logitech_mic_window->activateWindow();
+}
+
 void MainWindow::StateLoad()
 {
   QString dialog_path = (Config::Get(Config::MAIN_CURRENT_STATE_PATH).empty()) ?
                             QDir::currentPath() :
                             QString::fromStdString(Config::Get(Config::MAIN_CURRENT_STATE_PATH));
   QString path = DolphinFileDialog::getOpenFileName(
-      this, tr("Select a File"), dialog_path, tr("All Save States (*.sav *.s##);; All Files (*)"));
+      this, tr("Select a File"), dialog_path, tr("All Save States (*.sav *.s??);; All Files (*)"));
   Config::SetBase(Config::MAIN_CURRENT_STATE_PATH, QFileInfo(path).dir().path().toStdString());
   if (!path.isEmpty())
     State::LoadAs(m_system, path.toStdString());
@@ -1532,7 +1546,7 @@ void MainWindow::StateSave()
                             QDir::currentPath() :
                             QString::fromStdString(Config::Get(Config::MAIN_CURRENT_STATE_PATH));
   QString path = DolphinFileDialog::getSaveFileName(
-      this, tr("Select a File"), dialog_path, tr("All Save States (*.sav *.s##);; All Files (*)"));
+      this, tr("Select a File"), dialog_path, tr("All Save States (*.sav *.s??);; All Files (*)"));
   Config::SetBase(Config::MAIN_CURRENT_STATE_PATH, QFileInfo(path).dir().path().toStdString());
   if (!path.isEmpty())
     State::SaveAs(m_system, path.toStdString());
@@ -2138,6 +2152,22 @@ void MainWindow::ShowResourcePackManager()
 
 void MainWindow::ShowCheatsManager()
 {
+  if (!m_cheats_manager)
+  {
+    m_cheats_manager = new CheatsManager(m_system, this);
+
+    connect(m_cheats_manager, &CheatsManager::ShowMemory, m_memory_widget,
+            &MemoryWidget::SetAddress);
+    connect(m_cheats_manager, &CheatsManager::RequestWatch, m_watch_widget, &WatchWidget::AddWatch);
+    connect(m_cheats_manager, &CheatsManager::OpenGeneralSettings, this,
+            &MainWindow::ShowGeneralWindow);
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+    connect(m_cheats_manager, &CheatsManager::OpenAchievementSettings, this,
+            &MainWindow::ShowAchievementSettings);
+#endif  // USE_RETRO_ACHIEVEMENTS
+  }
+
   m_cheats_manager->show();
 }
 
