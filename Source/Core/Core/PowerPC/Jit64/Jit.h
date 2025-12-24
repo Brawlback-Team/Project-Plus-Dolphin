@@ -20,7 +20,7 @@
 #include <optional>
 
 #include <rangeset/rangesizeset.h>
-
+#include <queue>
 #include "Common/CommonTypes.h"
 #include "Common/x64ABI.h"
 #include "Common/x64Emitter.h"
@@ -112,6 +112,9 @@ public:
                                       Gen::X64Reg reg_b, BitSet32 caller_save);
 
   bool Cleanup();
+
+  // Runs a function on the CPU during the next JIT compilation
+  void RegisterCPUFunction(std::function<void()> function);
 
   void GenerateConstantOverflow(bool overflow);
   void GenerateConstantOverflow(s64 val);
@@ -295,4 +298,7 @@ private:
   const bool m_im_here_log = false;
   std::map<u32, int> m_been_here;
   std::unique_ptr<HostDisassembler> m_disassembler;
+
+  std::mutex m_external_functions_mutex;
+  std::queue<std::function<void()>> m_external_functions{};
 };

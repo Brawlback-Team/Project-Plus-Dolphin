@@ -13,4 +13,7 @@ public:
   virtual void Run() = 0;
   virtual void SingleStep() = 0;
   virtual const char* GetName() const = 0;
+
+  // Brawlback
+  virtual void RegisterCPUFunction(std::function<void()> function) {}
 };

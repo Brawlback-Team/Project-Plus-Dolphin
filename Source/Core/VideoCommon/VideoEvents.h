@@ -20,6 +20,8 @@ using ConfigChangedEvent = Common::HookableEvent<"ConfigChanged", u32>;
 // An event called just before the first draw call of a frame
 using BeforeFrameEvent = Common::HookableEvent<"BeforeFrame">;
 
+using ActualBeforeFrameEvent = Common::HookableEvent<"ActualBeforeFrame">;
+
 // An event called after the frame XFB copy begins processing on the host GPU.
 // Useful for "once per frame" usecases.
 // Note: In a few rare cases, games do multiple XFB copies per frame and join them while presenting.

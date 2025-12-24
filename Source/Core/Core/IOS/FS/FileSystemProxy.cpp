@@ -333,6 +333,9 @@ std::optional<IPCReply> FSDevice::Read(const ReadWriteRequest& request)
 
 s32 FSCore::Read(u64 fd, u8* data, u32 size, std::optional<u32> ipc_buffer_addr, Ticks ticks)
 {
+  auto& system = Core::System::GetInstance();
+  auto& memory = system.GetMemory();
+  memory.HandleChangeProtection(data, size, PAGE_READWRITE);
   ticks.Add(IPC_OVERHEAD_TICKS);
 
   const Handle& handle = m_fd_map[fd];

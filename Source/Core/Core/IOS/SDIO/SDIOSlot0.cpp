@@ -23,6 +23,7 @@
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/VersionInfo.h"
 #include "Core/System.h"
+#include <winnt.h>
 
 namespace IOS::HLE
 {
@@ -286,7 +287,7 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
 
       if (!m_card.Seek(address, File::SeekOrigin::Begin))
         ERROR_LOG_FMT(IOS_SD, "Seek failed");
-
+      memory.HandleChangeProtection(memory.GetPointerForRange(req.addr, size), size, PAGE_READWRITE);
       if (m_card.ReadBytes(memory.GetPointerForRange(req.addr, size), size))
       {
         DEBUG_LOG_FMT(IOS_SD, "Outbuffer size {} got {}", rw_buffer_size, size);

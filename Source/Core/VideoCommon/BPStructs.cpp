@@ -42,6 +42,7 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/XFStateManager.h"
+#include "Core/NetPlayClient.h"
 
 using namespace BPFunctions;
 
@@ -357,7 +358,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
       //       display.
 
       auto& system = Core::System::GetInstance();
-      if (g_ActiveConfig.bImmediateXFB)
+      if (g_ActiveConfig.bImmediateXFB && !NetPlay::IsRollingBack())
       {
         // TODO: GetTicks is not sane from the GPU thread.
         // This value is currently used for frame dumping and the custom shader "time_ms" value.

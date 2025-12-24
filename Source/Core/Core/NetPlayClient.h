@@ -23,6 +23,7 @@
 #include "Core/NetPlayProto.h"
 #include "Core/SyncIdentifier.h"
 #include "InputCommon/GCPadStatus.h"
+#include "Brawlback/TimeSync.h"
 
 class BootSessionData;
 
@@ -43,6 +44,13 @@ struct SerializedWiimoteState;
 
 namespace NetPlay
 {
+// Brawlback
+struct Inputs
+{
+  GCPadStatus emu_pad;
+  BrawlbackPad game_pad;
+  s32 frame;
+};
 class NetPlayUI
 {
 public:
@@ -115,7 +123,7 @@ class NetPlayClient : public Common::TraversalClientClient
 {
 public:
   void ThreadFunc();
-  void SendAsync(sf::Packet&& packet, u8 channel_id = DEFAULT_CHANNEL);
+  void SendAsync(sf::Packet&& packet, u8 channel_id = DEFAULT_CHANNEL, _ENetPacketFlag flag = ENET_PACKET_FLAG_RELIABLE);
 
   NetPlayClient(const std::string& address, const u16 port, NetPlayUI* dialog,
                 const std::string& name, const NetTraversalConfig& traversal_config);
@@ -145,6 +153,7 @@ public:
     WiimoteEmu::SerializedWiimoteState* state;
   };
   bool WiimoteUpdate(const std::span<WiimoteDataBatchEntry>& entries);
+  GCPadStatus GetDefaultPad(int config);
   bool GetNetPads(int pad_nb, bool from_vi, GCPadStatus* pad_status);
 
   u64 GetInitialRTCValue() const;
@@ -211,11 +220,37 @@ public:
   static SyncIdentifier GetSDCardIdentifier();
   static SyncIdentifier GetBrawlFileIdentifier();
 
+  // Brawlback
+  void OnFrameStart(BrawlbackPad& pad);
+  bool IsRollingBack();
+  bool IsStarted();
+  bool IsInRollbackMode();
+  void HandleInputs(Inputs pad);
+  u32 GetLatestRemoteFrame(int local_player_port);
+  void StoreInputs(Inputs& pad, int local_player_port);
+  size_t GetInputsSize();
+  std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
+  std::optional<BrawlbackPad> GetPredictedInputs(int playerIdx, s32 frame);
+
+  // Only for use in NetPlayClient.cpp >:(
+  s32 current_frame = 0;
+  // Only for use in NetPlayClient.cpp >:(
+  s32 frame_to_stop_at = 0;
+  s32 latest_confirmed_frame = 0;
+  s32 advance_frames = 1;
+
+  bool done_fast_forwarding;
+  bool start_inputs = false;
+
+  std::unique_ptr<TimeSync> time_sync;
+
+
 protected:
   struct AsyncQueueEntry
   {
     sf::Packet packet;
     u8 channel_id = 0;
+    _ENetPacketFlag flag = ENET_PACKET_FLAG_RELIABLE;
   };
 
   void ClearBuffers();
@@ -298,7 +333,7 @@ private:
   void AddPadStateToPacket(int in_game_pad, const GCPadStatus& np, sf::Packet& packet);
   void AddWiimoteStateToPacket(int in_game_pad, const WiimoteEmu::SerializedWiimoteState& np,
                                sf::Packet& packet);
-  void Send(const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL);
+  void Send(const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL, _ENetPacketFlag flag  = ENET_PACKET_FLAG_RELIABLE);
   void Disconnect();
   bool Connect();
   void SendGameStatus();
@@ -350,6 +385,7 @@ private:
   void OnGameDigestResult(sf::Packet& packet);
   void OnGameDigestError(sf::Packet& packet);
   void OnGameDigestAbort();
+  void OnFrameAck(sf::Packet& packet);
 
   bool m_is_connected = false;
   ConnectionState m_connection_state = ConnectionState::Failure;
@@ -383,12 +419,39 @@ private:
   std::unique_ptr<IOS::HLE::FS::FileSystem> m_wii_sync_fs;
   std::vector<u64> m_wii_sync_titles;
   std::string m_wii_sync_redirect_folder;
+
+  // Brawlback
+  std::vector<std::vector<Inputs>> inputs;
+  std::vector<Inputs> predicted_inputs;
+  std::vector<int> pad_config;
+  int delay = 1;
+  std::condition_variable wait_for_inputs;
+  bool is_in_match = false;
+
+  bool LoadFromFrame(s32 origFrame, s32 frame);
+  void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
+  void PrintInputs(BrawlbackPad& pad);
 };
 
 void NetPlay_Enable(NetPlayClient* const np);
 void NetPlay_Disable();
 bool NetPlay_GetWiimoteData(const std::span<NetPlayClient::WiimoteDataBatchEntry>& entries);
 unsigned int NetPlay_GetLocalWiimoteForSlot(unsigned int slot);
+
+// Brawlback
+void OnFrameEnd();
+void OnFrameStart(BrawlbackPad& pad);
+// tells when Dolphin is actually mid rollback
+bool IsRollingBack();
+bool IsStarted();
+    // tells if we're using rollback networking
+bool IsInRollbackMode();
+s32 StopFrame();
+s32 CurrentFrame();
+s32 AdvanceFrames();
+void IncrementCurrentFrame();
+size_t FramesSize();
+
 
 extern NetPlayClient* netplay_client;
 }  // namespace NetPlay

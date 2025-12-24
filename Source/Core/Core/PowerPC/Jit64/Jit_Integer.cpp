@@ -34,6 +34,12 @@ void Jit64::GenerateConstantOverflow(s64 val)
                            val < std::numeric_limits<s32>::min());
 }
 
+void Jit64::RegisterCPUFunction(std::function<void()> function)
+{
+  std::lock_guard lock(m_external_functions_mutex);
+  m_external_functions.push(function);
+}
+
 void Jit64::GenerateConstantOverflow(bool overflow)
 {
   if (overflow)

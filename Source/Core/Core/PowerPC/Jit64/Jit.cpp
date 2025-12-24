@@ -47,6 +47,7 @@
 #include "Core/PowerPC/PPCAnalyst.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "Core/NetPlayClient.h"
 
 using namespace Gen;
 using namespace PowerPC;
@@ -892,6 +893,19 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   // TODO: Test if this or AlignCode16 make a difference from GetCodePtr
   b->normalEntry = AlignCode4();
+
+  // Brawlback
+  {
+    std::unique_lock lock(m_external_functions_mutex);
+    while (!m_external_functions.empty())
+    {
+      auto external_function = m_external_functions.front();
+      m_external_functions.pop();
+      lock.unlock();
+      external_function();
+      lock.lock();
+    }
+  }
 
   // Used to get a trace of the last few blocks before a crash, sometimes VERY useful
   if (m_im_here_debug)

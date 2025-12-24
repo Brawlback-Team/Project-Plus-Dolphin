@@ -157,6 +157,7 @@ private:
   QAction* m_savedata_load_and_write_action;
   QAction* m_savedata_all_wii_saves_action;
 
+  QAction* m_rollback_action;
   QAction* m_sync_codes_action;
   QAction* m_record_input_action;
   QAction* m_strict_settings_sync_action;

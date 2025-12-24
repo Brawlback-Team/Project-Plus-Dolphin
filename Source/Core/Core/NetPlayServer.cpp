@@ -875,41 +875,91 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
 
     while (!packet.endOfPacket())
     {
-      PadIndex map;
-      packet >> map;
-
-      // If the data is not from the correct player,
-      // then disconnect them.
-      if (m_pad_map.at(map) != player.pid)
+      if (IsInRollbackMode())
       {
-        return 1;
-      }
+        PadIndex map;
+        packet >> map;
 
-      GCPadStatus pad;
-      packet >> pad.button;
-      spac << map << pad.button;
-      if (!m_gba_config.at(map).enabled)
+        int pad_info;
+        packet >> pad_info;
+
+        // If the data is not from the correct player,
+        // then disconnect them.
+        if (m_pad_map.at(map) != player.pid)
+        {
+          return 1;
+        }
+        u8 sizeofFramedatas = 0;
+        packet >> sizeofFramedatas;
+        spac << map << pad_info << sizeofFramedatas;
+        PlayerId playerIndex = 0;
+        s32 maxFrame;
+        packet >> playerIndex;
+        packet >> maxFrame;
+        spac << playerIndex;
+        spac << maxFrame;
+        for (int i = 0; i < sizeofFramedatas; i++)
+        {
+          Inputs pad;
+          packet >> pad.game_pad.buttons >> pad.game_pad._buttons >> pad.game_pad.holdButtons >> pad.game_pad.rapidFireButtons >>
+              pad.game_pad.newPressedButtons >> pad.game_pad.releasedButtons >> pad.game_pad.stickX >> pad.game_pad.stickY >>
+              pad.game_pad.cStickX >> pad.game_pad.cStickY >> pad.game_pad.LAnalogue >> pad.game_pad.RAnalogue >> pad.game_pad.LTrigger >>
+              pad.game_pad.RTrigger;
+          packet >> pad.emu_pad.button >> pad.emu_pad.stickX >> pad.emu_pad.stickY >> pad.emu_pad.substickX
+                 >> pad.emu_pad.substickY >> pad.emu_pad.triggerLeft >> pad.emu_pad.triggerRight
+                 >> pad.emu_pad.analogA >> pad.emu_pad.analogB >> pad.emu_pad.isConnected;
+          packet >> pad.frame;
+          spac << pad.game_pad.buttons << pad.game_pad._buttons << pad.game_pad.holdButtons << pad.game_pad.rapidFireButtons <<
+              pad.game_pad.newPressedButtons << pad.game_pad.releasedButtons << pad.game_pad.stickX << pad.game_pad.stickY <<
+              pad.game_pad.cStickX << pad.game_pad.cStickY << pad.game_pad.LAnalogue << pad.game_pad.RAnalogue << pad.game_pad.LTrigger <<
+              pad.game_pad.RTrigger;
+          spac << pad.emu_pad.button << pad.emu_pad.stickX << pad.emu_pad.stickY <<
+              pad.emu_pad.substickX << pad.emu_pad.substickY << pad.emu_pad.triggerLeft <<
+              pad.emu_pad.triggerRight << pad.emu_pad.analogA << pad.emu_pad.analogB <<
+              pad.emu_pad.isConnected;
+          spac << pad.frame;
+        }
+
+        SendToClients(spac, player.pid);
+      }
+      else
       {
-        packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
-            pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
+        PadIndex map;
+        packet >> map;
 
-        spac << pad.analogA << pad.analogB << pad.stickX << pad.stickY << pad.substickX
-             << pad.substickY << pad.triggerLeft << pad.triggerRight << pad.isConnected;
-      }
-    }
+        // If the data is not from the correct player,
+        // then disconnect them.
+        if (m_pad_map.at(map) != player.pid)
+        {
+          return 1;
+        }
 
-    if (m_host_input_authority)
-    {
-      // Prevent crash before game stop if the golfer disconnects
-      if (m_current_golfer != 0)
-      {
-        if (const auto it = m_players.find(m_current_golfer); it != m_players.end())
-          Send(it->second.socket, spac);
+        GCPadStatus pad;
+        packet >> pad.button;
+        spac << map << pad.button;
+        if (!m_gba_config.at(map).enabled)
+        {
+          packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
+              pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
+
+          spac << pad.analogA << pad.analogB << pad.stickX << pad.stickY << pad.substickX
+               << pad.substickY << pad.triggerLeft << pad.triggerRight << pad.isConnected;
+        }
+
+        if (m_host_input_authority)
+        {
+          // Prevent crash before game stop if the golfer disconnects
+          if (m_current_golfer != 0)
+          {
+            if (const auto it = m_players.find(m_current_golfer); it != m_players.end())
+              Send(it->second.socket, spac);
+          }
+        }
+        else
+        {
+          SendToClients(spac, player.pid);
+        }
       }
-    }
-    else
-    {
-      SendToClients(spac, player.pid);
     }
   }
   break;
@@ -1314,7 +1364,19 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     }
   }
   break;
+  case MessageID::AckInputs:
+  {
+    FrameAck frame;
+    packet >> frame.frame;
+    packet >> frame.playerIdx;
+    sf::Packet spac;
+    spac << MessageID::AckInputs;
+    spac << frame.frame;
+    spac << frame.playerIdx;
 
+    SendToClients(spac, player.pid);
+    break;
+  }
   default:
     PanicAlertFmtT("Unknown message with id:{0} received from player:{1} Kicking player!",
                    static_cast<u8>(mid), player.pid);
@@ -1525,6 +1587,7 @@ bool NetPlayServer::SetupNetSettings()
   settings.strict_settings_sync = Config::Get(Config::NETPLAY_STRICT_SETTINGS_SYNC);
   settings.sync_codes = Config::Get(Config::NETPLAY_SYNC_CODES);
   settings.golf_mode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "golf";
+  settings.m_RollbackMode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "rollback";
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   settings.is_spectator = Config::Get(Config::NETPLAY_IS_SPECTATOR);
@@ -1734,6 +1797,7 @@ bool NetPlayServer::StartGame()
   spac << region;
   spac << m_settings.sync_codes;
 
+  spac << m_settings.m_RollbackMode;
   spac << m_settings.golf_mode;
   spac << m_settings.use_fma;
   spac << m_settings.hide_remote_gbas;

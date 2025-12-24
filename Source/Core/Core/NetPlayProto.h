@@ -110,6 +110,8 @@ struct NetSettings
   bool use_fma = false;
   bool hide_remote_gbas = false;
 
+  bool m_RollbackMode = false;
+
   Sram sram;
 
   // These aren't sent over the network directly
@@ -193,6 +195,7 @@ enum class MessageID : u8
 
   SyncSaveData = 0xF1,
   SyncCodes = 0xF2,
+  AckInputs = 0xF3,
 };
 
 enum class ConnectionError : u8

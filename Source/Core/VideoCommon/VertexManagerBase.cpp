@@ -44,6 +44,7 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
+#include "Core/NetPlayClient.h"
 
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 

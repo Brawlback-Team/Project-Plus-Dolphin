@@ -26,6 +26,7 @@ struct WindowsMemoryFunctions
   void* m_address_UnmapViewOfFileEx = nullptr;
   void* m_address_VirtualAlloc2 = nullptr;
   void* m_address_MapViewOfFile3 = nullptr;
+  void* m_address_VirtualProtect = nullptr;
 };
 #endif
 
@@ -114,6 +115,16 @@ public:
   /// @param size Size passed to the corresponding MapInMemoryRegion() call.
   ///
   void UnmapFromMemoryRegion(void* view, size_t size);
+
+  // Brawlback
+  ///
+  /// Virtual protect a section from the memory region previously mapped by CreateView.
+  ///
+  /// @param data Pointer to data to protect.
+  /// @param size Size of the protection.
+  /// @param flag What new permission to protect with.
+  ///
+  bool VirtualProtectMemoryRegion(void* data, size_t size, u32 flag);
 
 private:
 #ifdef _WIN32

@@ -56,6 +56,22 @@ struct SConfig
 
   DiscIO::Region m_region;
 
+  // Slippi
+  bool m_brawlbackSaveReplays = true;
+  std::string m_brawlbackReplayDir;
+  bool m_slippiForceNetplayPort = false;
+  int m_slippiNetplayPort;
+  bool m_slippiForceLanIp = false;
+  bool m_slippiCustomMMEnabled = true;
+  std::string m_slippiCustomMMServerURL = "lylat.gg";
+  std::string m_slippiCustomMMReportingURL = "https://lylat.gg/reports";
+  std::string m_slippiLanIp = "";
+  bool m_meleeUserIniBootstrapped = false;
+  bool m_blockingPipes = false;
+  bool m_coutEnabled = false;
+  int m_delayFrames = 2;
+  std::string m_details_game_id = "";
+
   // files
   std::string m_strBootROM;
   std::string m_strSRAM;
