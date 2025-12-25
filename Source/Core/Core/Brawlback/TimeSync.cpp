@@ -1,6 +1,9 @@
 
 #include "TimeSync.h"
 #include "VideoCommon/OnScreenDisplay.h"
+#include <mutex>
+#include <Common/Timer.h>
+#include <Common/Logging/Log.h>
 
 // pretty much all of this time sync stuff was taken from slippi
 // Huge thanks to them <3

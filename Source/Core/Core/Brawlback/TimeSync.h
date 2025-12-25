@@ -1,11 +1,27 @@
 #pragma once
-
-#include "Core/Brawlback/Netplay/Netplay.h"
+#include "include/brawlback-common/BrawlbackConstants.h"
+#include <deque>
 
 constexpr float MS_IN_FRAME = 1000 / 60;
 constexpr s32 USEC_IN_FRAME = MS_IN_FRAME * 1000;
 
 namespace Brawlback {
+
+struct FrameAck
+{
+  u8 playerIdx;
+  u32 frame;
+};
+struct FrameOffsetData
+{
+  int idx;
+  std::vector<s32> buf;
+};
+struct FrameTiming
+{
+  int frame;
+  s64 timeUs;
+};
 class TimeSync {
 
 public:

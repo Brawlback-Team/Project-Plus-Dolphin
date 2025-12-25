@@ -89,6 +89,7 @@
 #include "VideoCommon/VideoEvents.h"
 #include <incremental-rollback/incremental_rb.h>
 #include "Brawlback/TimeSync.h"
+#include "brawlback-common/BrawlbackPad.h"
 
 namespace NetPlay
 {
@@ -98,7 +99,6 @@ static std::mutex crit_netplay_client;
 NetPlayClient* netplay_client = nullptr;
 static bool s_si_poll_batching = false;
 static std::atomic<bool> is_rollingback;
-static std::atomic<bool> dirtypages_init;
 static std::atomic<bool> is_stalled;
 static std::atomic<bool> game_started;
 static std::atomic<bool> is_predicting;
@@ -1123,7 +1123,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
   current_frame = 0;
   if (!time_sync)
   {
-    time_sync = std::make_unique<TimeSync>();
+    time_sync = std::make_unique<Brawlback::TimeSync>();
   }
   time_sync->startGame(static_cast<u8>(inputs.size()));
 
@@ -2111,7 +2111,7 @@ void NetPlayClient::OnFrameAck(sf::Packet& packet)
   packet >> frame;
   packet >> playerIdx;
 
-  FrameAck frameAck;
+  Brawlback::FrameAck frameAck;
   frameAck.frame = frame;
   frameAck.playerIdx = playerIdx;
   if (playerIdx != m_local_player->pid - 1)  // should be local player

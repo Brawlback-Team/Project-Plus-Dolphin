@@ -3,20 +3,25 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "Core/Brawlback/BrawlbackUtility.h"
-#include "Core/Brawlback/Netplay/Matchmaking.h"
-#include "Core/Brawlback/Netplay/Netplay.h"
-#include "Core/Brawlback/Savestate.h"
 #include "Core/Brawlback/TimeSync.h"
 #include "Core/HW/EXI/EXI_Device.h"
-#ifdef _WIN32
-#include <Qos2.h>
-#endif
 using namespace Brawlback;
+
+enum EXICommand : u8
+{
+  CMD_UNKNOWN = 0,
+  CMD_END_FRAME = 1,
+  CMD_END_LOOP = 2,
+  CMD_START_LOOP = 3,
+  CMD_GET_PORT = 4,
+  CMD_GET_REMOTE_INPUTS = 5,
+  CMD_GET_LOCAL_INPUTS = 6
+};
 
 class CEXIBrawlback : public ExpansionInterface::IEXIDevice
 {
 public:
+  explicit CEXIBrawlback(Core::System& system);
   void DMAWrite(u32 address, u32 size) override;
   void DMARead(u32 address, u32 size) override;
 
@@ -35,4 +40,5 @@ private:
 
 protected:
   void TransferByte(u8& byte) override;
+
 };

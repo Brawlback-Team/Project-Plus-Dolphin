@@ -24,6 +24,7 @@
 #include "Core/SyncIdentifier.h"
 #include "InputCommon/GCPadStatus.h"
 #include "Brawlback/TimeSync.h"
+#include "Brawlback/include/brawlback-common/BrawlbackPad.h"
 
 class BootSessionData;
 
@@ -242,7 +243,7 @@ public:
   bool done_fast_forwarding;
   bool start_inputs = false;
 
-  std::unique_ptr<TimeSync> time_sync;
+  std::unique_ptr<Brawlback::TimeSync> time_sync;
 
 
 protected:

@@ -21,6 +21,21 @@
 // --- Mutexes
 std::mutex read_queue_mutex = std::mutex();
 // -------------------------------
+// https://mklimenko.github.io/english/2018/08/22/robust-endian-swap/
+template <typename T>
+T swap_endian(T val)
+{
+  union U
+  {
+    T val;
+    std::array<std::uint8_t, sizeof(T)> raw;
+  } src, dst;
+
+  src.val = val;
+  std::reverse_copy(src.raw.begin(), src.raw.end(), dst.raw.begin());
+  val = dst.val;
+  return val;
+}
 
 void CEXIBrawlback::handleEndFrame()
 {
@@ -38,7 +53,15 @@ void CEXIBrawlback::handleEndLoop()
     }
   }
 }
-
+inline void SwapBrawlbackPadDataEndianess(BrawlbackPad& pad)
+{
+  pad._buttons = swap_endian(pad._buttons);
+  pad.buttons = swap_endian(pad.buttons);
+  pad.holdButtons = swap_endian(pad.holdButtons);
+  pad.rapidFireButtons = swap_endian(pad.rapidFireButtons);
+  pad.releasedButtons = swap_endian(pad.releasedButtons);
+  pad.newPressedButtons = swap_endian(pad.newPressedButtons);
+}
 void CEXIBrawlback::handleStartLoop(u8* payload)
 {
   BrawlbackPad pad;
@@ -109,6 +132,9 @@ void CEXIBrawlback::handleGetInputs(bool local)
   this->read_queue.clear();
   auto dataPtr = reinterpret_cast<u8*>(&game_pad);
   this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(BrawlbackPad));
+}
+CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
+{
 }
 // recieve data from game into emulator
 void CEXIBrawlback::DMAWrite(u32 address, u32 size)

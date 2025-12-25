@@ -75,6 +75,8 @@
 
 #include "UICommon/GameFile.h"
 
+#include "Brawlback/TimeSync.h"
+
 #if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -1366,7 +1368,7 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
   break;
   case MessageID::AckInputs:
   {
-    FrameAck frame;
+    Brawlback::FrameAck frame;
     packet >> frame.frame;
     packet >> frame.playerIdx;
     sf::Packet spac;

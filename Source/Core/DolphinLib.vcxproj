@@ -82,22 +82,15 @@
     <Text Include="$(BuildInfoTemplate)" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Core\Brawlback\BrawlbackUtility.cpp" />
     <ClCompile Include="Core\Brawlback\include\incremental-rollback\incremental_rb.cpp" />
     <ClCompile Include="Core\Brawlback\include\incremental-rollback\job_system.cpp" />
     <ClCompile Include="Core\Brawlback\include\incremental-rollback\mem.cpp" />
     <ClCompile Include="Core\Brawlback\include\incremental-rollback\tiny_arena.cpp" />
-    <ClCompile Include="Core\Brawlback\Netplay\Matchmaking.cpp" />
-    <ClCompile Include="Core\Brawlback\Netplay\Netplay.cpp" />
-    <ClCompile Include="Core\Brawlback\Savestate.cpp" />
-    <ClCompile Include="Core\Brawlback\SlippiUtility.cpp" />
     <ClCompile Include="Core\Brawlback\TimeSync.cpp" />
     <ClCompile Include="Core\HW\EXI\EXI_Brawlback.cpp" />
     <ClCompile Include="GP.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Core\Brawlback\BrawlbackUtility.h" />
-    <ClInclude Include="Core\Brawlback\Brawltypes.h" />
     <ClInclude Include="Core\Brawlback\include\boost\algorithm\string\case_conv.hpp" />
     <ClInclude Include="Core\Brawlback\include\boost\algorithm\string\compare.hpp" />
     <ClInclude Include="Core\Brawlback\include\boost\algorithm\string\concept.hpp" />
@@ -1821,10 +1814,6 @@
     <ClInclude Include="Core\Brawlback\include\incremental-rollback\tiny_arena.h" />
     <ClInclude Include="Core\Brawlback\include\incremental-rollback\util.h" />
     <ClInclude Include="Core\Brawlback\include\json.hpp" />
-    <ClInclude Include="Core\Brawlback\Netplay\Matchmaking.h" />
-    <ClInclude Include="Core\Brawlback\Netplay\Netplay.h" />
-    <ClInclude Include="Core\Brawlback\Savestate.h" />
-    <ClInclude Include="Core\Brawlback\SlippiUtility.h" />
     <ClInclude Include="Core\Brawlback\TimeSync.h" />
     <ClInclude Include="Core\HW\EXI\EXI_Brawlback.h" />
   </ItemGroup>
