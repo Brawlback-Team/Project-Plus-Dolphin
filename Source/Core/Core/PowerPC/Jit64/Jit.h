@@ -118,9 +118,6 @@ public:
 
   bool Cleanup();
 
-  // Runs a function on the CPU during the next JIT compilation
-  void RegisterCPUFunction(std::function<void()> function);
-
   void GenerateConstantOverflow(bool overflow);
   void GenerateConstantOverflow(s64 val);
   void GenerateOverflow(Gen::CCFlags cond = Gen::CCFlags::CC_NO);
@@ -307,7 +304,4 @@ private:
   const bool m_im_here_log = false;
   std::map<u32, int> m_been_here;
   std::unique_ptr<HostDisassembler> m_disassembler;
-
-  std::mutex m_external_functions_mutex;
-  std::queue<std::function<void()>> m_external_functions{};
 };

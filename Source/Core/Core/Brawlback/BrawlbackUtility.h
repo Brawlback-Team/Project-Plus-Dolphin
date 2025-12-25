@@ -50,55 +50,12 @@ namespace Brawlback {
     enum EXICommand : u8
     {
       CMD_UNKNOWN = 0,
-
-      CMD_ONLINE_INPUTS = 1,  // sending inputs from game to emulator
-      CMD_CAPTURE_SAVESTATE = 2,
-      CMD_LOAD_SAVESTATE = 3,
-      CMD_SEND_ALLOCS = 30,
-      CMD_SEND_DEALLOCS = 31,
-      CMD_SEND_DUMPALL = 32,
-      CMD_SEND_FRAMECOUNTERLOC = 33,
-      CMD_CANCEL_MATCHMAKING = 34,
-      CMD_TRACK_EF_PARTICLE = 35,
-      CMD_UNTRACK_EF_PARTICLE = 36,
-      CMD_COPY_EFFECTS_HEAP = 37,
-      CMD_REPLACE_EFFECTS_HEAP = 38,
-      CMD_END_FRAME = 40,
-      CMD_END_LOOP = 41,
-      CMD_START_LOOP = 42,
-      CMD_GET_PORT = 43,
-      CMD_GET_REMOTE_INPUTS = 44,
-      CMD_GET_LOCAL_INPUTS = 45,
-
-      CMD_FIND_OPPONENT = 5,
-      CMD_START_MATCH = 13,
-      CMD_SETUP_PLAYERS = 14,
-      CMD_FRAMEDATA = 15,  // game is requesting inputs for some frame
-      CMD_TIMESYNC = 16,
-      CMD_ROLLBACK = 17,
-      CMD_FRAMEADVANCE = 18,
-      CMD_UPDATESYNC = 39,
-
-      // REPLAYS
-      CMD_REPLAY_START_REPLAYS_STRUCT = 19,
-      CMD_REPLAY_REPLAYS_STRUCT = 20,
-      CMD_REPLAYS_REPLAYS_END = 21,
-      CMD_GET_NEXT_FRAME = 22,
-      CMD_BAD_INDEX = 23,
-      CMD_GET_NUM_REPLAYS = 24,
-      CMD_SET_CUR_INDEX = 25,
-      CMD_GET_START_REPLAY = 26,
-
-      CMD_MATCH_END = 4,
-      CMD_SET_MATCH_SELECTIONS = 6,
-
-      CMD_TIMER_START = 7,
-      CMD_TIMER_END = 8,
-      CMD_UPDATE = 9,
-      
-      CMD_GET_ONLINE_STATUS = 10,
-      CMD_CLEANUP_CONNECTION = 11,
-      CMD_GET_NEW_SEED = 12,
+      CMD_END_FRAME = 1,
+      CMD_END_LOOP = 2,
+      CMD_START_LOOP = 3,
+      CMD_GET_PORT = 4,
+      CMD_GET_REMOTE_INPUTS = 5,
+      CMD_GET_LOCAL_INPUTS = 6
     };
 
     enum NetPacketCommand : u8 

@@ -114,7 +114,6 @@ public:
 
   // Brawlback -- Misc
   std::map<u64, DirtyPage>& GetDirtyPages() { return m_dirty_pages; }
-  bool GetTrackMemoryPages() { return m_track_memory_pages; }
   std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
   std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
   u32 GetEmulatedAddress(u8* address);
@@ -124,12 +123,10 @@ public:
   bool IsPageDirty(uintptr_t page_address);
   void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address);
   void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty);
-  void ResetDirtyPages();
   bool HandleChangeProtection(void* address, size_t size, u32 flag);
   bool HandleFault(uintptr_t fault_address);
   u64 GetDirtyPageIndexFromAddress(u64 address);
   void WriteProtectPhysicalMemoryRegions();
-  void ResetProtectPhysicalMemoryRegions();
   void InitDirtyPages();
   bool IsAddressInEmulatedMemory(uintptr_t address);
   bool IsAddressInFakeVMEML1Cache(uintptr_t address);
@@ -287,7 +284,6 @@ private:
   Core::System& m_system;
 
   std::map<u64, DirtyPage> m_dirty_pages;
-  bool m_track_memory_pages = false;
 
   void InitMMIO(bool is_wii);
 };

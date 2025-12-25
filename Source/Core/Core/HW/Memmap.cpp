@@ -704,11 +704,6 @@ void MemoryManager::SetAddressDirtyBit(uintptr_t address, size_t size, bool dirt
     m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].address = address;
   }
 }
-
-void MemoryManager::ResetDirtyPages()
-{
-  ResetProtectPhysicalMemoryRegions();
-}
 u64 MemoryManager::GetDirtyPageIndexFromAddress(u64 address)
 {
   return reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)address, Common::PageSize()));
@@ -811,10 +806,7 @@ bool MemoryManager::HandleFault(uintptr_t fault_address)
           {
             return false;
           }
-          else
-          {
-            break;
-          }
+          break;
         }
       }
     }
@@ -879,68 +871,6 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
       PanicAlertFmt("Memory::WriteProtectPhysicalMemoryRegions(): Failed to guard protect for "
                     "this block of memory at 0x{:08X}.",
                     reinterpret_cast<uintptr_t>(entry.mapped_pointer));
-    }
-  }
-}
-void MemoryManager::ResetProtectPhysicalMemoryRegions()
-{
-  const size_t page_size = Common::PageSize();
-
-  for (auto& entry : m_physical_regions)
-  {
-    if (!entry.active)
-      continue;
-
-    intptr_t out_pointer = reinterpret_cast<uintptr_t>(*entry.out_pointer);
-    if (IsAddressInEmulatedMemory(out_pointer))
-    {
-      intptr_t out_pointer_pte = reinterpret_cast<uintptr_t>(
-          Common::GetPageAddress(*entry.out_pointer, Common::PageSize()));
-      ;
-      size_t size = entry.size + (out_pointer_pte - out_pointer);
-      for (unsigned long long page = out_pointer_pte; page < out_pointer_pte + size;
-           page += page_size)
-      {
-        auto& dirty_page = m_dirty_pages[page];
-        if (dirty_page.dirty)
-        {
-          dirty_page.dirty = false;
-          if (!HandleChangeProtection(reinterpret_cast<u8*>(page), 0x1, PAGE_READONLY))
-          {
-            PanicAlertFmt(
-                "Memory::WriteProtectPhysicalMemoryRegions(): Failed to guard protect for "
-                "this block of memory at 0x{:08X}.",
-                reinterpret_cast<uintptr_t>(*entry.out_pointer));
-          }
-
-          auto page_emulated_address = GetEmulatedAddress(reinterpret_cast<u8*>(page));
-          uintptr_t logical_address;
-          for (size_t i = 0; i < m_logical_mapped_entries.size() - 1; i++)
-          {
-            auto& mapped_entry = m_logical_mapped_entries[i];
-            if (page_emulated_address >= mapped_entry.logical_base &&
-                page_emulated_address < m_logical_mapped_entries[i + 1].logical_base)
-            {
-              logical_address = page_emulated_address +
-                                reinterpret_cast<uintptr_t>(mapped_entry.mapped_pointer) -
-                                mapped_entry.logical_base;
-              if (!HandleChangeProtection(reinterpret_cast<void*>(logical_address), 0x1,
-                                          PAGE_READONLY))
-              {
-                PanicAlertFmt(
-                    "Memory::WriteProtectPhysicalMemoryRegions(): Failed to guard protect for "
-                    "this block of memory at 0x{:08X}.",
-                    logical_address);
-              }
-              else
-              {
-                dirty_page.address = logical_address;
-                break;
-              }
-            }
-          }
-        }
-      }
     }
   }
 }
