@@ -258,7 +258,7 @@ void GeneralWidget::AddDescriptions()
       "<br><br><b>Custom (Stretch)</b>: Similar to `Custom`, but stretches the image to the "
       "specified aspect ratio. This will usually distort the image's proportions, and should not "
       "be used under normal circumstances."
-      "<br><br><dolphin_emphasis>If unsure, select Auto.</dolphin_emphasis>");
+      "<br><br><dolphin_emphasis>If unsure, select Force 69:40 (P+ Widescreen).</dolphin_emphasis>");
   static const char TR_VSYNC_DESCRIPTION[] = QT_TR_NOOP(
       "Waits for vertical blanks in order to prevent tearing.<br><br>Decreases performance "
       "if emulation speed is below 100%.<br><br><dolphin_emphasis>If unsure, leave "
@@ -267,7 +267,7 @@ void GeneralWidget::AddDescriptions()
   static const char TR_SHADER_COMPILE_SPECIALIZED_DESCRIPTION[] =
       QT_TR_NOOP("Ubershaders are never used. Stuttering will occur during shader "
                  "compilation, but GPU demands are low.<br><br>Recommended for low-end hardware. "
-                 "<br><br><dolphin_emphasis>If unsure, select this mode.</dolphin_emphasis>");
+                 "<br><br><dolphin_emphasis>Not recommended, use other options.</dolphin_emphasis>");
   // The "very powerful GPU" mention below is by 2021 PC GPU standards
   static const char TR_SHADER_COMPILE_EXCLUSIVE_UBER_DESCRIPTION[] = QT_TR_NOOP(
       "Ubershaders will always be used. Provides a near stutter-free experience at the cost of "
@@ -282,15 +282,15 @@ void GeneralWidget::AddDescriptions()
   static const char TR_SHADER_COMPILE_SKIP_DRAWING_DESCRIPTION[] = QT_TR_NOOP(
       "Prevents shader compilation stuttering by not rendering waiting objects. Can work in "
       "scenarios where Ubershaders doesn't, at the cost of introducing visual glitches and broken "
-      "effects.<br><br><dolphin_emphasis>Not recommended, only use if the other "
-      "options give poor results.</dolphin_emphasis>");
+      "effects.<br><br><dolphin_emphasis>Use this option if you encounter excessive stuttering "
+      "with other options.</dolphin_emphasis>");
   static const char TR_SHADER_COMPILE_BEFORE_START_DESCRIPTION[] =
       QT_TR_NOOP("Waits for all shaders to finish compiling before starting a game. Enabling this "
                  "option may reduce stuttering or hitching for a short time after the game is "
                  "started, at the cost of a longer delay before the game starts. For systems with "
                  "two or fewer cores, it is recommended to enable this option, as a large shader "
                  "queue may reduce frame rates.<br><br><dolphin_emphasis>Otherwise, if "
-                 "unsure, leave this unchecked.</dolphin_emphasis>");
+                 "unsure, leave this checked.</dolphin_emphasis>");
 
   m_backend_combo->SetTitle(tr("Backend"));
   m_backend_combo->SetDescription(

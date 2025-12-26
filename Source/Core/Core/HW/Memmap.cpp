@@ -678,6 +678,7 @@ void MemoryManager::Write_U64_Swap(u64 value, u32 address)
 }
 
 // Brawlback
+#ifdef _WIN32
 bool MemoryManager::IsAddressDirty(uintptr_t address)
 {
   return m_dirty_pages[GetDirtyPageIndexFromAddress(address)].dirty;
@@ -874,5 +875,5 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
     }
   }
 }
-
+#endif
 }  // namespace Memory

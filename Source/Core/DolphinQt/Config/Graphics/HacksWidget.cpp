@@ -203,7 +203,7 @@ void HacksWidget::AddDescriptions()
       "expect all XFB copies to be displayed. However, turning this setting on reduces latency."
       "<br><br>Enabling this also forces an effect equivalent to the "
       "Skip Presenting Duplicate Frames setting."
-      "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>");
+      "<br><br><dolphin_emphasis>If unsure, leave this checked.</dolphin_emphasis>");
   static const char TR_SKIP_DUPLICATE_XFBS_DESCRIPTION[] = QT_TR_NOOP(
       "Skips presentation of duplicate frames (XFB copies) in 25fps/30fps games. "
       "This may improve performance on low-end devices, while making frame pacing less consistent."

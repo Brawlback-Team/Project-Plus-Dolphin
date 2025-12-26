@@ -3,6 +3,7 @@
 
 #pragma once
 
+#define GEKKONET_STATIC
 #include <SFML/Network/Packet.hpp>
 #include <array>
 #include <chrono>
@@ -25,6 +26,10 @@
 #include "InputCommon/GCPadStatus.h"
 #include "Brawlback/TimeSync.h"
 #include "Brawlback/include/brawlback-common/BrawlbackPad.h"
+#include "Brawlback/include/json.hpp"
+#include "Brawlback/include/GekkoNet/GekkoLib/include/gekkonet.h"
+
+using json = nlohmann::json;
 
 class BootSessionData;
 
@@ -46,11 +51,54 @@ struct SerializedWiimoteState;
 namespace NetPlay
 {
 // Brawlback
+// Callback codes pushed into the queue for each GekkoGameEvent type.
+// The game reads this list via CMD_GET_CALLBACK_CODES and calls the
+// corresponding CMD_EXECUTE_* command for each code.
+enum GekkoCallbackCode : u8
+{
+  CALLBACK_NONE = 0,
+  CALLBACK_SAVE = 1,
+  CALLBACK_LOAD = 2,
+  CALLBACK_ADVANCE = 3,
+  CALLBACK_ADVANCE_ROLLBACK = 4,
+  CALLBACK_ADVANCE_RUNAHEAD = 5
+};
+
 struct Inputs
 {
   GCPadStatus emu_pad;
   BrawlbackPad game_pad;
-  s32 frame;
+};
+struct CoreRollbackState
+{
+  unsigned char* buffer = nullptr;
+  int len = 0;
+  int checksum = 0;
+  int frame = 0;
+};
+struct PendingGekkoSave
+{
+  int frame = 0;
+  unsigned int* checksum = nullptr;
+  unsigned int* stateLen = nullptr;
+  unsigned char* state = nullptr;
+};
+struct PendingGekkoLoad
+{
+  int frame = 0;
+  unsigned int state_len = 0;
+  unsigned char* state = nullptr;
+};
+struct PendingGekkoAdvance
+{
+  int frame = 0;
+  bool rolling_back = false;
+  bool running_ahead = false;
+};
+struct DynamicSaveRegion
+{
+  u32 address = 0;
+  u32 size = 0;
 };
 class NetPlayUI
 {
@@ -75,6 +123,7 @@ public:
   virtual void OnMinimumPadBufferChanged(u32 buffer) = 0;
   virtual void OnPlayerPadBufferChanged(u32 buffer) = 0;
   virtual void OnHostInputAuthorityChanged(bool enabled) = 0;
+  virtual void OnRollbackModeChanged(bool enabled) = 0;
   virtual void OnDesync(u32 frame, const std::string& player) = 0;
   virtual void OnConnectionLost() = 0;
   virtual void OnConnectionError(const std::string& message) = 0;
@@ -128,6 +177,7 @@ public:
 
   NetPlayClient(const std::string& address, const u16 port, NetPlayUI* dialog,
                 const std::string& name, const NetTraversalConfig& traversal_config);
+  bool load_gekko_state(GekkoGameEvent* event);
   ~NetPlayClient() override;
 
   std::vector<const Player*> GetPlayers();
@@ -221,23 +271,38 @@ public:
   static SyncIdentifier GetSDCardIdentifier();
   static SyncIdentifier GetBrawlFileIdentifier();
 
+  bool process_pending_saves();
+
+  int rollback_execute_end_frame();
+
   // Brawlback
   void OnFrameStart(BrawlbackPad& pad);
   bool IsRollingBack();
   bool IsStarted();
   bool IsInRollbackMode();
-  void HandleInputs(Inputs pad);
   u32 GetLatestRemoteFrame(int local_player_port);
-  void StoreInputs(Inputs& pad, int local_player_port);
-  size_t GetInputsSize();
+  void StoreInputs(Inputs pad, int local_player_port);
   std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
-  std::optional<BrawlbackPad> GetPredictedInputs(int playerIdx, s32 frame);
+  const Inputs* GetBackRemoteInputs(int playerIdx);
+  BrawlbackPad GetPredictedInputs(int playerIdx, s32 frame);
+  void SendRollbackVerification(s32 frame, u64 hash);
+  GCPadStatus GetInputForFrame(int player_port, s32 frame) const;
+  BrawlbackPad GetBrawlbackInputForFrame(int player_port, s32 frame) const;
+
+  // Callback-code queue: populated by OnFrameStart, consumed by EXI handlers
+  std::vector<u8> PopCallbackCodes();
+  bool ExecutePendingSave();
+  bool ExecutePendingLoad();
+  int GetPendingLoadFrame() const;
+  s32 ExecuteAdvanceFrame();
+  void SetDynamicSaveRegions(int frame, std::vector<DynamicSaveRegion> regions);
+  const std::vector<DynamicSaveRegion>& GetDynamicSaveRegions(int frame) const;
 
   // Only for use in NetPlayClient.cpp >:(
   s32 current_frame = 0;
   // Only for use in NetPlayClient.cpp >:(
   s32 frame_to_stop_at = 0;
-  s32 latest_confirmed_frame = 0;
+  std::array<s32, 4> latest_confirmed_frame = {0, 0, 0, 0};  // Per-player tracking
   s32 advance_frames = 1;
 
   bool done_fast_forwarding;
@@ -245,7 +310,23 @@ public:
 
   std::unique_ptr<Brawlback::TimeSync> time_sync;
 
+  void NotifyDesync(int player_index, s32 frame);
+  std::string GetPlayerName(int player_index);
 
+  // Desync debugging
+  struct DesyncDebugInfo
+  {
+    s32 frame;
+    int player_index;
+    std::string savestate_path;
+    std::chrono::steady_clock::time_point timestamp;
+    BrawlbackPad predicted_pad;
+    BrawlbackPad actual_pad;
+    u64 state_hash;
+  };
+
+  std::vector<DesyncDebugInfo> m_desync_history;
+  static constexpr size_t MAX_DESYNC_HISTORY = 10;
 protected:
   struct AsyncQueueEntry
   {
@@ -290,6 +371,7 @@ protected:
   // speeding up the game to drain the buffer.
   unsigned int m_minimum_buffer_size = 2;
   bool m_host_input_authority = false;
+  bool m_rollback_mode = false;
   PlayerId m_current_golfer = 1;
 
   // This bool will stall the client at the start of GetNetPads, used for switching input control
@@ -342,6 +424,8 @@ private:
   void DisplayPlayersPing();
   u32 GetPlayersMaxPing() const;
 
+  u32 CalculatePingVariance();
+
   void OnData(sf::Packet& packet);
   void OnPlayerJoin(sf::Packet& packet);
   void OnPlayerLeave(sf::Packet& packet);
@@ -355,14 +439,23 @@ private:
   void OnGBAConfig(sf::Packet& packet);
   void OnPadData(sf::Packet& packet);
   void OnPadHostData(sf::Packet& packet);
+  void OnGekkoNetData(sf::Packet& packet);
   void OnWiimoteData(sf::Packet& packet);
   void OnPadBufferMinimum(sf::Packet& packet);
   void OnPadBufferPlayer(sf::Packet& packet);
   void OnHostInputAuthority(sf::Packet& packet);
+  void OnRollbackMode(sf::Packet& packet);
   void OnGolfSwitch(sf::Packet& packet);
   void OnGolfPrepare(sf::Packet& packet);
   void OnChangeGame(sf::Packet& packet);
   void OnGameStatus(sf::Packet& packet);
+  void ToJson(json& j, const BrawlbackPad& i);
+  void ToJson(json& j, const GCPadStatus& i);
+  void ToJson(json& j, const Inputs& i);
+  void FromJson(const json& j, BrawlbackPad& i);
+  void FromJson(const json& j, GCPadStatus& i);
+  void FromJson(const json& j, Inputs& i);
+  void CloseSession();
   void OnStartGame(sf::Packet& packet);
   void OnStopGame(sf::Packet& packet);
   void OnPowerButton();
@@ -422,16 +515,52 @@ private:
   std::string m_wii_sync_redirect_folder;
 
   // Brawlback
-  std::vector<std::vector<Inputs>> inputs;
-  std::vector<Inputs> predicted_inputs;
   std::vector<int> pad_config;
-  int delay = 1;
+  int delay = 2;
   std::condition_variable wait_for_inputs;
   bool is_in_match = false;
 
   bool LoadFromFrame(s32 origFrame, s32 frame);
-  void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
   void PrintInputs(BrawlbackPad& pad);
+  void HandleInputs(Inputs pad);
+
+  void apply_gekko_frame_pacing();
+
+  bool submit_local_input(Inputs* input, size_t playerIndex);
+
+  void set_environment_value(const char* name, const std::string& value);
+
+  std::string make_rollback_log_prefix();
+
+  std::filesystem::path create_rollback_log_directory();
+
+  void reset_rollback_log_session();
+
+  std::filesystem::path get_gekko_log_path();
+
+  void write_gekko_log(const std::string& message);
+  const char* gekko_session_event_name(GekkoSessionEventType type);
+  void log_session_events();
+  const char* gekko_game_event_name(GekkoGameEventType type);
+  bool save_gekko_state(const PendingGekkoSave& save);
+  bool RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
+                                 int buffer_capacity, int frame);
+  bool RollbackLoadGameState(const CoreRollbackState& state);
+  bool latch_gekko_input(GekkoGameEvent* event);
+
+  // Pending event queues filled by OnFrameStart, drained by EXI execute commands
+  std::vector<u8> m_gekko_callback_codes;
+  std::vector<PendingGekkoSave> m_pending_gekko_saves;
+  std::vector<PendingGekkoLoad> m_pending_gekko_loads;
+  std::vector<PendingGekkoAdvance> m_pending_gekko_advances;
+  mutable std::mutex m_gekko_callback_mutex;
+  // Dynamic regions provided by the game (from handleStartLoopComplete), keyed by frame
+  std::unordered_map<int, std::vector<DynamicSaveRegion>> m_dynamic_save_regions;
+
+  // Desync tracking
+  std::map<int, s32> m_last_desync_frame;  // Track last desync per player
+  std::chrono::steady_clock::time_point m_last_desync_notification;
+  constexpr static int DESYNC_NOTIFICATION_COOLDOWN_MS = 5000;  // Don't spam notifications
 };
 
 void NetPlay_Enable(NetPlayClient* const np);

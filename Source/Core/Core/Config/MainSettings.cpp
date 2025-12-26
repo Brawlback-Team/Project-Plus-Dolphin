@@ -55,10 +55,11 @@ const Info<bool> MAIN_SMOOTH_EARLY_PRESENTATION{{System::Main, "Core", "SmoothEa
 // Currently enabled by default on Android because the performance boost is really needed.
 constexpr bool DEFAULT_CPU_THREAD = true;
 #else
-// P+ change: enable dual core for desktop, as we're targeting low end machines for default settings
-constexpr bool DEFAULT_CPU_THREAD = true;
+// Turned back off after testing showed dual core increases input lag on some machines
+constexpr bool DEFAULT_CPU_THREAD = false;
 #endif
 const Info<bool> MAIN_CPU_THREAD{{System::Main, "Core", "CPUThread"}, DEFAULT_CPU_THREAD};
+const Info<bool> MAIN_LOAD_GAME_INTO_MEMORY{{System::Main, "Core", "LoadGameIntoMemory"}, false};
 const Info<bool> MAIN_SYNC_ON_SKIP_IDLE{{System::Main, "Core", "SyncOnSkipIdle"}, true};
 const Info<std::string> MAIN_DEFAULT_ISO{{System::Main, "Core", "DefaultISO"}, ""};
 const Info<bool> MAIN_ENABLE_CHEATS{{System::Main, "Core", "EnableCheats"}, true};

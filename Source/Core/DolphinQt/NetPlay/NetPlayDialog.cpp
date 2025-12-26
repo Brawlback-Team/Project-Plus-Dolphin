@@ -194,9 +194,11 @@ void NetPlayDialog::CreateMainLayout()
          "configured by the host.\nSuitable for competitive games where fairness and minimal "
          "latency are most important."));
   m_fixed_delay_action->setCheckable(true);
+  #ifdef _WIN32
   m_rollback_action = m_network_menu->addAction(tr("Rollback"));
-  m_rollback_action->setToolTip(tr("[WIP]"));
+  m_rollback_action->setToolTip(tr("[WIP] -- WINDOWS ONLY"));
   m_rollback_action->setCheckable(true);
+  #endif
   m_host_input_authority_action = m_network_menu->addAction(tr("Host Input Authority"));
   m_host_input_authority_action->setToolTip(
       tr("Host has control of sending all inputs to the game, as received from other players, "
@@ -213,7 +215,9 @@ void NetPlayDialog::CreateMainLayout()
   m_network_mode_group = new QActionGroup(this);
   m_network_mode_group->setExclusive(true);
   m_network_mode_group->addAction(m_fixed_delay_action);
+  #ifdef _WIN32
   m_network_mode_group->addAction(m_rollback_action);
+  #endif
   m_network_mode_group->addAction(m_host_input_authority_action);
   m_network_mode_group->addAction(m_golf_mode_action);
   m_fixed_delay_action->setChecked(true);
@@ -401,7 +405,9 @@ void NetPlayDialog::ConnectWidgets()
           [hia_function] { hia_function(true); });
   connect(m_golf_mode_action, &QAction::toggled, this, [hia_function] { hia_function(true); });
   connect(m_fixed_delay_action, &QAction::toggled, this, [hia_function] { hia_function(false); });
+  #ifdef _WIN32
   connect(m_rollback_action, &QAction::toggled, this, [hia_function] { hia_function(false); });
+  #endif
   connect(m_start_button, &QPushButton::clicked, this, &NetPlayDialog::OnStart);
   connect(m_quit_button, &QPushButton::clicked, this, &NetPlayDialog::reject);
 
@@ -451,7 +457,9 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_golf_mode_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_golf_mode_overlay_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_fixed_delay_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
+  #ifdef _WIN32
   connect(m_rollback_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
+  #endif
   connect(m_hide_remote_gbas_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
@@ -923,7 +931,9 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
     m_fixed_delay_action->setEnabled(enabled);
     m_brawlmusic_off->setEnabled(enabled);
     m_spectator_mode->setEnabled(enabled);
+    #ifdef _WIN32
     m_rollback_action->setEnabled(enabled);
+    #endif
   }
 
   m_record_input_action->setEnabled(enabled);
@@ -1247,10 +1257,12 @@ void NetPlayDialog::LoadSettings()
   {
     m_golf_mode_action->setChecked(true);
   }
+  #ifdef _WIN32
   else if (network_mode == "rollback")
   {
     m_rollback_action->setChecked(true);
   }
+  #endif
   else
   {
     WARN_LOG_FMT(NETPLAY, "Unknown network mode '{}', using 'fixeddelay'", network_mode);
@@ -1287,14 +1299,17 @@ void NetPlayDialog::SaveSettings()
   {
     network_mode = "fixeddelay";
   }
+  
   else if (m_host_input_authority_action->isChecked())
   {
     network_mode = "hostinputauthority";
   }
+  #ifdef _WIN32
   else if (m_rollback_action->isChecked())
   {
     network_mode = "rollback";
   }
+  #endif
   else if (m_golf_mode_action->isChecked())
   {
     network_mode = "golf";

@@ -1,4 +1,5 @@
 #include "EXI_Brawlback.h"
+#include "EXI_Brawlback.h"
 #include <Core/Brawlback/include/brawlback-common/ExiStructures.h>
 #include <algorithm>
 #include <chrono>
@@ -13,10 +14,8 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include <regex>
 #include <Core/System.h>
-#include <incremental-rollback/incremental_rb.h>
 #include <chrono>
 #include "Common/CommonTypes.h"
-#include <Common/MemoryUtil.h>
 #include <Core/NetPlayClient.h>
 // --- Mutexes
 std::mutex read_queue_mutex = std::mutex();
@@ -39,18 +38,21 @@ T swap_endian(T val)
 
 void CEXIBrawlback::handleEndFrame()
 {
-  NetPlay::OnFrameEnd();
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    NetPlay::OnFrameEnd();
+  }
 }
-
+inline void SwapEndianSavestateMemRegionInfo(SavestateMemRegionInfo& memRegion)
+{
+  memRegion.address = swap_endian(memRegion.address);
+  memRegion.size = swap_endian(memRegion.size);
+}
 void CEXIBrawlback::handleEndLoop()
 {
-  if (NetPlay::IsNetPlayRunning() && NetPlay::IsStarted())
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    IncrementalRB::OnFrameEnd(NetPlay::CurrentFrame(), NetPlay::IsRollingBack());
-    if (NetPlay::IsRollingBack())
-    {
-      NetPlay::IncrementCurrentFrame();
-    }
+    NetPlay::IncrementCurrentFrame();
   }
 }
 inline void SwapBrawlbackPadDataEndianess(BrawlbackPad& pad)
@@ -62,77 +64,443 @@ inline void SwapBrawlbackPadDataEndianess(BrawlbackPad& pad)
   pad.releasedButtons = swap_endian(pad.releasedButtons);
   pad.newPressedButtons = swap_endian(pad.newPressedButtons);
 }
+void CEXIBrawlback::handleStartLoopSize(u8* payload)
+{
+  struct StartLoopPayloadInfo
+  {
+    bu32 payloadSize;
+    bu32 exiMaxPayloadBytes;
+  };
+
+  StartLoopPayloadInfo info;
+  memcpy(&info, payload, sizeof(StartLoopPayloadInfo));
+
+  info.payloadSize = swap_endian(info.payloadSize);
+  info.exiMaxPayloadBytes = swap_endian(info.exiMaxPayloadBytes);
+
+  start_loop_payload_size = info.payloadSize;               // Total bytes in payload
+  start_loop_max_chunk_size = info.exiMaxPayloadBytes - 1;  // Subtract 1 for command byte
+
+  INFO_LOG_FMT(BRAWLBACK, "PAYLOAD SIZE: {} - MAX SIZE: {}\n", start_loop_payload_size,
+               start_loop_max_chunk_size);
+
+  // Reset buffer for new data
+  start_loop_buffer.clear();
+
+  // Handle case where payload size is 0
+  if (start_loop_payload_size == 0)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Warning: Payload size is 0, skipping buffer operations");
+    start_loop_bytes_received = 0;
+    return;
+  }
+
+  start_loop_buffer.reserve(start_loop_payload_size);
+  start_loop_bytes_received = 0;
+}
+
 void CEXIBrawlback::handleStartLoop(u8* payload)
 {
-  BrawlbackPad pad;
-  memcpy(&pad, payload, sizeof(BrawlbackPad));
-  SwapBrawlbackPadDataEndianess(pad);
-  NetPlay::OnFrameStart(pad);
+  // Skip if payload size is 0
+  if (start_loop_payload_size == 0)
+  {
+    return;
+  }
 
-  s32 advanceFrames = NetPlay::AdvanceFrames();
+  // Calculate how many bytes we expect in this chunk
+  int bytes_remaining = start_loop_payload_size - start_loop_bytes_received;
+  int expected_chunk_size = std::min(bytes_remaining, start_loop_max_chunk_size);
+
+  // Append this chunk to the buffer
+  start_loop_buffer.insert(start_loop_buffer.end(), payload, payload + expected_chunk_size);
+  start_loop_bytes_received += expected_chunk_size;
+
+  // Check if we've received all the data
+  if (start_loop_bytes_received >= start_loop_payload_size)
+  {
+    handleStartLoopComplete();
+  }
+}
+
+void CEXIBrawlback::handleStartLoopRollback(u8* payload)
+{
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode()) 
+  {
+    BrawlbackPad pad;
+    memcpy(&pad, payload, sizeof(BrawlbackPad));
+    SwapBrawlbackPadDataEndianess(pad);
+    NetPlay::OnFrameStart(pad);
+
+    // Send the callback-code queue to the game instead of a raw advance_frames value.
+    handleGetCallbackCodes();
+  }
+}
+void CEXIBrawlback::handleStartLoopComplete()
+{
+  struct AllocationRegionDataHeader
+  {
+    bu32 regionCount;
+  };
+
+  if (start_loop_buffer.size() < sizeof(AllocationRegionDataHeader))
+  {
+    INFO_LOG_FMT(BRAWLBACK, "handleStartLoopComplete: buffer too small");
+    start_loop_buffer.clear();
+    start_loop_bytes_received = 0;
+    return;
+  }
+
+  AllocationRegionDataHeader header;
+  memcpy(&header, start_loop_buffer.data(), sizeof(AllocationRegionDataHeader));
+  header.regionCount = swap_endian(header.regionCount);
+
+  AllocationRegionEntry* entries = reinterpret_cast<AllocationRegionEntry*>(
+      start_loop_buffer.data() + sizeof(AllocationRegionDataHeader));
+
+  INFO_LOG_FMT(BRAWLBACK, "handleStartLoopComplete: frame={} region_count={}",
+               NetPlay::CurrentFrame(), header.regionCount);
+
+  // Store the parsed region list for use by handleExecuteSave; do not read memory here.
+  PendingSaveRegionList save_entry;
+  save_entry.frame = NetPlay::CurrentFrame();
+  for (bu32 i = 0; i < header.regionCount; i++)
+  {
+    AllocationRegionEntry entry = entries[i];
+    entry.address = swap_endian(entry.address);
+    entry.size = swap_endian(entry.size);
+    save_entry.entries.push_back(entry);
+  }
+  pending_save_region_list.push_back(save_entry);
+
+  start_loop_buffer.clear();
+  start_loop_bytes_received = 0;
+}
+
+void CEXIBrawlback::handleLoadStateSize(u8* payload)
+{
+  struct LoadStatePayloadInfo
+  {
+    bu32 payloadSize;
+    bu32 exiMaxPayloadBytes;
+  };
+
+  LoadStatePayloadInfo info;
+  memcpy(&info, payload, sizeof(LoadStatePayloadInfo));
+
+  info.payloadSize = swap_endian(info.payloadSize);
+  info.exiMaxPayloadBytes = swap_endian(info.exiMaxPayloadBytes);
+
+  load_state_payload_size = info.payloadSize;
+  load_state_max_chunk_size = info.exiMaxPayloadBytes - 1;  // Subtract 1 for command byte
+
+  INFO_LOG_FMT(BRAWLBACK, "Load state payload size: {} bytes, Max chunk size: {}",
+               load_state_payload_size, load_state_max_chunk_size);
+
+  // Reset buffer for new data
+  load_state_buffer.clear();
+
+  // Handle case where payload size is 0
+  if (load_state_payload_size == 0)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Warning: Load state payload size is 0, skipping buffer operations");
+    load_state_bytes_received = 0;
+    return;
+  }
+
+  load_state_buffer.reserve(load_state_payload_size);
+  load_state_bytes_received = 0;
+}
+
+void CEXIBrawlback::handleLoadState(u8* payload)
+{
+  // Skip if payload size is 0
+  if (load_state_payload_size == 0)
+  {
+    return;
+  }
+
+  // Calculate how many bytes we expect in this chunk
+  int bytes_remaining = load_state_payload_size - load_state_bytes_received;
+  int expected_chunk_size = std::min(bytes_remaining, load_state_max_chunk_size);
+
+  // Append this chunk to the buffer
+  load_state_buffer.insert(load_state_buffer.end(), payload, payload + expected_chunk_size);
+  load_state_bytes_received += expected_chunk_size;
+
+  INFO_LOG_FMT(BRAWLBACK, "Received load state chunk: {} bytes ({}/{})", expected_chunk_size,
+               load_state_bytes_received, load_state_payload_size);
+
+  // Check if we've received all the data
+  if (load_state_bytes_received >= load_state_payload_size)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "All load state chunks received, processing...");
+    handleLoadStateComplete();
+  }
+}
+
+void CEXIBrawlback::handleLoadStateComplete()
+{
+  struct LoadStatePayloadHeader
+  {
+    bu32 regionCount;
+  };
+
+  if (load_state_buffer.size() < sizeof(LoadStatePayloadHeader))
+  {
+    INFO_LOG_FMT(BRAWLBACK, "handleLoadStateComplete: buffer too small");
+    load_state_buffer.clear();
+    load_state_bytes_received = 0;
+    return;
+  }
+
+  LoadStatePayloadHeader header;
+  memcpy(&header, load_state_buffer.data(), sizeof(LoadStatePayloadHeader));
+  header.regionCount = swap_endian(header.regionCount);
+
+  AllocationRegionEntry* entries = reinterpret_cast<AllocationRegionEntry*>(
+      load_state_buffer.data() + sizeof(LoadStatePayloadHeader));
+
+  INFO_LOG_FMT(BRAWLBACK, "handleLoadStateComplete: frame={} region_count={}",
+               NetPlay::CurrentFrame(), header.regionCount);
+
+  // Store the parsed region list for use by handleExecuteLoad; do not restore memory here.
+  // Use the frame from the pending load callback, not the current emulation frame.
+  const int pendingLoadFrame = (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode() && NetPlay::netplay_client)
+      ? NetPlay::netplay_client->GetPendingLoadFrame()
+      : -1;
+  pending_load_region_list.push_back(
+      {(pendingLoadFrame >= 0) ? static_cast<u32>(pendingLoadFrame) : NetPlay::CurrentFrame(), {}});
+  for (bu32 i = 0; i < header.regionCount; i++)
+  {
+    AllocationRegionEntry entry = entries[i];
+    entry.address = swap_endian(entry.address);
+    entry.size = swap_endian(entry.size);
+    pending_load_region_list.at(pending_load_region_list.size() - 1).entries.push_back(entry);
+  }
+
+  load_state_buffer.clear();
+  load_state_bytes_received = 0;
+}
+
+void CEXIBrawlback::handleGetMissingRegions()
+{
   std::lock_guard<std::mutex> lock(read_queue_mutex);
   this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&advanceFrames);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(s32));
+  
+  // Calculate total size needed
+  size_t totalSize = missing_regions.size() * sizeof(AllocationRegionEntry);
+  this->read_queue.reserve(totalSize);
+  
+  // Send all entries in one operation if there are any
+  if (!missing_regions.empty())
+  {
+    auto entriesPtr = reinterpret_cast<const u8*>(missing_regions.data());
+    this->read_queue.insert(this->read_queue.end(), entriesPtr, 
+                           entriesPtr + (missing_regions.size() * sizeof(AllocationRegionEntry)));
+  }
+  
+  INFO_LOG_FMT(BRAWLBACK, "Queued {} bytes for game to read ({} missing regions)",
+               this->read_queue.size(), missing_regions.size());
 }
 
 void CEXIBrawlback::handleGetPort()
 {
-  u8 port = 0;
-  if (NetPlay::IsNetPlayRunning())
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
+    u8 port = 0;
     for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
     {
       if (NetPlay::netplay_client->GetPadMapping().at(i) == NetPlay::netplay_client->GetLocalPlayerId())
         port = i;
     }
-  }
-  std::lock_guard<std::mutex> lock(read_queue_mutex);
-  this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&port);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u8));
-}
-
-void CEXIBrawlback::handleGetInputs(bool local)
-{
-  // TODO: Doubles?
-  std::optional<NetPlay::Inputs> pad = std::nullopt;
-  std::optional<BrawlbackPad> predicted_pad = std::nullopt;
-  BrawlbackPad game_pad = BrawlbackPad{};
-  if (NetPlay::IsNetPlayRunning())
-  {
-    for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
     {
-      if (local && NetPlay::netplay_client->GetPadMapping().at(i) ==
-        NetPlay::netplay_client->GetLocalPlayerId())
-      {
-        pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
-        predicted_pad = NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
-        break;
-      }
-      else if (!local && NetPlay::netplay_client->GetPadMapping().at(i) !=
-        NetPlay::netplay_client->GetLocalPlayerId())
-      {
-        pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
-        predicted_pad =
-            NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
-        break;
-      }
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto dataPtr = reinterpret_cast<u8*>(&port);
+      this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u8));
     }
   }
-  if (pad != std::nullopt)
-  {
-    game_pad = pad.value().game_pad;
-  }
-  else if (predicted_pad != std::nullopt)
-  {
-    game_pad = predicted_pad.value();
-  }
-  std::lock_guard<std::mutex> lock(read_queue_mutex);
-  this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&game_pad);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(BrawlbackPad));
 }
+
+void CEXIBrawlback::handleGetInputs(bool local, u8* payload)
+{
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    const int local_pid = static_cast<int>(NetPlay::netplay_client->GetLocalPlayerId()) - 1;
+    const int remote_pid = local_pid == 0 ? 1 : 0;
+    const int player_pid = local ? local_pid : remote_pid;
+
+    s32 frame = NetPlay::netplay_client->current_frame;
+    if (payload != nullptr)
+    {
+      s32 payload_frame;
+      memcpy(&payload_frame, payload, sizeof(s32));
+      frame = swap_endian(payload_frame);
+    }
+
+    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(player_pid, frame);
+
+    INFO_LOG_FMT(BRAWLBACK, "handleGetInputs: player_pid={} frame={} local={} buttons=0x{:08X}", 
+                 player_pid, frame, local, game_pad.buttons);
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto dataPtr = reinterpret_cast<u8*>(&game_pad);
+      this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(BrawlbackPad));
+    }
+  }
+}
+void CEXIBrawlback::handleGetCallbackCodes()
+{
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode() && NetPlay::netplay_client)
+  {
+    std::vector<u8> codes = NetPlay::netplay_client->PopCallbackCodes();
+    // Format: [count u8] [code0 u8] [code1 u8] ...
+    u8 codeCount = static_cast<u8>(codes.size());
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      this->read_queue.push_back(codeCount);
+      this->read_queue.insert(this->read_queue.end(), codes.begin(), codes.end());
+    }
+  }
+}
+
+void CEXIBrawlback::handleExecuteSave()
+{
+  if (!NetPlay::IsNetPlayRunning() || !NetPlay::IsInRollbackMode() || !NetPlay::netplay_client)
+    return;
+
+  u32 frame = -1;
+  if (pending_save_region_list.size() != 0)
+  {
+    frame = pending_save_region_list.begin()->frame;
+
+    // Pass the dynamic region list to NetPlayClient so RollbackSaveGameStateInto includes them.
+    {
+      std::vector<NetPlay::DynamicSaveRegion> dynamic_regions;
+      std::vector<NetPlay::DynamicSaveRegion> existing_regions = NetPlay::netplay_client->GetDynamicSaveRegions(frame - 1);
+      for (const AllocationRegionEntry& entry : pending_save_region_list[0].entries)
+      {
+        NetPlay::DynamicSaveRegion r;
+        r.address = entry.address;
+        r.size = entry.size;
+        dynamic_regions.push_back(r);
+      }
+      NetPlay::netplay_client->SetDynamicSaveRegions(frame, dynamic_regions);
+    }
+
+    // Execute the GekkoNet-level save (writes state into Gekko's buffer, including dynamic regions).
+    bool ok = NetPlay::netplay_client->ExecutePendingSave();
+
+    INFO_LOG_FMT(BRAWLBACK, "handleExecuteSave: frame={} ok={}", frame, ok);
+
+    pending_save_region_list.erase(pending_save_region_list.begin());
+
+    u8 result = ok ? 1 : 0;
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto resultPtr = reinterpret_cast<u8*>(&result);
+      this->read_queue.insert(this->read_queue.end(), resultPtr, resultPtr + sizeof(u8));
+    }
+  }
+  else
+  {
+    u8 result = 0;
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto resultPtr = reinterpret_cast<u8*>(&result);
+      this->read_queue.insert(this->read_queue.end(), resultPtr, resultPtr + sizeof(u8));
+    }
+  }
+}
+
+void CEXIBrawlback::handleExecuteLoad()
+{
+  if (!NetPlay::IsNetPlayRunning() || !NetPlay::IsInRollbackMode() || !NetPlay::netplay_client)
+    return;
+
+  u32 frame = -1;
+  if (pending_load_region_list.size() != 0)
+  {
+    frame = pending_load_region_list.begin()->frame;
+
+    // Compare the game's requested load regions against what was saved for this frame.
+    const std::vector<NetPlay::DynamicSaveRegion>& saved_regions =
+        NetPlay::netplay_client->GetDynamicSaveRegions(static_cast<int>(frame));
+
+    missing_regions.clear();
+    for (const AllocationRegionEntry& entry : pending_load_region_list[0].entries)
+    {
+      u32 regionAddress = entry.address;
+      u32 regionSize = entry.size;
+
+      bool found = false;
+      for (const NetPlay::DynamicSaveRegion& saved : saved_regions)
+      {
+        if (saved.address == regionAddress && saved.size == regionSize)
+        {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found)
+      {
+        INFO_LOG_FMT(BRAWLBACK, "handleExecuteLoad: missing region Address=0x{:08X}, Size={}",
+                     regionAddress, regionSize);
+        AllocationRegionEntry missing;
+        missing.address = entry.address;
+        missing.size = entry.size;
+        missing_regions.push_back(missing);
+      }
+    }
+
+    INFO_LOG_FMT(BRAWLBACK, "handleExecuteLoad: frame={} missing_regions={}", frame,
+                 missing_regions.size());
+
+    NetPlay::netplay_client->ExecutePendingLoad();
+    pending_load_region_list.erase(pending_load_region_list.begin());
+  }
+
+  // Return the count of missing regions to the game
+  {
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    bu32 missingCount = static_cast<bu32>(missing_regions.size());
+    auto countPtr = reinterpret_cast<u8*>(&missingCount);
+    this->read_queue.insert(this->read_queue.end(), countPtr, countPtr + sizeof(bu32));
+  }
+}
+
+void CEXIBrawlback::handleExecuteAdvance()
+{
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode() && NetPlay::netplay_client)
+  {
+    s32 frame = NetPlay::netplay_client->ExecuteAdvanceFrame();
+    s32 frame_be = swap_endian(frame);
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto dataPtr = reinterpret_cast<u8*>(&frame_be);
+      this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(s32));
+    }
+  }
+}
+
+void CEXIBrawlback::handleGetNetworkingMode()
+{
+  u32 mode = NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode();
+  {
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    auto dataPtr = reinterpret_cast<u8*>(&mode);
+    this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u32));
+  }
+}
+
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
 {
 }
@@ -141,13 +509,11 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
 {
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
-  // INFO_LOG_FMT(BRAWLBACK, "DMAWrite size: %u\n", size);
   u8* mem = memory.GetSpanForAddress(address).data();
 
   if (!mem)
   {
     INFO_LOG_FMT(BRAWLBACK, "Invalid address in DMAWrite!");
-    // this->read_queue.clear();
     return;
   }
 
@@ -167,24 +533,52 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
   case CMD_END_FRAME:
     handleEndFrame();
     break;
-  // just using these CMD's to track frame times lol
   case CMD_END_LOOP:
     handleEndLoop();
     break;
   case CMD_START_LOOP:
     handleStartLoop(payload);
     break;
+  case CMD_START_LOOP_ROLLBACK:
+    handleStartLoopRollback(payload);
+    break;
+  case CMD_START_LOOP_SIZE:
+    handleStartLoopSize(payload);
+    break;
+  case CMD_LOAD_STATE:
+    handleLoadState(payload);
+    break;
+  case CMD_LOAD_STATE_SIZE:
+    handleLoadStateSize(payload);
+    break;
+  case CMD_GET_MISSING_REGIONS:
+    handleGetMissingRegions();
+    break;
   case CMD_GET_PORT:
     handleGetPort();
     break;
   case CMD_GET_REMOTE_INPUTS:
-    handleGetInputs(false);
+    handleGetInputs(false, payload);
     break;
   case CMD_GET_LOCAL_INPUTS:
-    handleGetInputs(true);
+    handleGetInputs(true, payload);
+    break;
+  case CMD_ROLLBACK_CHECK:
+    handleGetNetworkingMode();
+    break;
+  case CMD_GET_CALLBACK_CODES:
+    handleGetCallbackCodes();
+    break;
+  case CMD_EXECUTE_SAVE:
+    handleExecuteSave();
+    break;
+  case CMD_EXECUTE_LOAD:
+    handleExecuteLoad();
+    break;
+  case CMD_EXECUTE_ADVANCE:
+    handleExecuteAdvance();
     break;
   default:
-    // INFO_LOG_FMT(BRAWLBACK, "Default DMAWrite %u\n", (unsigned int)command_byte);
     break;
   }
 }
