@@ -102,6 +102,7 @@ static std::atomic<bool> is_rollingback;
 static std::atomic<bool> is_stalled;
 static std::atomic<bool> game_started;
 static std::atomic<bool> is_predicting;
+static json inputs_output = json{};
 
 //static Common::EventHook s_after_frame_event = AfterFrameEvent::Register(
 //    [](const Core::System& system) { OnFrameEnd(); }, "Netplay::OnFrameEnd");
@@ -815,6 +816,12 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
           {
             inputs.at(map).erase(inputs.at(map).begin());
           }
+
+          auto current_inputs = json{};
+          ToJson(current_inputs, pad);
+          std::string port = fmt::format("{}_{}", "player_port", map);
+
+          inputs_output[port].push_back(current_inputs);
         }
         
         time_sync->ReceivedRemoteFramedata(maxFrame, static_cast<u8>(m_local_player->pid - 1),
@@ -993,6 +1000,74 @@ void NetPlayClient::OnGameStatus(sf::Packet& packet)
   m_dialog->Update();
 }
 
+void NetPlayClient::ToJson(json& j, const BrawlbackPad& i)
+{
+  j["game_pad"] = json{{"_buttons", i._buttons},
+           {"buttons", i.buttons},
+           {"holdButtons", i.holdButtons},
+           {"rapidFireButtons", i.rapidFireButtons},
+           {"releasedButtons", i.releasedButtons},
+           {"newPressedButtons", i.newPressedButtons},
+           {"LAnalogue", i.LAnalogue},
+           {"RAnalogue", i.RAnalogue},
+           {"LTrigger", i.LTrigger},
+           {"RTrigger", i.RTrigger},
+           {"stickX", i.stickX},
+           {"stickY", i.stickY},
+           {"cStickX", i.cStickX},
+           {"cStickY", i.cStickY}};
+}
+void NetPlayClient::ToJson(json& j, const GCPadStatus& i)
+{
+  j["emu_pad"] = {{"button", i.button},
+           {"stickX", i.stickX},
+           {"stickY", i.stickY},
+           {"substickX", i.substickX},
+           {"substickY", i.substickY},
+           {"triggerLeft", i.triggerLeft},
+           {"triggerRight", i.triggerRight},
+           {"analogA", i.analogA},
+           {"analogB", i.analogB}};
+}
+void NetPlayClient::ToJson(json& j, const Inputs& i)
+{
+  j["frame"] = i.frame;
+  ToJson(j, i.game_pad);
+  ToJson(j, i.emu_pad);
+}
+void NetPlayClient::FromJson(const json& j, BrawlbackPad& i)
+{
+  j.at("frame").get_to(i._buttons);
+  j.at("buttons").get_to(i.buttons);
+  j.at("holdButtons").get_to(i.holdButtons);
+  j.at("rapidFireButtons").get_to(i.rapidFireButtons);
+  j.at("releasedButtons").get_to(i.releasedButtons);
+  j.at("newPressedButtons").get_to(i.newPressedButtons);
+  j.at("LAnalogue").get_to(i.LAnalogue);
+  j.at("RAnalogue").get_to(i.RAnalogue);
+  j.at("stickX").get_to(i.stickX);
+  j.at("stickY").get_to(i.stickY);
+  j.at("cStickX").get_to(i.cStickX);
+  j.at("cStickY").get_to(i.cStickY);
+}
+void NetPlayClient::FromJson(const json& j, GCPadStatus& i)
+{
+  j.at("button").get_to(i.button);
+  j.at("stickX").get_to(i.stickX);
+  j.at("stickY").get_to(i.stickY);
+  j.at("substickX").get_to(i.substickX);
+  j.at("substickY").get_to(i.substickY);
+  j.at("triggerLeft").get_to(i.triggerLeft);
+  j.at("triggerRight").get_to(i.triggerRight);
+  j.at("analogA").get_to(i.analogA);
+  j.at("analogB").get_to(i.analogB);
+}
+void NetPlayClient::FromJson(const json& j, Inputs& i)
+{
+  j.at("frame").get_to(i.frame);
+  FromJson(j, i.game_pad);
+  FromJson(j, i.emu_pad);
+}
 void NetPlayClient::OnStartGame(sf::Packet& packet)
 {
   {
@@ -1103,21 +1178,24 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     if (player.second.pid == m_local_player->pid)
     {
       std::vector<Inputs> empty_pads = {};
+      auto config = Config::Get(Config::GetInfoForSIDevice(0));
       for (int i = 0; i < delay; i++)
       {
         Inputs empty_pad = Inputs{};
-        empty_pad.emu_pad = GetDefaultPad(Config::Get(Config::GetInfoForSIDevice(0)));
+        empty_pad.emu_pad = GetDefaultPad(config);
         empty_pads.push_back(empty_pad);
       }
       inputs.push_back(empty_pads);
 
-      pad_config.push_back(Config::Get(Config::GetInfoForSIDevice(0)));
+      pad_config.push_back(config);
     }
     else
     {
       pad_config.push_back(12);
       inputs.push_back({});
     }
+    std::string port = fmt::format("{}_{}", "player_port", player.second.pid - 1);
+    inputs_output[port] = json::array();
     predicted_inputs.push_back(Inputs{});
   }
   current_frame = 0;
@@ -1376,6 +1454,12 @@ void NetPlayClient::StoreInputs(Inputs& pad, int local_player_port)
       inputs.at(local_player_port).erase(inputs.at(local_player_port).begin());
     }
     inputs.at(local_player_port).push_back(pad);
+
+    auto current_inputs = json{};
+    ToJson(current_inputs, pad);
+    std::string port = fmt::format("{}_{}", "player_port", local_player_port);
+
+    inputs_output[port].push_back(current_inputs);
   }
   else
   {
@@ -1454,7 +1538,7 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
 
   // TODO: Make this work for all local pad ports
   GCPadStatus pad_status;
-  if (Config::Get(Config::GetInfoForSIDevice(pad_config.at(local_player_port))) == SerialInterface::SIDEVICE_WIIU_ADAPTER)
+  if (pad_config.at(local_player_port) == SerialInterface::SIDEVICE_WIIU_ADAPTER)
   {
     pad_status = GCAdapter::Input(0);
   }
@@ -2634,7 +2718,7 @@ GCPadStatus NetPlayClient::GetDefaultPad(int config)
 {
   GCPadStatus pad = GCPadStatus{};
 
-  if (Config::Get(Config::GetInfoForSIDevice(config)) != SerialInterface::SIDEVICE_WIIU_ADAPTER)
+  if (config != SerialInterface::SIDEVICE_WIIU_ADAPTER)
   {
     pad.stickX = pad.MAIN_STICK_CENTER_X;
     pad.stickY = pad.MAIN_STICK_CENTER_Y;
@@ -2995,6 +3079,21 @@ void NetPlayClient::InvokeStop()
   m_wii_pad_event.Set();
   m_first_pad_status_received_event.Set();
   m_wait_on_input_event.Set();
+
+  std::ofstream json_stream;
+  auto t = std::time(nullptr);
+  auto tm = *std::localtime(&t);
+  std::ostringstream oss;
+  oss << std::put_time(&tm, "%d-%m-%Y_%H-%M-%S");
+  auto timestamp = oss.str();
+  std::string cur_directory = File::GetExeDirectory();
+  File::OpenFStream(json_stream, cur_directory + DIR_SEP "replay_" + timestamp + ".json",
+                    std::ios_base::out);
+  if (json_stream.is_open())
+  {
+    json_stream << inputs_output;
+    json_stream.close();
+  }
 }
 
 // called from ---GUI--- thread and ---NETPLAY--- thread (client side)
@@ -3013,6 +3112,7 @@ bool NetPlayClient::StopGame()
 // called from ---GUI--- thread
 void NetPlayClient::Stop()
 {
+  
   if (!m_is_running.IsSet())
     return;
 
@@ -3444,7 +3544,7 @@ void OnFrameEnd()
       {
         is_rollingback = false;
       }
-      else if (!is_stalled)
+      if (!is_stalled)
       {
         netplay_client->current_frame++;
       }

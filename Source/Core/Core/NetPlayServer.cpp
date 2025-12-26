@@ -1589,7 +1589,11 @@ bool NetPlayServer::SetupNetSettings()
   settings.strict_settings_sync = Config::Get(Config::NETPLAY_STRICT_SETTINGS_SYNC);
   settings.sync_codes = Config::Get(Config::NETPLAY_SYNC_CODES);
   settings.golf_mode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "golf";
+  #ifdef _WIN32
   settings.m_RollbackMode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "rollback";
+  #else
+  settings.m_RollbackMode = false;
+  #endif
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   settings.spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);

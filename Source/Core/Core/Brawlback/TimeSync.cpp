@@ -178,7 +178,13 @@ void TimeSync::ProcessFrameAck(FrameAck* frameAck) {
 
     // if this current acked frame is more recent than the last acked frame, set it
     int lastAcked = this->lastFrameAcked[localPlayerIdx];
-    this->lastFrameAcked[localPlayerIdx] = frame > lastAcked ? frame : lastAcked;
+    if (frame <= lastAcked)
+    {
+      INFO_LOG_FMT(BRAWLBACK, "Ignoring duplicate/old ack for frame {} (last {}).\n", frame,
+                   lastAcked);
+      return;
+    }
+    this->lastFrameAcked[localPlayerIdx] = lastAcked;
 
     // remove old timings
     while (!this->ackTimers[localPlayerIdx].empty() && this->ackTimers[localPlayerIdx].front().frame < frame) {

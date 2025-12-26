@@ -15,7 +15,8 @@ enum EXICommand : u8
   CMD_START_LOOP = 3,
   CMD_GET_PORT = 4,
   CMD_GET_REMOTE_INPUTS = 5,
-  CMD_GET_LOCAL_INPUTS = 6
+  CMD_GET_LOCAL_INPUTS = 6,
+  CMD_ROLLBACK_CHECK = 7
 };
 
 class CEXIBrawlback : public ExpansionInterface::IEXIDevice
@@ -37,6 +38,8 @@ private:
   void handleStartLoop(u8* payload);
   void handleGetPort();
   void handleGetInputs(bool local);
+
+  void handleGetNetworkingMode();
 
 protected:
   void TransferByte(u8& byte) override;

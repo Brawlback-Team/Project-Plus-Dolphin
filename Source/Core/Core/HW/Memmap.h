@@ -119,6 +119,7 @@ public:
   u32 GetEmulatedAddress(u8* address);
 
   // Brawlback -- Dirty Page Handling
+  #ifdef _WIN32
   bool IsAddressDirty(uintptr_t address);
   bool IsPageDirty(uintptr_t page_address);
   void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address);
@@ -131,6 +132,7 @@ public:
   bool IsAddressInEmulatedMemory(uintptr_t address);
   bool IsAddressInFakeVMEML1Cache(uintptr_t address);
   u32 FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view);
+  #endif
 
   // Routines to access physically addressed memory, designed for use by
   // emulated hardware outside the CPU. Use "Device_" prefix.

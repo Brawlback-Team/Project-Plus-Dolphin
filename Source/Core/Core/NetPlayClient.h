@@ -25,6 +25,9 @@
 #include "InputCommon/GCPadStatus.h"
 #include "Brawlback/TimeSync.h"
 #include "Brawlback/include/brawlback-common/BrawlbackPad.h"
+#include "Brawlback/include/json.hpp"
+
+using json = nlohmann::json;
 
 class BootSessionData;
 
@@ -363,6 +366,12 @@ private:
   void OnGolfPrepare(sf::Packet& packet);
   void OnChangeGame(sf::Packet& packet);
   void OnGameStatus(sf::Packet& packet);
+  void ToJson(json& j, const BrawlbackPad& i);
+  void ToJson(json& j, const GCPadStatus& i);
+  void ToJson(json& j, const Inputs& i);
+  void FromJson(const json& j, BrawlbackPad& i);
+  void FromJson(const json& j, GCPadStatus& i);
+  void FromJson(const json& j, Inputs& i);
   void OnStartGame(sf::Packet& packet);
   void OnStopGame(sf::Packet& packet);
   void OnPowerButton();

@@ -39,7 +39,10 @@ T swap_endian(T val)
 
 void CEXIBrawlback::handleEndFrame()
 {
-  NetPlay::OnFrameEnd();
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    NetPlay::OnFrameEnd();
+  }
 }
 
 void CEXIBrawlback::handleEndLoop()
@@ -47,7 +50,7 @@ void CEXIBrawlback::handleEndLoop()
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsStarted())
   {
     IncrementalRB::OnFrameEnd(NetPlay::CurrentFrame(), NetPlay::IsRollingBack());
-    if (NetPlay::IsRollingBack())
+    if (NetPlay::IsRollingBack() && NetPlay::CurrentFrame() != NetPlay::StopFrame())
     {
       NetPlay::IncrementCurrentFrame();
     }
@@ -64,54 +67,58 @@ inline void SwapBrawlbackPadDataEndianess(BrawlbackPad& pad)
 }
 void CEXIBrawlback::handleStartLoop(u8* payload)
 {
-  BrawlbackPad pad;
-  memcpy(&pad, payload, sizeof(BrawlbackPad));
-  SwapBrawlbackPadDataEndianess(pad);
-  NetPlay::OnFrameStart(pad);
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    BrawlbackPad pad;
+    memcpy(&pad, payload, sizeof(BrawlbackPad));
+    SwapBrawlbackPadDataEndianess(pad);
+    NetPlay::OnFrameStart(pad);
 
-  s32 advanceFrames = NetPlay::AdvanceFrames();
-  std::lock_guard<std::mutex> lock(read_queue_mutex);
-  this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&advanceFrames);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(s32));
+    s32 advanceFrames = NetPlay::AdvanceFrames();
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    auto dataPtr = reinterpret_cast<u8*>(&advanceFrames);
+    this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(s32));
+  }
 }
 
 void CEXIBrawlback::handleGetPort()
 {
-  u8 port = 0;
-  if (NetPlay::IsNetPlayRunning())
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
+    u8 port = 0;
     for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
     {
       if (NetPlay::netplay_client->GetPadMapping().at(i) == NetPlay::netplay_client->GetLocalPlayerId())
         port = i;
     }
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    auto dataPtr = reinterpret_cast<u8*>(&port);
+    this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u8));
   }
-  std::lock_guard<std::mutex> lock(read_queue_mutex);
-  this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&port);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u8));
 }
 
 void CEXIBrawlback::handleGetInputs(bool local)
 {
-  // TODO: Doubles?
-  std::optional<NetPlay::Inputs> pad = std::nullopt;
-  std::optional<BrawlbackPad> predicted_pad = std::nullopt;
-  BrawlbackPad game_pad = BrawlbackPad{};
-  if (NetPlay::IsNetPlayRunning())
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
+    // TODO: Doubles?
+    std::optional<NetPlay::Inputs> pad = std::nullopt;
+    std::optional<BrawlbackPad> predicted_pad = std::nullopt;
+    BrawlbackPad game_pad = BrawlbackPad{};
     for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
     {
       if (local && NetPlay::netplay_client->GetPadMapping().at(i) ==
-        NetPlay::netplay_client->GetLocalPlayerId())
+                       NetPlay::netplay_client->GetLocalPlayerId())
       {
         pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
-        predicted_pad = NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
+        predicted_pad =
+            NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
         break;
       }
       else if (!local && NetPlay::netplay_client->GetPadMapping().at(i) !=
-        NetPlay::netplay_client->GetLocalPlayerId())
+                             NetPlay::netplay_client->GetLocalPlayerId())
       {
         pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
         predicted_pad =
@@ -119,19 +126,27 @@ void CEXIBrawlback::handleGetInputs(bool local)
         break;
       }
     }
+    if (pad != std::nullopt)
+    {
+      game_pad = pad.value().game_pad;
+    }
+    else if (predicted_pad != std::nullopt)
+    {
+      game_pad = predicted_pad.value();
+    }
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    auto dataPtr = reinterpret_cast<u8*>(&game_pad);
+    this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(BrawlbackPad));
   }
-  if (pad != std::nullopt)
-  {
-    game_pad = pad.value().game_pad;
-  }
-  else if (predicted_pad != std::nullopt)
-  {
-    game_pad = predicted_pad.value();
-  }
+}
+void CEXIBrawlback::handleGetNetworkingMode()
+{
+  u32 mode = NetPlay::IsInRollbackMode();
   std::lock_guard<std::mutex> lock(read_queue_mutex);
   this->read_queue.clear();
-  auto dataPtr = reinterpret_cast<u8*>(&game_pad);
-  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(BrawlbackPad));
+  auto dataPtr = reinterpret_cast<u8*>(&mode);
+  this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u32));
 }
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
 {
@@ -182,6 +197,9 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   case CMD_GET_LOCAL_INPUTS:
     handleGetInputs(true);
+    break;
+  case CMD_ROLLBACK_CHECK:
+    handleGetNetworkingMode();
     break;
   default:
     // INFO_LOG_FMT(BRAWLBACK, "Default DMAWrite %u\n", (unsigned int)command_byte);
