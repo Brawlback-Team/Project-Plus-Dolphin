@@ -273,7 +273,7 @@ void AdvancedWidget::AddDescriptions()
   static const char TR_CACHE_CUSTOM_TEXTURE_DESCRIPTION[] = QT_TR_NOOP(
       "Caches custom textures to system RAM on startup.<br><br>This can require exponentially "
       "more RAM but fixes possible stuttering.<br><br><dolphin_emphasis>If unsure, leave this "
-      "unchecked.</dolphin_emphasis>");
+      "checked.</dolphin_emphasis>");
   static const char TR_DUMP_EFB_DESCRIPTION[] =
       QT_TR_NOOP("Dumps the contents of EFB copies to User/Dump/Textures/.<br><br>"
                  "<dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>");
