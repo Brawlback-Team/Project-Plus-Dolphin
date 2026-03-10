@@ -29,6 +29,8 @@
 #include <Core/System.h>
 #include <Core/Core.h>
 #include <Common/MemoryUtil.h>
+#include <fstream>
+#include <Core/NetPlayClient.h>
 
 #define ENABLE_LOGGING
 //#define SPECIFIC_TRACKING
@@ -44,7 +46,8 @@ constexpr u64 MAX_NUM_CHANGED_PAGES = 60000;
 
 namespace IncrementalRB
 {
-
+  std::vector<SavestateVerification> g_verification_history;
+  std::vector<CriticalMemoryRegion> g_critical_regions;
   typedef boost::icl::interval_set<uintptr_t> TIntervalSet;
 
   struct Region
@@ -134,68 +137,63 @@ namespace IncrementalRB
     return {};
   }
 
-  void InitState(IncrementalRBCallbacks cb)
+  static void ClearTrackingState()
   {
-    //PROFILE_FUNCTION();
+    for (auto& tracked : TrackedMemList)
+    {
+      free(tracked.changedPages.Addresses);
+    }
+    TrackedMemList.clear();
+    ExcludeMemList.clear();
+    excludeSet.clear();
+  }
+
+  static void BuildExcludeSet()
+  {
+    excludeSet.clear();
+
+    for (u32 i = 0; i < ExcludeMemList.size(); i++)
+    {
+      excludeSet.insert(ExcludeMemList[i].excludeGap);
+    }
     
-    cbs = cb;
-    ResetAllocs(savestateInfo);
-    #ifdef SPECIFIC_TRACKING
+    std::sort(ExcludeMemList.begin(), ExcludeMemList.end(),
+              [](const ExcludeBuffer& a, const ExcludeBuffer& b) {
+                return a.buffer.data < b.buffer.data;
+              });
+  }
+
+  static void SetupTrackedRegions()
+  {
+#ifdef SPECIFIC_TRACKING
     std::vector<Region> staticRegions = {
-        {0x806414a0, 0x806414a0 + 0x60},
-        {0x8062f440, 0x8062f440 + 0x500},
-        {0x8063ff60, 0x8063ff60 + 0x1520},
-        {0x8063dcc0, 0x8063dcc0 + 0x2280},
-        {0x8063da80, 0x8063da80 + 0x220},
-        {0x80624780, 0x80624780 + 0x50},
-        {0x806232e0, 0x806232e0 + 0x1480},
-        {0x806273c0, 0x806273c0 + 0x540},
-        {0x80624800, 0x80624800 + 0x2ba0},
-        {0x80622d20, 0x80622d20 + 0x388},
-        {0x80621260, 0x80621260 + 0x1aa0},
-        {0x8061f920, 0x8061f920 + 0x1920},
-        {0x8061f460, 0x8061f460 + 0x4a0},
-        {0x80615620, 0x80615620 + 0x6f20},
-        {0x8061c560, 0x8061c560 + 0x2EE0},
-        {0x8063d9a0, 0x8063d9a0 + 0xc0},
-        {0x8063d8e0, 0x8063d8e0 + 0xa0},
-        {0x806312e0, 0x806312e0 + 0xbba0},
-        {0x8062fb40, 0x8062fb40 + 0x1780},
-        {0x8062f9e0, 0x8062f9e0 + 0x140},
-        {0x8062f960, 0x8062f960 + 0x60},
-        {0x80663300, 0x80663300 + 0x140},  // this is a gfTask "EffectManager", if there's issues are a good place to start
-        {0x80663280, 0x80663280 + 0x60},
-        {0x80663060, 0x80663060 + 0x200},
-        {0x8062b360, 0x8062b360 + 0x14c0},
-        {0x80613e00, 0x80613e00 + 0x28},
-        {0x80641520, 0x80641520 + 0x20},
-        {0x80629a00, 0x80629a00 + 0x160},
-        {0x80623180, 0x80623180 + 0x20},
-        {0x806230e0, 0x806230e0 + 0x80},
-        {0x80627920, 0x80627920 + 0x10c0},
-        {0x8062f3e0, 0x8062f3e0 + 0x40},
-        {0x8062f360, 0x8062f360 + 0x60},
-        {0x8062c840, 0x8062c840 + 0x1e00},
-        {0x80629980, 0x80629980 + 0x60},
-        {0x80628a00, 0x80628a00 + 0xAA0},
-        {0x8049edd8, 0x8049edd8 + 0x5064},
-        {0x805b62a0, 0x805b62a0 + 0x100},
-        {0x80662b40, 0x80662b40 + 0x500},
-        {0x80662620, 0x80662620 + 0x500},
-        {0x80672f40, 0x80672f40 + 0x520},
-        {0x8066b5e0, 0x8066b5e0 + 0x4220},
-        {0x806673a0, 0x806673a0 + 0x4220},
-        {0x80663fe0, 0x80663fe0 + 0x33a0},
-        {0x80672920, 0x80672920 + 0x600},
-        {0x80672300, 0x80672300 + 0x600},
-        {0x80671ce0, 0x80671ce0 + 0x600},
-        {0x806716c0, 0x806716c0 + 0x600},
-        {0x806710a0, 0x806710a0 + 0x600},
-        {0x80670a80, 0x80670a80 + 0x600},
-        {0x80670460, 0x80670460 + 0x600},
-        {0x8066fe40, 0x8066fe40 + 0x600},
-        {0x8066f820, 0x8066f820 + 0x600},
-        {0x8049e57c, 0x8049e57c + 0xC},
+        {0x806414a0, 0x806414a0 + 0x60},   {0x8062f440, 0x8062f440 + 0x500},
+        {0x8063ff60, 0x8063ff60 + 0x1520}, {0x8063dcc0, 0x8063dcc0 + 0x2280},
+        {0x8063da80, 0x8063da80 + 0x220},  {0x80624780, 0x80624780 + 0x50},
+        {0x806232e0, 0x806232e0 + 0x1480}, {0x806273c0, 0x806273c0 + 0x540},
+        {0x80624800, 0x80624800 + 0x2ba0}, {0x80622d20, 0x80622d20 + 0x388},
+        {0x80621260, 0x80621260 + 0x1aa0}, {0x8061f920, 0x8061f920 + 0x1920},
+        {0x8061f460, 0x8061f460 + 0x4a0},  {0x80615620, 0x80615620 + 0x6f20},
+        {0x8061c560, 0x8061c560 + 0x2EE0}, {0x8063d9a0, 0x8063d9a0 + 0xc0},
+        {0x8063d8e0, 0x8063d8e0 + 0xa0},   {0x806312e0, 0x806312e0 + 0xbba0},
+        {0x8062fb40, 0x8062fb40 + 0x1780}, {0x8062f9e0, 0x8062f9e0 + 0x140},
+        {0x8062f960, 0x8062f960 + 0x60},   {0x80663300, 0x80663300 + 0x140},
+        {0x80663280, 0x80663280 + 0x60},   {0x80663060, 0x80663060 + 0x200},
+        {0x8062b360, 0x8062b360 + 0x14c0}, {0x80613e00, 0x80613e00 + 0x28},
+        {0x80641520, 0x80641520 + 0x20},   {0x80629a00, 0x80629a00 + 0x160},
+        {0x80623180, 0x80623180 + 0x20},   {0x806230e0, 0x806230e0 + 0x80},
+        {0x80627920, 0x80627920 + 0x10c0}, {0x8062f3e0, 0x8062f3e0 + 0x40},
+        {0x8062f360, 0x8062f360 + 0x60},   {0x8062c840, 0x8062c840 + 0x1e00},
+        {0x80629980, 0x80629980 + 0x60},   {0x80628a00, 0x80628a00 + 0xAA0},
+        {0x8049edd8, 0x8049edd8 + 0x5064}, {0x805b62a0, 0x805b62a0 + 0x100},
+        {0x80662b40, 0x80662b40 + 0x500},  {0x80662620, 0x80662620 + 0x500},
+        {0x80672f40, 0x80672f40 + 0x520},  {0x8066b5e0, 0x8066b5e0 + 0x4220},
+        {0x806673a0, 0x806673a0 + 0x4220}, {0x80663fe0, 0x80663fe0 + 0x33a0},
+        {0x80672920, 0x80672920 + 0x600},  {0x80672300, 0x80672300 + 0x600},
+        {0x80671ce0, 0x80671ce0 + 0x600},  {0x806716c0, 0x806716c0 + 0x600},
+        {0x806710a0, 0x806710a0 + 0x600},  {0x80670a80, 0x80670a80 + 0x600},
+        {0x80670460, 0x80670460 + 0x600},  {0x8066fe40, 0x8066fe40 + 0x600},
+        {0x8066f820, 0x8066f820 + 0x600},  {0x8049e57c, 0x8049e57c + 0xC},
         {0x805ba480, 0x805baca0}};
     if (GetRAM())
     {
@@ -236,13 +234,6 @@ namespace IncrementalRB
       TrackAlloc(physics, 734208);
       TrackAlloc(overlayCommon, 0x51a700);
       TrackAlloc(overlayStage, 0x70b00);
-
-      /*
-      for (Region& staticRegion : staticRegions)
-      {
-        TrackAlloc(GetPointer(staticRegion.startAddress), staticRegion.endAddress - staticRegion.startAddress + 1);
-      }*/
-      
     }
     if (GetEXRAM())
     {
@@ -276,7 +267,7 @@ namespace IncrementalRB
       TrackAlloc(fighterKirbyResource3, 105216);
       TrackAlloc(fighterEffect, 0x59b00);
     }
-    #elif defined HEAPS
+#elif defined HEAPS
     TrackAlloc(GetPointer(0x8049edd8), 0x804a3e3c - 0x8049edd8);
     TrackAlloc(GetPointer(0x804c1d08), 0x804c1d34 - 0x804c1d08);
     TrackAlloc(GetPointer(0x804f67e0), 0x804f680c - 0x804f67e0);
@@ -350,47 +341,56 @@ namespace IncrementalRB
     TrackAlloc(GetPointer(0x92cb4441), 0x92dcdf27 - 0x92cb4441);
     TrackAlloc(GetPointer(0x92dcdf41), 0x92e90127 - 0x92dcdf41);
     TrackAlloc(GetPointer(0x92e90141), 0x935ce200 - 0x92e90141);
-    #else
+#else
     std::array<Memory::PhysicalMemoryRegion, 4> physical_entries = GetPhysicalRegions();
-    for (int i = 0; i < physical_entries.size(); i++)
+    for (const auto& region : physical_entries)
     {
-      if (!physical_entries[i].active)
+      if (!region.active || !region.out_pointer || !*region.out_pointer || region.size == 0)
       {
         continue;
       }
 
-      TrackAlloc(*physical_entries[i].out_pointer, physical_entries[i].size);
+      TrackAlloc(*region.out_pointer, region.size);
+      INFO_LOG_FMT(BRAWLBACK, "Tracking physical region: base={:016x} size={}",
+                   reinterpret_cast<uintptr_t>(*region.out_pointer), region.size);
     }
+
     // Threading Stuff
-    //ExcludeMem(GetPointer(0x805a5154), 0x805b5158 - 0x805a5154);  // Main Stack
-               
+    // ExcludeMem(GetPointer(0x805a5154), 0x805b5158 - 0x805a5154);  // Main Stack
+
     ExcludeMem(GetPointer(0x80009760), 0x805b5158 - 0x80009760);  // Data Sections, BSS, Main Stack
-    ExcludeMem(GetPointer(0x805bf420), 0x28);                    // ??? OSAlarm
-    ExcludeMem(GetPointer(0x805bacc0), 0x28);                    // PAD OSAlarm
-    ExcludeMem(GetPointer(0x805b85e0), 0x28);                    // OSALarmSleep OSAlarm
-    // Heaps
-    ExcludeMem(GetPointer(0x817ba5a0), 0x817ca5a0 - 0x817ba5a0); // Syringe
+
+    // ExcludeMem(GetPointer(0x805bf420), 0x28);                    // ??? OSAlarm
+    // ExcludeMem(GetPointer(0x805bacc0), 0x28);                    // PAD OSAlarm
+    // ExcludeMem(GetPointer(0x805b85e0), 0x28);                    // OSALarmSleep OSAlarm
+    //  Heaps
+    ExcludeMem(GetPointer(0x817ba5a0), 0x817ca5a0 - 0x817ba5a0);  // Syringe
     ExcludeMem(GetPointer(0x93604000), 0x4000);                   // EXI Transfer
-    //ExcludeMem(GetPointer(0x92163a00), 0x00de6700);              //  InfoExtraResource
-    //ExcludeMem(GetPointer(0x914c9f00), 0x00c99b00);               //  MenuResource
-    ExcludeMem(GetPointer(0x805d1e60), 0x00040100);              // RenderFifo
-    ExcludeMem(GetPointer(0x9134cc00), 0x0012c200);              // CopyFB
-    ExcludeMem(GetPointer(0x805ca260), 0x00007c00);              // Thread
-    ExcludeMem(GetPointer(0x90199800), 0x00cc7c00);              // Sound
-    //ExcludeMem(GetPointer(0x80b8db60), 0x80c23a60 - 0x80b8db60); // Effect*/
+    // ExcludeMem(GetPointer(0x92163a00), 0x00de6700);              //  InfoExtraResource
+    // ExcludeMem(GetPointer(0x914c9f00), 0x00c99b00);               //  MenuResource
+    ExcludeMem(GetPointer(0x805d1e60), 0x00040100);  // RenderFifo
+    ExcludeMem(GetPointer(0x9134cc00), 0x0012c200);  // CopyFB
+    ExcludeMem(GetPointer(0x805ca260), 0x00007c00);  // Thread
+    ExcludeMem(GetPointer(0x90199800), 0x00cc7c00);  // Sound
+    // ExcludeMem(GetPointer(0x80b8db60), 0x80c23a60 - 0x80b8db60); // Effect*/
 
-    std::sort(ExcludeMemList.begin(), ExcludeMemList.end(), [](const ExcludeBuffer& a, const ExcludeBuffer& b){ return a.buffer.data < b.buffer.data; });
+    BuildExcludeSet();
+#endif
+  }
 
-    for (u32 i = 0; i < ExcludeMemList.size(); i++)
-    {
-      excludeSet.insert(ExcludeMemList[i].excludeGap);
-    }
-    
-    #endif
+  void InitState(IncrementalRBCallbacks cb)
+  {
+    // PROFILE_FUNCTION();
+
+    cbs = cb;
+
+    ResetAllocs(savestateInfo);
+    excludeSet.clear();
+    SetupTrackedRegions();
     jobsystem::Initialize(
         numWorkerThreads -
         1);  // -1 because when we do our async and join stuff, main thread also becomes a worker
-    assert(IS_ALIGNED(GetRAM(), 32));  // for simd memcpy, need to be 32 byte aligned
+    assert(IS_ALIGNED(GetRAM(), 32));    // for simd memcpy, need to be 32 byte aligned
     assert(IS_ALIGNED(GetEXRAM(), 32));  // for simd memcpy, need to be 32 byte aligned
 
     // allocate mem for savestates
@@ -401,6 +401,18 @@ namespace IncrementalRB
       assert(IS_ALIGNED(backingMem, 32));
       savestate.arena = arena_init(backingMem, savestateMemSize);
     }
+
+    InitializeCriticalRegions();
+
+    g_verification_history.clear();
+  }
+
+  void RefreshTrackedRegions()
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Refreshing tracked regions after remap");
+    ClearTrackingState();
+    SetupTrackedRegions();
+    InitializeCriticalRegions();
   }
 
   s32 Wrap(s32 x, s32 wrap)
@@ -412,145 +424,181 @@ namespace IncrementalRB
 
   static void RollbackSavestate(const Savestate& savestate)
   {
-    //PROFILE_FUNCTION();
     u64 pageSize = Common::PageSize();
-  #ifdef MULTITHREAD
-    u32 pagesPerThread = savestate.numChangedPages / numWorkerThreads;
-    for (u32 i = 0; i < numWorkerThreads; i++)
-    {
-      u32 pageOffset = i * pagesPerThread;
-      jobsystem::Execute(jobctx, [pageOffset, pagesPerThread, &savestate, pageSize,
-                                  i](jobsystem::JobArgs args) {
-        //PROFILE_FUNCTION();
-        u32 endPageIdx = pageOffset + pagesPerThread;
-        for (u32 pageIdx = pageOffset; pageIdx < endPageIdx; pageIdx++)
-        {
-          void* orig = savestate.changedPages[pageIdx];
-          void* ssData = savestate.afterCopies[pageIdx];
-          #ifdef ENABLE_LOGGING
-          assert((orig >= GetRAM() && orig < GetRAM() + GetRAMSize()) ||
-                 (orig >= GetEXRAM() &&
-                  orig < GetEXRAM() + GetEXRAMSize()));
-          // first 4 bytes of game mem contains current frame
-          if (orig == GetGameMemFrame())
-          {
-            u32 nowFrame = *GetGameMemFrame();
-            INFO_LOG_FMT(BRAWLBACK, "rolling back {} -> {}\n", nowFrame, ((u32*)ssData)[0]);
-          }
-          #endif
-          rbMemcpy(orig, ssData, pageSize);
-        }
-      });
-    }
-    if (numWorkerThreads % 2 != 0)
-    {
-      // odd number of worker threads means we can't evenly split up the work, so do the last bit here
-      u32 pageIdx = savestate.numChangedPages - 1;
-      void* orig = savestate.changedPages[pageIdx];
-      void* ssData = savestate.afterCopies[pageIdx];
-      rbMemcpy(orig, ssData, pageSize);
-    }
-    jobsystem::Wait(jobctx);
-  #else
 
+#ifndef MULTITHREAD
     if (excludeSet.size() > 0)
     {
+      std::unordered_map<uintptr_t, size_t> pageToIndexMap;
+      for (size_t i = 0; i < savestate.changedPages.size(); i++)
+      {
+        pageToIndexMap[savestate.changedPages[i]] = i;
+      }
+
       TIntervalSet changedSet;
       for (u32 i = 0; i < savestate.changedPages.size(); i++)
       {
         changedSet += boost::icl::discrete_interval<uintptr_t>::closed(
-            savestate.changedPages[i], savestate.changedPages[i] + pageSize);
+            savestate.changedPages[i], savestate.changedPages[i] + pageSize - 1);
       }
 
       auto difference = changedSet - excludeSet;
+
+#ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK, "Restoring {} intervals after exclude filtering (from {} pages)",
+                   boost::icl::iterative_size(difference), savestate.changedPages.size());
+#endif
+
       for (auto it = difference.begin(); it != difference.end(); ++it)
       {
-        auto orig_ptr = (uintptr_t)it->lower();
-        u8* ssData = nullptr;
-        size_t size = 0;
-        if (boost::icl::contains(*it, it->lower()))
-        {
-          auto itOrig = std::find(std::begin(savestate.changedPages), savestate.changedPages.end(),
-                                  it->lower());
-          if (itOrig != savestate.changedPages.end())
-          {
-            size_t index = std::distance(std::begin(savestate.changedPages), itOrig);
-            ssData = (u8*)savestate.afterCopies[index];
-            size = it->upper() - it->lower();
-            if (!boost::icl::contains(*it, it->upper()))
-            {
-              size--;
-            }
-          }
-        }
-        else
-        {
-          uintptr_t lowerPage =
-              reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)it->lower(), pageSize));
-          auto itOrig = std::find(std::begin(savestate.changedPages), savestate.changedPages.end(),
-                                  lowerPage);
-          if (itOrig != savestate.changedPages.end() && it->upper() - it->lower() > 0)
-          {
-            orig_ptr = lowerPage + (it->lower() - lowerPage + 1);
-            size_t index = std::distance(std::begin(savestate.changedPages), itOrig);
-            ssData = (u8*)(savestate.afterCopies[index] + (it->lower() - lowerPage + 1));
-            size = it->upper() - it->lower() - 1;
-            if (!boost::icl::contains(*it, it->upper()))
-            {
-              size--;
-            }
-          }
-        }
-        if (ssData && size > 0)
-        {
-          auto orig = (u8*)orig_ptr;
+        uintptr_t interval_start = it->lower();
+        uintptr_t interval_end = it->upper();
+        size_t interval_size = (interval_end - interval_start) + 1;
 
-          if (size >= pageSize && size % pageSize == 0)
+        uintptr_t current_addr = interval_start;
+        size_t bytes_copied = 0;
+
+        while (bytes_copied < interval_size)
+        {
+          uintptr_t page_start =
+              reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)current_addr, pageSize));
+
+          auto map_it = pageToIndexMap.find(page_start);
+          if (map_it == pageToIndexMap.end())
           {
-            rbMemcpy(orig, ssData, size);
+            ERROR_LOG_FMT(
+                BRAWLBACK,
+                "Could not find page {:016x} for address {:016x} in interval [{:016x}, {:016x}]",
+                page_start, current_addr, interval_start, interval_end);
+            break;
+          }
+
+          size_t page_index = map_it->second;
+          u8* page_data = (u8*)savestate.afterCopies[page_index];
+
+          uintptr_t offset_in_page = current_addr - page_start;
+          size_t bytes_left_in_page = pageSize - offset_in_page;
+          size_t bytes_left_in_interval = interval_size - bytes_copied;
+          size_t bytes_to_copy = std::min(bytes_left_in_page, bytes_left_in_interval);
+
+          u8* src = page_data + offset_in_page;
+          u8* dst = (u8*)current_addr;
+
+          bool can_use_fast_memcpy =
+              (bytes_to_copy % 32 == 0) && (IS_ALIGNED(src, 32)) && (IS_ALIGNED(dst, 32));
+
+          if (can_use_fast_memcpy)
+          {
+            rbMemcpy(dst, src, bytes_to_copy);
           }
           else
           {
-            memcpy(orig, ssData, size);
+            memcpy(dst, src, bytes_to_copy);
           }
+
+          bytes_copied += bytes_to_copy;
+          current_addr += bytes_to_copy;
         }
       }
     }
     else
     {
+#ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK, "Restoring all {} pages (no excludes)",
+                   savestate.changedPages.size());
+#endif
+
       for (u32 i = 0; i < savestate.changedPages.size(); i++)
       {
         rbMemcpy((void*)savestate.changedPages[i], (void*)savestate.afterCopies[i], pageSize);
       }
     }
-    
-  #endif
+#endif
   }
+  void DumpMemoryState(s32 frame, const std::string& reason)
+  {
+    std::string filename = fmt::format("memory_dump_frame_{}_{}.txt", frame, reason);
+    std::ofstream dump_file(filename);
 
+    if (!dump_file.is_open())
+    {
+      ERROR_LOG_FMT(BRAWLBACK, "Failed to create memory dump file: {}", filename);
+      return;
+    }
+
+    dump_file << fmt::format("=== MEMORY DUMP: Frame {} ===\n", frame);
+    dump_file << fmt::format("Reason: {}\n\n", reason);
+
+    u64 total_hash = CalculateMemoryHash(g_critical_regions);
+    dump_file << fmt::format("Total Hash: {:016x}\n\n", total_hash);
+
+    for (const auto& region : g_critical_regions)
+    {
+      if (!region.ptr)
+      {
+        dump_file << fmt::format("Region '{}': NULL\n", region.name);
+        continue;
+      }
+
+      // Calculate region hash
+      u64 region_hash = 0xCBF29CE484222325ULL;
+      const u64 prime = 0x100000001B3ULL;
+
+      const u32* data = reinterpret_cast<const u32*>(region.ptr);
+      size_t dwords = region.size / 4;
+
+      for (size_t i = 0; i < dwords; ++i)
+      {
+        region_hash ^= static_cast<u64>(data[i]);
+        region_hash *= prime;
+      }
+
+      dump_file << fmt::format("Region '{}': size={}, hash={:016x}\n", region.name, region.size,
+                               region_hash);
+
+      // Dump region
+      dump_file << "  First 64 bytes: ";
+      for (size_t i = 0; i < region.size; ++i)
+      {
+        dump_file << fmt::format("{:02x} ", region.ptr[i]);
+        if ((i + 1) % 16 == 0)
+          dump_file << "\n                  ";
+      }
+      dump_file << "\n\n";
+    }
+
+    dump_file.close();
+    INFO_LOG_FMT(BRAWLBACK, "Memory dump written to: {}", filename);
+  }
   bool Rollback(s32 currentFrame, s32 rollbackFrame)
   {
     // PROFILE_FUNCTION();
     if (currentFrame < MAX_SAVESTATES)
       return false;
 
-   // -1 because all savestates are taken after a frame's simulation
-    // this means if you want to rollback to frame 5, you'd actually need to restore the data
-    // captured on frame 4
-    s32 savestateOffset = currentFrame - rollbackFrame - 1; 
-    if (rollbackFrame >= currentFrame || savestateOffset >= MAX_ROLLBACK_FRAMES)
+    // Calculate how many frames we need to roll back
+    s32 savestateOffset = currentFrame - rollbackFrame;
+
+    if (rollbackFrame >= currentFrame || savestateOffset >= MAX_ROLLBACK_FRAMES ||
+        savestateOffset <= 0)
     {
+      ERROR_LOG_FMT(BRAWLBACK, "Invalid rollback: current={}, target={}, offset={}", currentFrame,
+                    rollbackFrame, savestateOffset);
       return false;
     }
-    // -1 because we want to start rolling back on the index before the current frame
-    // another -1 because our savestates are for the end of the frame, so need to go back another
-    s32 currentSavestateIdx = Wrap(currentFrame - 1 - 1, MAX_SAVESTATES);
-    s32 endingSavestateIdx = Wrap(currentSavestateIdx - savestateOffset, MAX_SAVESTATES);
 
-    //assert(endingSavestateIdx < MAX_SAVESTATES && endingSavestateIdx != currentSavestateIdx);
+    // Savestates are captured at the END of each frame
+    // To rollback to frame N, we need the savestate from frame N-1
+    s32 currentSavestateIdx = Wrap(currentFrame - 1, MAX_SAVESTATES);
+
+    // The target savestate is the one captured at the end of (rollbackFrame - 1)
+    // which gets us to the start of rollbackFrame
+    s32 targetSavestateIdx = Wrap(rollbackFrame - 1, MAX_SAVESTATES);
+
 #ifdef ENABLE_LOGGING
     INFO_LOG_FMT(BRAWLBACK, "Starting at game mem frame {}\n", currentFrame);
     INFO_LOG_FMT(BRAWLBACK, "Rolling back {} frames from idx {} -> {} | frame {} -> {}\n",
-                 savestateOffset, currentSavestateIdx, endingSavestateIdx, *GetGameMemFrame(),
+                 savestateOffset, currentSavestateIdx, targetSavestateIdx, currentFrame,
                  rollbackFrame);
     INFO_LOG_FMT(BRAWLBACK, "Savestate frames stored:\n");
     for (u32 i = 0; i < MAX_SAVESTATES; i++)
@@ -559,33 +607,95 @@ namespace IncrementalRB
     }
     INFO_LOG_FMT(BRAWLBACK, "\n");
 #endif
-    // given an index into our savestates list, rollback to that.
-    // go from the current index, walking backward applying each savestate's "before" snapshots
-    // one at a time
 
-    if (endingSavestateIdx >= MAX_SAVESTATES || endingSavestateIdx == currentSavestateIdx)
+    if (targetSavestateIdx >= MAX_SAVESTATES)
     {
+      ERROR_LOG_FMT(BRAWLBACK, "Invalid rollback indices: current={}, target={}",
+                    currentSavestateIdx, targetSavestateIdx);
       return false;
     }
-    while (currentSavestateIdx != endingSavestateIdx)
+
+    // **FIX: Look for verification hash at the TARGET frame (not N-1)**
+    // The hash recorded at frame N-1 represents the state at the START of frame N
+    u64 expected_hash = 0;
+    SavestateVerification* verification_point = nullptr;
+
+    // Look for the hash recorded at the end of rollbackFrame-1
+    // which represents the start of rollbackFrame
+    auto verification_it = std::find_if(
+        g_verification_history.begin(), g_verification_history.end(),
+        [rollbackFrame](const SavestateVerification& v) { return v.frame == rollbackFrame - 1; });
+
+    if (verification_it != g_verification_history.end())
+    {
+      expected_hash = verification_it->memory_hash;
+      verification_point = &*verification_it;
+      INFO_LOG_FMT(BRAWLBACK, "Found verification point: frame {} hash={:016x}", rollbackFrame - 1,
+                   expected_hash);
+    }
+
+    // Apply savestates in reverse order to roll back
+    s32 steps = 0;
+    while (currentSavestateIdx != targetSavestateIdx)
     {
       Savestate& savestate = savestateInfo.savestates[currentSavestateIdx];
+
+      if (!savestate.valid)
+      {
+        ERROR_LOG_FMT(BRAWLBACK, "Invalid savestate at idx {} (frame {})", currentSavestateIdx,
+                      savestate.frame);
+        return false;
+      }
+
+      INFO_LOG_FMT(BRAWLBACK, "Applying savestate idx {} (frame {})", currentSavestateIdx,
+                   savestate.frame);
       RollbackSavestate(savestate);
+
       currentSavestateIdx = Wrap(currentSavestateIdx - 1, MAX_SAVESTATES);
+      steps++;
+
+      // Safety check to prevent infinite loops
+      if (steps > MAX_ROLLBACK_FRAMES)
+      {
+        ERROR_LOG_FMT(BRAWLBACK, "Rollback exceeded maximum steps!");
+        return false;
+      }
     }
-    // summary -
-    // we are on frame 15, trying to rollback to frame 10 since we didn't get inputs on frame 10,
-    // have been predicting, and just got past inputs from 10
-    // ---
-    // we start at frame 14 because all snapshots are for the end of the frame, so since we're at
-    // the beginning of frame 15, we're technically at the end of 14 so we go from 14->13 by
-    // applying frame 13's changed pages, then 13->12, .... then 11->10. We stop here, but applying
-    // 11->10 actually gets us to the end of frame 10/beginning of 11. We want to be at the
-    // beginning of 10/end of 9 since that's where we need to reapply the new inputs and start
-    // resimulating so we do one more at the end of this loop
-    INFO_LOG_FMT(BRAWLBACK, "ASSERT CHECK 1: {} == {}?\n", savestateInfo.savestates[currentSavestateIdx].frame, rollbackFrame - 1);
-    //assert(savestateInfo.savestates[currentSavestateIdx].frame == (u32)(rollbackFrame) - 1);
-    RollbackSavestate(savestateInfo.savestates[currentSavestateIdx]);
+
+    // Apply the final target savestate to get to the start of rollbackFrame
+    Savestate& finalState = savestateInfo.savestates[targetSavestateIdx];
+    if (!finalState.valid)
+    {
+      ERROR_LOG_FMT(BRAWLBACK, "Invalid final savestate at idx {} (frame {})", targetSavestateIdx,
+                    finalState.frame);
+      return false;
+    }
+
+    INFO_LOG_FMT(BRAWLBACK, "Applying final savestate idx {} (frame {})", targetSavestateIdx,
+                 finalState.frame);
+    RollbackSavestate(finalState);
+
+    if (verification_point)
+    {
+      const u64 current_hash = CalculateMemoryHash(g_critical_regions);
+      if (current_hash != expected_hash)
+      {
+        ERROR_LOG_FMT(BRAWLBACK,
+                      "VERIFICATION FAILED at frame {}: expected hash {:016x}, got {:016x}",
+                      verification_point->frame, expected_hash, current_hash);
+        DumpMemoryState(rollbackFrame, "rollback_verification_failed");
+        return false;
+      }
+
+      verification_point->verified = true;
+      INFO_LOG_FMT(BRAWLBACK, "Verification PASSED for frame {}: hash={:016x}",
+                   verification_point->frame, current_hash);
+    }
+
+#ifdef ENABLE_LOGGING
+    INFO_LOG_FMT(BRAWLBACK, "Rollback complete: applied {} savestates", steps + 1);
+#endif
+
     return true;
   }
 
@@ -687,10 +797,51 @@ namespace IncrementalRB
   #endif
   }
 
-  void OnFrameEnd(s32 frame, bool resim)
+  void SaveWritePagesExperimental(u32 frame, bool resim, std::vector<SavestateMemRegionInfo> region)
   {
-    SaveWrittenPages(frame, resim);
+    u32 savestateHead = frame % MAX_SAVESTATES;
+    Savestate& savestate = savestateInfo.savestates[savestateHead];
 
+    if (savestate.valid && !resim)
+    {
+    #ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK, "EVICTING SAVESTATE!\n");
+    #endif
+      EvictSavestate(savestate);
+    }
+    savestate.frame = frame;
+    savestate.valid = GetAndResetWrittenPages(savestate.changedPages, MAX_NUM_CHANGED_PAGES, region);
+    OnPagesWritten(savestate);
+#ifdef ENABLE_LOGGING
+    u64 numChangedBytes = savestate.changedPages.size() * Common::PageSize();
+    float changedMB = numChangedBytes / 1024.0 / 1024.0;
+    INFO_LOG_FMT(BRAWLBACK, "Frame {}, head = {}\tNum changed pages = {}\tChanged MB = {}\n", frame,
+                 savestateHead, savestate.changedPages.size(), changedMB);
+#endif
+  }
+
+  void OnFrameEnd(s32 frame, bool resim, std::vector<SavestateMemRegionInfo> region)
+  {
+    if (region.size() > 0)
+    {
+      SaveWritePagesExperimental(frame, resim, region);
+    }
+    else
+    {
+      SaveWrittenPages(frame, resim);
+    }
+
+    bool should_verify = frame > 120;
+
+    if (should_verify && !resim)
+    {
+      u64 hash = CalculateMemoryHash(g_critical_regions);
+      RecordVerificationPoint(frame, hash);
+      if (NetPlay::netplay_client)
+      {
+        NetPlay::netplay_client->SendRollbackVerification(frame, hash);
+      }
+    }
   }
 
   void Shutdown()
@@ -701,4 +852,199 @@ namespace IncrementalRB
     }
     jobsystem::ShutDown();
   }
-}
+
+  void InitializeCriticalRegions()
+  {
+    g_critical_regions.clear();
+
+    INFO_LOG_FMT(BRAWLBACK, "=== Initializing Critical Memory Regions ===");
+
+    if (GetRAM())
+    {
+      u8* system_ptr = GetPointer(0x80611f60);
+      if (system_ptr)
+      {
+        g_critical_regions.push_back({system_ptr, 0x61500, "System"});
+        INFO_LOG_FMT(BRAWLBACK, "Added System: addr={:016x}, size=0x61500",
+                     reinterpret_cast<uintptr_t>(system_ptr));
+      }
+
+      u8* fighter1_ptr = GetPointer(0x8123ab60);
+      if (fighter1_ptr)
+      {
+        g_critical_regions.push_back({fighter1_ptr, 335872, "Fighter1"});
+        INFO_LOG_FMT(BRAWLBACK, "Added Fighter1: addr={:016x}, size=335872",
+                     reinterpret_cast<uintptr_t>(fighter1_ptr));
+      }
+
+      u8* fighter2_ptr = GetPointer(0x8128cb60);
+      if (fighter2_ptr)
+      {
+        g_critical_regions.push_back({fighter2_ptr, 335872, "Fighter2"});
+        INFO_LOG_FMT(BRAWLBACK, "Added Fighter2: addr={:016x}, size=335872",
+                     reinterpret_cast<uintptr_t>(fighter2_ptr));
+      }
+
+      u8* physics_ptr = GetPointer(0x8154e560);
+      if (physics_ptr)
+      {
+        g_critical_regions.push_back({physics_ptr, 734208, "Physics"});
+        INFO_LOG_FMT(BRAWLBACK, "Added Physics: addr={:016x}, size=734208",
+                     reinterpret_cast<uintptr_t>(physics_ptr));
+      }
+
+      u8* stage_ptr = GetPointer(0x814ce460);
+      if (stage_ptr)
+      {
+        g_critical_regions.push_back({stage_ptr, 524544, "Stage"});
+        INFO_LOG_FMT(BRAWLBACK, "Added Stage: addr={:016x}, size=524544",
+                     reinterpret_cast<uintptr_t>(stage_ptr));
+      }
+    }
+
+    if (GetEXRAM())
+    {
+      u8* game_global_ptr = GetPointer(0x90167400);
+      if (game_global_ptr)
+      {
+        g_critical_regions.push_back({game_global_ptr, 205824, "GameGlobal"});
+        INFO_LOG_FMT(BRAWLBACK, "Added GameGlobal: addr={:016x}, size=205824",
+                     reinterpret_cast<uintptr_t>(game_global_ptr));
+      }
+
+      u8* fighter_res1_ptr = GetPointer(0x9151fa00);
+      if (fighter_res1_ptr)
+      {
+        g_critical_regions.push_back({fighter_res1_ptr, 5583872, "FighterResource1"});
+        INFO_LOG_FMT(BRAWLBACK, "Added FighterResource1: addr={:016x}, size=5583872",
+                     reinterpret_cast<uintptr_t>(fighter_res1_ptr));
+      }
+
+      u8* fighter_res2_ptr = GetPointer(0x91b04c80);
+      if (fighter_res2_ptr)
+      {
+        g_critical_regions.push_back({fighter_res2_ptr, 5583872, "FighterResource2"});
+        INFO_LOG_FMT(BRAWLBACK, "Added FighterResource2: addr={:016x}, size=5583872",
+                     reinterpret_cast<uintptr_t>(fighter_res2_ptr));
+      }
+    }
+
+    INFO_LOG_FMT(BRAWLBACK,
+                 "=== Initialized {} critical memory regions ===", g_critical_regions.size());
+  }
+
+  u64 CalculateMemoryHash(const std::vector<CriticalMemoryRegion>& regions)
+  {
+    // FNV-1a hash
+    u64 hash = 0xCBF29CE484222325ULL;
+    const u64 prime = 0x100000001B3ULL;
+
+    for (const auto& region : regions)
+    {
+      if (!region.ptr)
+        continue;
+
+      // Hash the region name first for better distribution
+      for (char c : region.name)
+      {
+        hash ^= static_cast<u64>(c);
+        hash *= prime;
+      }
+
+      // Hash memory content in 4-byte chunks for efficiency
+      const u32* data = reinterpret_cast<const u32*>(region.ptr);
+      size_t dwords = region.size / 4;
+
+      for (size_t i = 0; i < dwords; ++i)
+      {
+        u32 value = data[i];
+        hash ^= static_cast<u64>(value);
+        hash *= prime;
+      }
+
+      // Handle remaining bytes
+      size_t remaining = region.size % 4;
+      if (remaining > 0)
+      {
+        const u8* tail = reinterpret_cast<const u8*>(&data[dwords]);
+        for (size_t i = 0; i < remaining; ++i)
+        {
+          hash ^= static_cast<u64>(tail[i]);
+          hash *= prime;
+        }
+      }
+    }
+
+    return hash;
+  }
+
+  void RecordVerificationPoint(s32 frame, u64 hash)
+  {
+    SavestateVerification verification;
+    verification.frame = frame;
+    verification.memory_hash = hash;
+    verification.verified = false;
+    verification.timestamp = std::chrono::steady_clock::now();
+
+    g_verification_history.push_back(verification);
+
+    // Keep only last 120 frames (2 seconds at 60fps)
+    if (g_verification_history.size() > 120)
+    {
+      g_verification_history.erase(g_verification_history.begin());
+    }
+
+    INFO_LOG_FMT(BRAWLBACK, "Verification point recorded: frame={}, hash={:016x}", frame, hash);
+  }
+
+  bool VerifyRollbackState(s32 frame)
+  {
+    // Find the verification point for this frame
+    auto it = std::find_if(g_verification_history.begin(), g_verification_history.end(),
+                           [frame](const SavestateVerification& v) { return v.frame == frame; });
+
+    if (it == g_verification_history.end())
+    {
+      WARN_LOG_FMT(BRAWLBACK, "No verification point found for frame {}", frame);
+      return true;  // Can't verify, assume OK
+    }
+
+    // Calculate current hash
+    u64 current_hash = CalculateMemoryHash(g_critical_regions);
+
+    if (current_hash != it->memory_hash)
+    {
+      ERROR_LOG_FMT(BRAWLBACK,
+                    "VERIFICATION FAILED at frame {}: expected hash {:016x}, got {:016x}", frame,
+                    it->memory_hash, current_hash);
+
+      // Log which regions differ
+      for (const auto& region : g_critical_regions)
+      {
+        if (!region.ptr)
+          continue;
+
+        u64 region_hash = 0xCBF29CE484222325ULL;
+        const u64 prime = 0x100000001B3ULL;
+
+        const u32* data = reinterpret_cast<const u32*>(region.ptr);
+        size_t dwords = region.size / 4;
+
+        for (size_t i = 0; i < dwords; ++i)
+        {
+          region_hash ^= static_cast<u64>(data[i]);
+          region_hash *= prime;
+        }
+
+        INFO_LOG_FMT(BRAWLBACK, "  Region '{}': hash={:016x}", region.name, region_hash);
+      }
+
+      return false;
+    }
+
+    it->verified = true;
+    INFO_LOG_FMT(BRAWLBACK, "Verification PASSED for frame {}: hash={:016x}", frame, current_hash);
+
+    return true;
+  }
+  }

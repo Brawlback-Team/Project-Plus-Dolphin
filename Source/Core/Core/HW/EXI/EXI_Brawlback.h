@@ -16,7 +16,8 @@ enum EXICommand : u8
   CMD_GET_PORT = 4,
   CMD_GET_REMOTE_INPUTS = 5,
   CMD_GET_LOCAL_INPUTS = 6,
-  CMD_ROLLBACK_CHECK = 7
+  CMD_ROLLBACK_CHECK = 7,
+  CMD_SIZE_SAVESTATES = 8
 };
 
 class CEXIBrawlback : public ExpansionInterface::IEXIDevice
@@ -31,15 +32,16 @@ public:
 private:
   // byte vector for sending into to the game
   std::vector<u8> read_queue = {};
+  int sizeOfSavestatesRegions = 0;
 
   // --- DMA handlers
   void handleEndFrame();
-  void handleEndLoop();
+  void handleEndLoop(u8* payload);
   void handleStartLoop(u8* payload);
   void handleGetPort();
   void handleGetInputs(bool local);
-
   void handleGetNetworkingMode();
+  void handleGetSizeSavestates(u8* payload);
 
 protected:
   void TransferByte(u8& byte) override;

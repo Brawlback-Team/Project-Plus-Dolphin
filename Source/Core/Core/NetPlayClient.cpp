@@ -18,7 +18,9 @@
 #include <vector>
 #include <latch>
 #include <optional>
-
+#include <ranges>
+#include <chrono>
+#include <map>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
@@ -155,7 +157,8 @@ NetPlayClient::~NetPlayClient()
 // called from ---GUI--- thread
 NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlayUI* dialog,
                              const std::string& name, const NetTraversalConfig& traversal_config)
-    : m_dialog(dialog), m_player_name(name)
+    : m_dialog(dialog), m_player_name(name),
+      m_last_desync_notification(std::chrono::steady_clock::now())
 {
   ClearBuffers();
 
@@ -468,7 +471,9 @@ void NetPlayClient::OnData(sf::Packet& packet)
   case MessageID::HostInputAuthority:
     OnHostInputAuthority(packet);
     break;
-
+  case MessageID::RollbackMode:
+    OnRollbackMode(packet);
+    break;  
   case MessageID::GolfSwitch:
     OnGolfSwitch(packet);
     break;
@@ -744,7 +749,6 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
   {
     PadIndex map;
     packet >> map;
-      
 
     if (m_net_settings.m_RollbackMode)
     {
@@ -757,7 +761,7 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
       packet >> playerIndex;
       packet >> maxFrame;
 
-      pad_config.at(map) = config;
+      pad_config.at(playerIndex) = config;
 
       if (sizeofFramedatas > 0)
       {
@@ -773,14 +777,19 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
       for (u8 i = 0; i < sizeofFramedatas; i++)
       {
         Inputs pad_inputs;
-        packet >> pad_inputs.game_pad.buttons >> pad_inputs.game_pad._buttons >> pad_inputs.game_pad.holdButtons >> pad_inputs.game_pad.rapidFireButtons >>
-            pad_inputs.game_pad.newPressedButtons >> pad_inputs.game_pad.releasedButtons >> pad_inputs.game_pad.stickX >> pad_inputs.game_pad.stickY >>
-            pad_inputs.game_pad.cStickX >> pad_inputs.game_pad.cStickY >> pad_inputs.game_pad.LAnalogue >> pad_inputs.game_pad.RAnalogue >> pad_inputs.game_pad.LTrigger >>
-            pad_inputs.game_pad.RTrigger;
+        packet >> pad_inputs.game_pad.buttons >> pad_inputs.game_pad._buttons >>
+            pad_inputs.game_pad.holdButtons >> pad_inputs.game_pad.rapidFireButtons >>
+            pad_inputs.game_pad.newPressedButtons >> pad_inputs.game_pad.releasedButtons >>
+            pad_inputs.game_pad.stickX >> pad_inputs.game_pad.stickY >>
+            pad_inputs.game_pad.cStickX >> pad_inputs.game_pad.cStickY >>
+            pad_inputs.game_pad.LAnalogue >> pad_inputs.game_pad.RAnalogue >>
+            pad_inputs.game_pad.LTrigger >> pad_inputs.game_pad.RTrigger;
 
-        packet >> pad_inputs.emu_pad.button >> pad_inputs.emu_pad.stickX >> pad_inputs.emu_pad.stickY >>
-            pad_inputs.emu_pad.substickX >> pad_inputs.emu_pad.substickY >> pad_inputs.emu_pad.triggerLeft >>
-            pad_inputs.emu_pad.triggerRight >> pad_inputs.emu_pad.analogA >> pad_inputs.emu_pad.analogB >> pad_inputs.emu_pad.isConnected;
+        packet >> pad_inputs.emu_pad.button >> pad_inputs.emu_pad.stickX >>
+            pad_inputs.emu_pad.stickY >> pad_inputs.emu_pad.substickX >>
+            pad_inputs.emu_pad.substickY >> pad_inputs.emu_pad.triggerLeft >>
+            pad_inputs.emu_pad.triggerRight >> pad_inputs.emu_pad.analogA >>
+            pad_inputs.emu_pad.analogB >> pad_inputs.emu_pad.isConnected;
 
         packet >> pad_inputs.frame;
 
@@ -791,40 +800,40 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
         std::lock_guard<std::mutex> lock(crit_netplay_client);
         for (auto pad : pads)
         {
-          if (!inputs.at(map).empty())
+          if (!inputs.at(playerIndex).Empty())
           {
             // if the remote frame we're trying to process is not newer than the most recent frame,
             // we don't care about it
-            if (pad.frame <= inputs.at(map).back().frame)
+            if (pad.frame <= inputs.at(playerIndex).GetBack()->frame)
             {
               ERROR_LOG_FMT(BRAWLBACK, "Remote input is already accounted for! {} <= {}\n",
-                            pad.frame, inputs.at(map).back().frame);
+                            pad.frame, inputs.at(playerIndex).GetBack()->frame);
               continue;
             }
             // make sure the inputs we're adding are sequential
-            if (pad.frame != inputs.at(map).back().frame + 1)
+            if (pad.frame != inputs.at(playerIndex).GetBack()->frame + 1)
             {
               ERROR_LOG_FMT(BRAWLBACK, "Remote input is not sequential! {} != {}\n", pad.frame,
-                            inputs.at(map).back().frame + 1);
+                            inputs.at(playerIndex).GetBack()->frame + 1);
               continue;
             }
           }
           // clamp size of remote player framedata queue
-          inputs.at(map).push_back(pad);
-
-          while (inputs.at(map).size() > FRAMEDATA_MAX_QUEUE_SIZE)
-          {
-            inputs.at(map).erase(inputs.at(map).begin());
-          }
+          inputs.at(playerIndex).Push(pad);
 
           auto current_inputs = json{};
           ToJson(current_inputs, pad);
-          std::string port = fmt::format("{}_{}", "player_port", map);
+          std::string port = fmt::format("{}_{}", "player_port", playerIndex);
 
           inputs_output[port].push_back(current_inputs);
         }
-        
-        time_sync->ReceivedRemoteFramedata(maxFrame, static_cast<u8>(m_local_player->pid - 1),
+        int local_player_port = -1;
+        for (int i = 0; i < m_pad_map.size(); i++)
+        {
+          if (m_pad_map.at(i) == m_local_player->pid)
+            local_player_port = i;
+        }
+        time_sync->ReceivedRemoteFramedata(maxFrame, static_cast<u8>(local_player_port),
                                            start_inputs);
       }
     }
@@ -844,6 +853,7 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
     }
   }
 }
+
 
 void NetPlayClient::OnPadHostData(sf::Packet& packet)
 {
@@ -870,6 +880,21 @@ void NetPlayClient::OnPadHostData(sf::Packet& packet)
       m_first_pad_status_received_event.Set();
     }
   }
+}
+
+void NetPlayClient::SendRollbackVerification(s32 frame, u64 hash)
+{
+  std::lock_guard lk(crit_netplay_client);
+
+  if (!IsInRollbackMode() || !IsStarted())
+    return;
+
+  sf::Packet packet;
+  packet << MessageID::RollbackVerification;
+  packet << frame;
+  packet << hash;
+
+  netplay_client->SendAsync(std::move(packet));
 }
 
 void NetPlayClient::OnWiimoteData(sf::Packet& packet)
@@ -927,6 +952,12 @@ void NetPlayClient::OnHostInputAuthority(sf::Packet& packet)
 {
   packet >> m_host_input_authority;
   m_dialog->OnHostInputAuthorityChanged(m_host_input_authority);
+}
+
+void NetPlayClient::OnRollbackMode(sf::Packet& packet)
+{
+  packet >> m_rollback_mode;
+  m_dialog->OnRollbackModeChanged(m_rollback_mode);
 }
 
 void NetPlayClient::OnGolfSwitch(sf::Packet& packet)
@@ -1171,40 +1202,45 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     m_net_settings.is_hosting = m_local_player->IsHost();
   }
 
-  inputs.clear();
-  predicted_inputs.clear();
-  for (auto player : m_players)
+  if (IsInRollbackMode())
   {
-    if (player.second.pid == m_local_player->pid)
+    inputs.clear();
+    predicted_inputs.clear();
+    pad_config.clear();
+
+    for (auto player : m_players)
     {
-      std::vector<Inputs> empty_pads = {};
-      auto config = Config::Get(Config::GetInfoForSIDevice(0));
-      for (int i = 0; i < delay; i++)
+      if (player.first == m_local_player->pid)
       {
-        Inputs empty_pad = Inputs{};
-        empty_pad.emu_pad = GetDefaultPad(config);
-        empty_pads.push_back(empty_pad);
+        RingBufferInput empty_pads = {};
+        auto config = Config::Get(Config::GetInfoForSIDevice(0));
+        for (int i = 0; i < delay; i++)
+        {
+          Inputs empty_pad = Inputs{};
+          empty_pad.emu_pad = GetDefaultPad(config);
+          empty_pads.Push(empty_pad);
+        }
+        inputs.push_back(empty_pads);
+
+        pad_config.push_back(config);
       }
-      inputs.push_back(empty_pads);
-
-      pad_config.push_back(config);
+      else
+      {
+        pad_config.push_back(12);
+        inputs.push_back({});
+      }
+      std::string port = fmt::format("{}_{}", "player_port", player.first);
+      inputs_output[port] = json::array();
+      predicted_inputs.push_back(Inputs{});
     }
-    else
+    current_frame = 0;
+    if (!time_sync)
     {
-      pad_config.push_back(12);
-      inputs.push_back({});
+      time_sync = std::make_unique<Brawlback::TimeSync>();
     }
-    std::string port = fmt::format("{}_{}", "player_port", player.second.pid - 1);
-    inputs_output[port] = json::array();
-    predicted_inputs.push_back(Inputs{});
+    time_sync->startGame(static_cast<u8>(inputs.size()));
   }
-  current_frame = 0;
-  if (!time_sync)
-  {
-    time_sync = std::make_unique<Brawlback::TimeSync>();
-  }
-  time_sync->startGame(static_cast<u8>(inputs.size()));
-
+  
   m_dialog->OnMsgStartGame();
 }
 
@@ -1251,24 +1287,36 @@ void NetPlayClient::OnPlayerPingData(sf::Packet& packet)
 
 void NetPlayClient::OnDesyncDetected(sf::Packet& packet)
 {
-  if (!m_net_settings.m_RollbackMode)
+  int player_index;
+  s32 frame;
+  packet >> player_index;
+  packet >> frame;
+
+  std::string player_name = GetPlayerName(player_index);
+
+  INFO_LOG_FMT(NETPLAY, "Server reported desync: Player {} at frame {}", player_name, frame);
+
+  if (m_net_settings.m_RollbackMode)
   {
-    int pid_to_blame;
-    u32 frame;
-    packet >> pid_to_blame;
-    packet >> frame;
+    IncrementalRB::DumpMemoryState(frame, "network_desync");
 
-    std::string player = "??";
-    std::lock_guard lkp(m_crit.players);
-    {
-      const auto it = m_players.find(pid_to_blame);
-      if (it != m_players.end())
-        player = it->second.name;
-    }
+    // In rollback mode, show warning but continue playing
+    std::string message =
+        fmt::format("Network desync detected with {}!\nAttempting to recover...", player_name);
 
-    INFO_LOG_FMT(NETPLAY, "Player {} ({}) desynced!", player, pid_to_blame);
+    m_dialog->AppendChat(message);
 
-    m_dialog->OnDesync(frame, player);
+    OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer, message, OSD::Duration::VERY_LONG,
+                         OSD::Color::YELLOW);
+  }
+  else
+  {
+    // In delay-based mode, this is critical
+    m_dialog->OnDesync(frame, player_name);
+
+    OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer,
+                         fmt::format("Critical desync with {}!", player_name),
+                         OSD::Duration::VERY_LONG, OSD::Color::RED);
   }
 }
 
@@ -1313,20 +1361,16 @@ void NetPlayClient::OnSyncSaveData(sf::Packet& packet)
 bool NetPlayClient::LoadFromFrame(s32 origFrame, s32 frame)
 {
   return IncrementalRB::Rollback(origFrame, frame);
-}
+        }
 
 void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd)
 {
-  if (inputs.at(local_player_port).empty())
+  if (inputs.at(local_player_port).Empty())
   {
     return;
   }
   int minAckFrame = time_sync->getMinAckFrame(static_cast<u8>(inputs.size()));
   minAckFrame = std::min(minAckFrame, (int)current_frame);
-
-  int localPadQueueSize = (int)inputs.at(local_player_port).size();
-  if (localPadQueueSize == 0)
-    return;  // no inputs, nothing to send
 
   // ---------- WRONG ---------------
   // 1 - 1 - (0 - 0) = 0, send no frames
@@ -1359,18 +1403,18 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
   if (minAckFrame == -1)
   {
     startIdx = 0;
-    endIdx = (int)inputs.at(local_player_port).size();
+    endIdx = (int)inputs.at(local_player_port).Size();
   }
   else
   {
-    for (int f = ((int)inputs.at(local_player_port).size()) - 1; f >= 0; f--)
+    for (int f = ((int)inputs.at(local_player_port).Size()) - 1; f >= 0; f--)
     {
-      if (inputs.at(local_player_port).at(f).frame == current_frame)
+      if (inputs.at(local_player_port).Get(f) && inputs.at(local_player_port).Get(f)->frame == current_frame)
       {
         endIdx = f + 1;
       }
 
-      if (inputs.at(local_player_port).at(f).frame == minAckFrame)
+      if (inputs.at(local_player_port).Get(f) && inputs.at(local_player_port).Get(f)->frame == minAckFrame)
       {
         startIdx = f + 1;
       }
@@ -1380,12 +1424,15 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
 
   for (int i = startIdx; i < endIdx; i++)
   {
-    if (i < inputs.at(local_player_port).size())
+    if (i < inputs.at(local_player_port).Size())
     {
-      auto& localFramedata = inputs.at(local_player_port).at(i);
+      auto localFramedata = inputs.at(local_player_port).Get(i);
 
-      localFramedatas.push_back(localFramedata);
-      INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata.frame);
+      if (localFramedata.has_value())
+      {
+        localFramedatas.push_back(localFramedata.value());
+        INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata->frame);
+      }
     }
     else
     {
@@ -1401,22 +1448,21 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
   // append number of framedatas that are in this packet
   u8 sizeofFramedatas = (u8)localFramedatas.size();
   packet << sizeofFramedatas;
-  u8 playerIndex = m_local_player->pid - 1;
   s32 maxFrame = (localFramedatas.size() > 0) ? localFramedatas.back().frame : 0;
-  packet << playerIndex;  // PIDs include the server, which is always 0.
+  packet << local_player_port;
   packet << maxFrame;
   for (auto& data : localFramedatas)
   {
     auto& pad = data.game_pad;
     auto& emu_pad = data.emu_pad;
-    packet << pad.buttons << pad._buttons << pad.holdButtons << pad.rapidFireButtons <<
-        pad.newPressedButtons << pad.releasedButtons << pad.stickX << pad.stickY << pad.cStickX <<
-        pad.cStickY << pad.LAnalogue << pad.RAnalogue << pad.LTrigger << pad.RTrigger;
+    packet << pad.buttons << pad._buttons << pad.holdButtons << pad.rapidFireButtons
+           << pad.newPressedButtons << pad.releasedButtons << pad.stickX << pad.stickY
+           << pad.cStickX << pad.cStickY << pad.LAnalogue << pad.RAnalogue << pad.LTrigger
+           << pad.RTrigger;
 
-    packet << emu_pad.button << emu_pad.stickX << emu_pad.stickY <<
-        emu_pad.substickX << emu_pad.substickY << emu_pad.triggerLeft <<
-        emu_pad.triggerRight << emu_pad.analogA << emu_pad.analogB <<
-        emu_pad.isConnected;
+    packet << emu_pad.button << emu_pad.stickX << emu_pad.stickY << emu_pad.substickX
+           << emu_pad.substickY << emu_pad.triggerLeft << emu_pad.triggerRight << emu_pad.analogA
+           << emu_pad.analogB << emu_pad.isConnected;
 
     packet << data.frame;
   }
@@ -1427,33 +1473,37 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
 u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
 {
   u32 lowestFrame = 0;
+
   for (int i = 0; i < inputs.size(); i++)
   {
-    if (i == local_player_port || inputs.at(i).empty())
+    if (i == local_player_port)
       continue;
 
-    u32 f = static_cast<u32>(inputs.at(i).back().frame);
-    if (f < lowestFrame || lowestFrame == 0)
+    const Inputs* last = inputs.at(i).GetBack();
+    if (!last)
+      continue;
+
+    u32 f = static_cast<u32>(last->frame);
+
+    if (f < lowestFrame)
     {
       lowestFrame = f;
     }
   }
+
   return lowestFrame;
 }
 void NetPlayClient::StoreInputs(Inputs& pad, int local_player_port)
 {
-  bool is_sequential_input = inputs.at(local_player_port).empty() ||
-                             inputs.at(local_player_port).back().frame == pad.frame - 1;
+  const Inputs* last = inputs.at(local_player_port).GetBack();
+
+  bool is_sequential_input = inputs.at(local_player_port).Empty() ||
+                             inputs.at(local_player_port).GetBack()->frame == pad.frame - 1;
+
   if (is_sequential_input)
   {
-    // store local framedata
-    if (this->inputs.at(local_player_port).size() > FRAMEDATA_MAX_QUEUE_SIZE)
-    {
-      // INFO_LOG_FMT(BRAWLBACK, "Popping local framedata for frame %u\n",
-      // this->localPlayerFrameData.front()->frame);
-      inputs.at(local_player_port).erase(inputs.at(local_player_port).begin());
-    }
-    inputs.at(local_player_port).push_back(pad);
+    // Store local framedata using RingBufferInput
+    inputs.at(local_player_port).Push(pad);
 
     auto current_inputs = json{};
     ToJson(current_inputs, pad);
@@ -1463,11 +1513,28 @@ void NetPlayClient::StoreInputs(Inputs& pad, int local_player_port)
   }
   else
   {
-    ERROR_LOG_FMT(BRAWLBACK, "Didn't push local framedata for frame {}\n", pad.frame);
-    WARN_LOG_FMT(BRAWLBACK,
-                 "iS THIS TRUE?: PFD->FRAME: {} == LOCAL PLAYER FRAME DATA BACK FRAME + 1: {}?\n",
-                 pad.frame, inputs.at(local_player_port).back().frame + 1);
+    ERROR_LOG_FMT(BRAWLBACK, "Non-sequential input: last={}, new={}", last ? last->frame : -1,
+                  pad.frame);
   }
+}
+void NetPlayClient::PrintInputs(BrawlbackPad& pad)
+{
+  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
+  INFO_LOG_FMT(BRAWLBACK, "STICK X: {}\n", pad.stickX);
+  INFO_LOG_FMT(BRAWLBACK, "STICK Y: {}\n", pad.stickY);
+  INFO_LOG_FMT(BRAWLBACK, "C STICK X: {}\n", pad.cStickX);
+  INFO_LOG_FMT(BRAWLBACK, "C STICK Y: {}\n", pad.cStickY);
+  INFO_LOG_FMT(BRAWLBACK, "BUTTONS: {}\n", pad.buttons);
+  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad._buttons);
+  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.holdButtons);
+  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.rapidFireButtons);
+  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.releasedButtons);
+  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.newPressedButtons);
+  INFO_LOG_FMT(BRAWLBACK, "LEFT TRIGGER: {}\n", pad.LTrigger);
+  INFO_LOG_FMT(BRAWLBACK, "RIGHT TRIGGER: {}\n", pad.RTrigger);
+  INFO_LOG_FMT(BRAWLBACK, "ANALOG A: {}\n", pad.LAnalogue);
+  INFO_LOG_FMT(BRAWLBACK, "ANALOG B: {}\n", pad.RAnalogue);
+  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
 }
 void NetPlayClient::HandleInputs(Inputs pad)
 {
@@ -1494,30 +1561,11 @@ void NetPlayClient::HandleInputs(Inputs pad)
     advance_frames = 0;
   }
 }
-void NetPlayClient::PrintInputs(BrawlbackPad& pad)
-{
-  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
-  INFO_LOG_FMT(BRAWLBACK, "STICK X: {}\n", pad.stickX);
-  INFO_LOG_FMT(BRAWLBACK, "STICK Y: {}\n", pad.stickY);
-  INFO_LOG_FMT(BRAWLBACK, "C STICK X: {}\n", pad.cStickX);
-  INFO_LOG_FMT(BRAWLBACK, "C STICK Y: {}\n", pad.cStickY);
-  INFO_LOG_FMT(BRAWLBACK, "BUTTONS: {}\n", pad.buttons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad._buttons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.holdButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.rapidFireButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.releasedButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.newPressedButtons);
-  INFO_LOG_FMT(BRAWLBACK, "LEFT TRIGGER: {}\n", pad.LTrigger);
-  INFO_LOG_FMT(BRAWLBACK, "RIGHT TRIGGER: {}\n", pad.RTrigger);
-  INFO_LOG_FMT(BRAWLBACK, "ANALOG A: {}\n", pad.LAnalogue);
-  INFO_LOG_FMT(BRAWLBACK, "ANALOG B: {}\n", pad.RAnalogue);
-  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
-}
 void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
 {
   // this function is only called in rollback mode, but the logic to skip it is in
   // OnFrameStart() (the one not in NetPlayClient::)
-  
+
   advance_frames = 1;
   // Wait for inputs if others are behind us, continue if we're behind them
   int local_player_port = -1;
@@ -1526,14 +1574,13 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     if (m_pad_map.at(i) == m_local_player->pid)
       local_player_port = i;
   }
-  
-  auto isRollbackMode = [](std::vector<std::vector<Inputs>>& inputs, bu32 locFrame, u8 playerIdx) {
+
+  auto isRollbackMode = [](std::vector<RingBufferInput>& inputs, bu32 locFrame, u8 playerIdx) {
     return ROLLBACK_IMPL &&                     // delay-based/rollback toggle
-            locFrame > GAME_FULL_START_FRAME &&  // give the game a bit of time in delay-based
+           locFrame > GAME_FULL_START_FRAME &&  // give the game a bit of time in delay-based
                                                 // mode to sync up
-            !inputs[playerIdx].empty() &&  // some sanity checks
-            !inputs[playerIdx].empty() &&
-            inputs[playerIdx].size() >= MAX_ROLLBACK_FRAMES;
+           !inputs[playerIdx].Empty() &&        // some sanity checks
+           !inputs[playerIdx].Empty() && inputs[playerIdx].Size() >= MAX_ROLLBACK_FRAMES;
   };
 
   // TODO: Make this work for all local pad ports
@@ -1547,8 +1594,8 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     pad_status = Pad::GetStatus(0);
   }
 
-  is_stalled =
-      time_sync->shouldStallFrame(current_frame, GetLatestRemoteFrame(local_player_port), static_cast<u8>(inputs.size()));
+  is_stalled = time_sync->shouldStallFrame(current_frame, GetLatestRemoteFrame(local_player_port),
+                                           static_cast<u8>(inputs.size()), MAX_ROLLBACK_FRAMES);
   HandleInputs({pad_status, pad, current_frame + delay});
 
   if (!is_stalled)
@@ -1557,14 +1604,12 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     {
       if (i != local_player_port && isRollbackMode(inputs, current_frame, i))
       {
-        s32 remoteFrame = inputs.at(i).back().frame;
+        s32 remoteFrame = inputs.at(i).GetBack()->frame;
         s32 finalFrame = std::min(remoteFrame, current_frame);
 
         bool isSynchronized = true;
 
-        auto shouldRollback = [](s32 latest_confirmed_frame,
-                                 s32 frame,
-                                 s32 remote_frame) -> bool {
+        auto shouldRollback = [](s32 latest_confirmed_frame, s32 frame, s32 remote_frame) -> bool {
           return frame > latest_confirmed_frame && remote_frame > latest_confirmed_frame;
         };
         if (isRollbackMode(inputs, current_frame, i))
@@ -1584,18 +1629,19 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
             is_predicting = false;
           }
         }
-        if (is_predicting && shouldRollback(latest_confirmed_frame, current_frame, remoteFrame) && latest_confirmed_frame > 0)
+        if (is_predicting && shouldRollback(latest_confirmed_frame, current_frame, remoteFrame) &&
+            latest_confirmed_frame > 0)
         {
           auto playerPredictedInputs = predicted_inputs.at(i).game_pad;
-          INFO_LOG_FMT(BRAWLBACK, "IS PREDICTING! LATEST CONFIRMED: {}, CURRENT FRAME: {}, FINAL FRAME: {}",
+          INFO_LOG_FMT(BRAWLBACK,
+                       "IS PREDICTING! LATEST CONFIRMED: {}, CURRENT FRAME: {}, FINAL FRAME: {}",
                        latest_confirmed_frame, current_frame, finalFrame);
           for (int f = latest_confirmed_frame + 1; f <= finalFrame; f++)
           {
             auto remoteInputs = FindRemoteInputs(i, f);
             if (remoteInputs == std::nullopt)
             {
-              ERROR_LOG_FMT(BRAWLBACK, "Couldn't find remote inputs for frame {}!\n",
-                            f);
+              ERROR_LOG_FMT(BRAWLBACK, "Couldn't find remote inputs for frame {}!\n", f);
             }
             else
             {
@@ -1604,9 +1650,12 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
               if (!(playerPredictedInputs.buttons == remoteInputs.value().game_pad.buttons &&
                     playerPredictedInputs._buttons == remoteInputs.value().game_pad.buttons &&
                     playerPredictedInputs.holdButtons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.rapidFireButtons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.releasedButtons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.newPressedButtons == remoteInputs.value().game_pad.buttons &&
+                    playerPredictedInputs.rapidFireButtons ==
+                        remoteInputs.value().game_pad.buttons &&
+                    playerPredictedInputs.releasedButtons ==
+                        remoteInputs.value().game_pad.buttons &&
+                    playerPredictedInputs.newPressedButtons ==
+                        remoteInputs.value().game_pad.buttons &&
                     playerPredictedInputs.stickX == remoteInputs.value().game_pad.stickX &&
                     playerPredictedInputs.stickY == remoteInputs.value().game_pad.stickY &&
                     playerPredictedInputs.cStickX == remoteInputs.value().game_pad.cStickX &&
@@ -1660,7 +1709,6 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     advance_frames = 0;
   }
 }
-
 bool NetPlayClient::IsRollingBack()
 {
   return is_rollingback.load();
@@ -1693,15 +1741,7 @@ std::optional<BrawlbackPad> NetPlayClient::GetPredictedInputs(int playerIdx, s32
 
 std::optional<Inputs> NetPlayClient::FindRemoteInputs(int playerIdx, s32 frame)
 {
-  for (int f = ((int)inputs.at(playerIdx).size()) - 1; f >= 0; f--)
-  {
-    if (inputs.at(playerIdx).at(f).frame == frame)
-    {
-      return inputs.at(playerIdx).at(f);
-    }
-  }
-
-  return std::nullopt;
+  return inputs.at(playerIdx).Get(frame);
 }
 
 void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
@@ -2198,7 +2238,15 @@ void NetPlayClient::OnFrameAck(sf::Packet& packet)
   Brawlback::FrameAck frameAck;
   frameAck.frame = frame;
   frameAck.playerIdx = playerIdx;
-  if (playerIdx != m_local_player->pid - 1)  // should be local player
+
+  int local_player_port = -1;
+  for (int i = 0; i < m_pad_map.size(); i++)
+  {
+    if (m_pad_map.at(i) == m_local_player->pid)
+      local_player_port = i;
+  }
+
+  if (playerIdx != local_player_port)  // should be local player
     ERROR_LOG_FMT(BRAWLBACK, "FrameAck playeridx is not local player idx! (This is wrong...)\n");
   else
     time_sync->ProcessFrameAck(&frameAck);
@@ -2222,6 +2270,31 @@ u32 NetPlayClient::GetPlayersMaxPing() const
 {
   return std::ranges::max_element(m_players, {}, [](const auto& kv) { return kv.second.ping; })
       ->second.ping;
+}
+
+u32 NetPlayClient::CalculatePingVariance()
+{
+  std::lock_guard lkp(m_crit.players);
+
+  std::vector<u32> pings;
+  for (const auto& [pid, player] : m_players)
+  {
+    if (pid != m_local_player->pid)
+      pings.push_back(player.ping);
+  }
+
+  if (pings.empty())
+    return 0;
+
+  u32 mean = std::accumulate(pings.begin(), pings.end(), 0u) / (u32)pings.size();
+  u32 variance = 0;
+
+  for (u32 ping : pings)
+  {
+    variance += (ping > mean) ? (ping - mean) : (mean - ping);
+  }
+
+  return variance / (u32)pings.size();
 }
 
 void NetPlayClient::Disconnect()
@@ -2718,13 +2791,10 @@ GCPadStatus NetPlayClient::GetDefaultPad(int config)
 {
   GCPadStatus pad = GCPadStatus{};
 
-  if (config != SerialInterface::SIDEVICE_WIIU_ADAPTER)
-  {
-    pad.stickX = pad.MAIN_STICK_CENTER_X;
-    pad.stickY = pad.MAIN_STICK_CENTER_Y;
-    pad.substickX = pad.C_STICK_CENTER_X;
-    pad.substickY = pad.C_STICK_CENTER_Y;
-  }
+  pad.stickX = pad.MAIN_STICK_CENTER_X;
+  pad.stickY = pad.MAIN_STICK_CENTER_Y;
+  pad.substickX = pad.C_STICK_CENTER_X;
+  pad.substickY = pad.C_STICK_CENTER_Y;
 
   return pad;
 }
@@ -2733,15 +2803,20 @@ bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatu
 {
   if (m_net_settings.m_RollbackMode)
   {
-    if (pad_nb != m_local_player->pid - 1)
+    int local_player_port = -1;
+    for (int i = 0; i < m_pad_map.size(); i++)
     {
-      auto isRollbackMode = [](std::vector<std::vector<Inputs>>& inputs,
-                               bu32 locFrame, u8 playerIdx) {
+      if (m_pad_map.at(i) == m_local_player->pid)
+        local_player_port = i;
+    }
+    if (pad_nb != local_player_port)
+    {
+      auto isRollbackMode = [](std::vector<RingBufferInput>& inputs, bu32 locFrame, u8 playerIdx) {
         return ROLLBACK_IMPL &&                     // delay-based/rollback toggle
                locFrame > GAME_FULL_START_FRAME &&  // give the game a bit of time in delay-based
                                                     // mode to sync up
-               !inputs.empty() &&                   // some sanity checks
-               !inputs[playerIdx].empty() && inputs[playerIdx].size() >= MAX_ROLLBACK_FRAMES;
+               !inputs[playerIdx].Empty() &&        // some sanity checks
+               !inputs[playerIdx].Empty() && inputs[playerIdx].Size() >= MAX_ROLLBACK_FRAMES;
       };
       if (advance_frames == 0)
       {
@@ -3382,6 +3457,67 @@ void NetPlayClient::ComputeGameDigest(const SyncIdentifier& sync_identifier)
   });
 }
 
+void NetPlayClient::NotifyDesync(int player_index, s32 frame)
+{
+  // Check if we've notified about this player recently
+  auto now = std::chrono::steady_clock::now();
+  auto time_since_last =
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_desync_notification)
+          .count();
+
+  if (time_since_last < DESYNC_NOTIFICATION_COOLDOWN_MS)
+  {
+    return;  // Don't spam notifications
+  }
+
+  // Check if this is the same desync we already reported
+  if (m_last_desync_frame.count(player_index) &&
+      std::abs(m_last_desync_frame[player_index] - frame) < 60)  // Within 1 second
+  {
+    return;
+  }
+
+  m_last_desync_frame[player_index] = frame;
+  m_last_desync_notification = now;
+
+  // Send desync notification to server
+  sf::Packet packet;
+  packet << MessageID::DesyncDetected;
+  packet << static_cast<int>(player_index);
+  packet << frame;
+
+  SendAsync(std::move(packet));
+
+  // Show local notification
+  std::string player_name = GetPlayerName(player_index);
+  std::string message =
+      fmt::format("Desync detected with player {} at frame {}", player_name, frame);
+
+  INFO_LOG_FMT(NETPLAY, "{}", message);
+
+  // Show on-screen display
+  OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer, message, OSD::Duration::VERY_LONG,
+                       OSD::Color::RED);
+}
+
+std::string NetPlayClient::GetPlayerName(int player_index)
+{
+  std::lock_guard lkp(m_crit.players);
+
+  // Find the player ID for this port
+  if (player_index >= 0 && player_index < m_pad_map.size())
+  {
+    PlayerId pid = m_pad_map[player_index];
+    auto it = m_players.find(pid);
+    if (it != m_players.end())
+    {
+      return it->second.name;
+    }
+  }
+
+  return fmt::format("Player {}", player_index);
+}
+
 const PadMappingArray& NetPlayClient::GetPadMapping() const
 {
   return m_pad_map;
@@ -3535,7 +3671,8 @@ void NetPlay_Disable()
 
 void OnFrameEnd()
 {
-  INFO_LOG_FMT(BRAWLBACK, "-- End of Frame --");
+  INFO_LOG_FMT(BRAWLBACK, "-- End of Frame {} --",
+               netplay_client ? netplay_client->current_frame : -1);
   if (IsNetPlayRunning() && netplay_client)
   {
     if (netplay_client->IsInRollbackMode() && game_started)
@@ -3543,10 +3680,19 @@ void OnFrameEnd()
       if (is_rollingback)
       {
         is_rollingback = false;
+        INFO_LOG_FMT(BRAWLBACK, "Rollback complete at frame {}", netplay_client->current_frame);
       }
+
+      // **ALWAYS INCREMENT IF NOT STALLED**
       if (!is_stalled)
       {
         netplay_client->current_frame++;
+        INFO_LOG_FMT(BRAWLBACK, "Advanced to frame {}", netplay_client->current_frame);
+      }
+      else
+      {
+        INFO_LOG_FMT(BRAWLBACK, "Frame not advanced (stalled at {})",
+                     netplay_client->current_frame);
       }
     }
   }
@@ -3726,3 +3872,4 @@ int SerialInterface::CSIDevice_GCController::NetPlay_InGamePadToLocalPad(int num
 
   return numPAD;
 }
+

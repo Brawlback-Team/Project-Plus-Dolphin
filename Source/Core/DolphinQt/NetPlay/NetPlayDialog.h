@@ -67,6 +67,7 @@ public:
   void OnMinimumPadBufferChanged(u32 buffer) override;
   void OnPlayerPadBufferChanged(u32 buffer) override;
   void OnHostInputAuthorityChanged(bool enabled) override;
+  void OnRollbackModeChanged(bool enabled) override;
   void OnDesync(u32 frame, const std::string& player) override;
   void OnConnectionLost() override;
   void OnConnectionError(const std::string& message) override;
@@ -189,6 +190,7 @@ private:
   int m_player_count = 0;
   int m_old_player_count = 0;
   bool m_host_input_authority = false;
+  bool m_rollback_mode = false;
 
   StartGameCallback m_start_game_callback;
 };

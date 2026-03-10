@@ -70,12 +70,17 @@ public:
   void AdjustMinimumPadBufferSize(unsigned int size);
   void SetHostInputAuthority(bool enable);
 
+  void SetRollback(const bool enable);
+
   void KickPlayer(PlayerId player);
 
   u16 GetPort() const;
 
   std::unordered_set<std::string> GetInterfaceSet() const;
   std::string GetInterfaceHost(const std::string& inter) const;
+
+  int GetPlayerPadIndex(PlayerId pid) const;
+  size_t GetRollbackVerificationPlayerCount() const;
 
   bool is_connected = false;
 
@@ -182,6 +187,7 @@ private:
   bool m_codes_synced = true;
   bool m_start_pending = false;
   bool m_host_input_authority = false;
+  bool m_rollback_mode = false;
   PlayerId m_current_golfer = 1;
   PlayerId m_pending_golfer = 0;
 
@@ -216,5 +222,6 @@ private:
   Common::TraversalClient* m_traversal_client = nullptr;
   NetPlayUI* m_dialog = nullptr;
   NetPlayIndex m_index;
+  std::unordered_map<s32, std::unordered_map<PlayerId, u64>> m_rollback_verify_by_frame;
 };
 }  // namespace NetPlay

@@ -78,6 +78,7 @@ public:
   virtual void OnMinimumPadBufferChanged(u32 buffer) = 0;
   virtual void OnPlayerPadBufferChanged(u32 buffer) = 0;
   virtual void OnHostInputAuthorityChanged(bool enabled) = 0;
+  virtual void OnRollbackModeChanged(bool enabled) = 0;
   virtual void OnDesync(u32 frame, const std::string& player) = 0;
   virtual void OnConnectionLost() = 0;
   virtual void OnConnectionError(const std::string& message) = 0;
@@ -225,16 +226,112 @@ public:
   static SyncIdentifier GetBrawlFileIdentifier();
 
   // Brawlback
+  struct RingBufferInput
+  {
+    static constexpr size_t CAPACITY = 256;  // Power of 2 for fast modulo
+    std::array<Inputs, CAPACITY> buffer;
+    size_t head = 0;
+    size_t tail = 0;
+    s32 min_frame = 0;
+    s32 max_frame = -1;
+
+    std::optional<Inputs> PopFront()
+    {
+      if (Empty())
+        return std::nullopt;
+
+      Inputs result = buffer[tail];
+      tail = (tail + 1) & (CAPACITY - 1);
+
+      // Update min_frame if buffer is not empty
+      if (!Empty())
+        min_frame = buffer[tail].frame;
+      else
+      {
+        // Reset when buffer becomes empty
+        min_frame = 0;
+        max_frame = -1;
+      }
+
+      return result;
+    }
+
+    void Push(const Inputs& input)
+    {
+      if (input.frame <= max_frame)
+        return;  // Ignore old inputs
+
+      size_t next_head = (head + 1) & (CAPACITY - 1);
+      if (next_head == tail)
+      {
+        // Buffer full, advance tail
+        tail = (tail + 1) & (CAPACITY - 1);
+        min_frame = buffer[tail].frame;
+      }
+
+      buffer[head] = input;
+      max_frame = input.frame;
+      head = next_head;
+    }
+
+    std::optional<Inputs> Get(s32 frame) const
+    {
+      if (frame < min_frame || frame > max_frame)
+        return std::nullopt;
+
+      // Linear search for the frame
+      for (size_t i = tail; i != head; i = (i + 1) & (CAPACITY - 1))
+      {
+        if (buffer[i].frame == frame)
+          return buffer[i];
+      }
+      return std::nullopt;
+    }
+
+    const Inputs* GetBack() const
+    {
+      if (head == tail)
+        return nullptr;
+      size_t last_idx = (head == 0) ? (CAPACITY - 1) : (head - 1);
+      return &buffer[last_idx];
+    }
+
+    const Inputs* GetFront() const
+    {
+      if (head == tail)
+        return nullptr;
+      return &buffer[tail];
+    }
+
+    bool Empty() const { return head == tail; }
+
+    size_t Size() const
+    {
+      if (head >= tail)
+        return head - tail;
+      return CAPACITY - tail + head;
+    }
+
+    bool HasFrame(s32 frame) const { return frame >= min_frame && frame <= max_frame; }
+
+    void Clear()
+    {
+      head = 0;
+      tail = 0;
+      min_frame = 0;
+      max_frame = -1;
+    }
+  };
   void OnFrameStart(BrawlbackPad& pad);
   bool IsRollingBack();
   bool IsStarted();
   bool IsInRollbackMode();
-  void HandleInputs(Inputs pad);
   u32 GetLatestRemoteFrame(int local_player_port);
   void StoreInputs(Inputs& pad, int local_player_port);
   size_t GetInputsSize();
   std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
   std::optional<BrawlbackPad> GetPredictedInputs(int playerIdx, s32 frame);
+  void SendRollbackVerification(s32 frame, u64 hash);
 
   // Only for use in NetPlayClient.cpp >:(
   s32 current_frame = 0;
@@ -247,6 +344,9 @@ public:
   bool start_inputs = false;
 
   std::unique_ptr<Brawlback::TimeSync> time_sync;
+
+  void NotifyDesync(int player_index, s32 frame);
+  std::string GetPlayerName(int player_index);
 
 
 protected:
@@ -293,6 +393,7 @@ protected:
   // speeding up the game to drain the buffer.
   unsigned int m_minimum_buffer_size = 2;
   bool m_host_input_authority = false;
+  bool m_rollback_mode = false;
   PlayerId m_current_golfer = 1;
 
   // This bool will stall the client at the start of GetNetPads, used for switching input control
@@ -345,6 +446,8 @@ private:
   void DisplayPlayersPing();
   u32 GetPlayersMaxPing() const;
 
+  u32 CalculatePingVariance();
+
   void OnData(sf::Packet& packet);
   void OnPlayerJoin(sf::Packet& packet);
   void OnPlayerLeave(sf::Packet& packet);
@@ -356,12 +459,14 @@ private:
   void OnPadMapping(sf::Packet& packet);
   void OnWiimoteMapping(sf::Packet& packet);
   void OnGBAConfig(sf::Packet& packet);
+  bool AllPlayersHaveInitialFrames() const;
   void OnPadData(sf::Packet& packet);
   void OnPadHostData(sf::Packet& packet);
   void OnWiimoteData(sf::Packet& packet);
   void OnPadBufferMinimum(sf::Packet& packet);
   void OnPadBufferPlayer(sf::Packet& packet);
   void OnHostInputAuthority(sf::Packet& packet);
+  void OnRollbackMode(sf::Packet& packet);
   void OnGolfSwitch(sf::Packet& packet);
   void OnGolfPrepare(sf::Packet& packet);
   void OnChangeGame(sf::Packet& packet);
@@ -431,7 +536,7 @@ private:
   std::string m_wii_sync_redirect_folder;
 
   // Brawlback
-  std::vector<std::vector<Inputs>> inputs;
+  std::vector<RingBufferInput> inputs;
   std::vector<Inputs> predicted_inputs;
   std::vector<int> pad_config;
   int delay = 1;
@@ -441,6 +546,12 @@ private:
   bool LoadFromFrame(s32 origFrame, s32 frame);
   void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
   void PrintInputs(BrawlbackPad& pad);
+  void HandleInputs(Inputs pad);
+
+  // Desync tracking
+  std::map<int, s32> m_last_desync_frame;  // Track last desync per player
+  std::chrono::steady_clock::time_point m_last_desync_notification;
+  constexpr static int DESYNC_NOTIFICATION_COOLDOWN_MS = 5000;  // Don't spam notifications
 };
 
 void NetPlay_Enable(NetPlayClient* const np);

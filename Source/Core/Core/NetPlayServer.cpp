@@ -715,6 +715,20 @@ void NetPlayServer::SetHostInputAuthority(const bool enable)
     AdjustMinimumPadBufferSize(m_minimum_buffer_size);
 }
 
+void NetPlayServer::SetRollback(const bool enable)
+{
+  std::lock_guard lkg(m_crit.game);
+
+  m_rollback_mode = enable;
+
+  // tell clients about the new value
+  sf::Packet spac;
+  spac << MessageID::RollbackMode;
+  spac << m_host_input_authority;
+
+  SendAsyncToClients(std::move(spac));
+}
+
 void NetPlayServer::SendAsync(sf::Packet&& packet, const PlayerId pid, const u8 channel_id)
 {
   {
@@ -877,20 +891,13 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
 
     while (!packet.endOfPacket())
     {
-      if (IsInRollbackMode())
+      if (m_rollback_mode)
       {
         PadIndex map;
         packet >> map;
 
         int pad_info;
         packet >> pad_info;
-
-        // If the data is not from the correct player,
-        // then disconnect them.
-        if (m_pad_map.at(map) != player.pid)
-        {
-          return 1;
-        }
         u8 sizeofFramedatas = 0;
         packet >> sizeofFramedatas;
         spac << map << pad_info << sizeofFramedatas;
@@ -922,7 +929,7 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
           spac << pad.frame;
         }
 
-        SendToClients(spac, player.pid);
+        SendToClients(spac);
       }
       else
       {
@@ -1225,7 +1232,46 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SendToClients(spac);
   }
   break;
+  case MessageID::DesyncDetected:
+  {
+    int player_index;
+    s32 frame;
+    packet >> player_index;
+    packet >> frame;
 
+    INFO_LOG_FMT(NETPLAY, "Desync reported by player {} for player index {} at frame {}",
+                 player.pid, player_index, frame);
+
+    if (m_settings.m_RollbackMode)
+    {
+      // In rollback mode, broadcast to all players for awareness
+      sf::Packet spac;
+      spac << MessageID::DesyncDetected;
+      spac << player_index;
+      spac << frame;
+      SendToClients(spac);
+
+      // Log for analysis
+      std::string log_message =
+          fmt::format("[DESYNC] Player {} reported desync with player index {} at frame {}",
+                      player.name, player_index, frame);
+
+      // Optionally save to file for debugging
+      // SaveDesyncLog(log_message, frame);
+    }
+    else
+    {
+      // In delay-based mode, this is critical - stop the game
+      m_is_running = false;
+
+      sf::Packet spac;
+      spac << MessageID::DesyncDetected;
+      spac << player_index;
+      spac << frame;
+      SendToClients(spac);
+    }
+  }
+  break;
   case MessageID::GameDigestResult:
   {
     std::string result;
@@ -1379,6 +1425,51 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SendToClients(spac, player.pid);
     break;
   }
+  case MessageID::RollbackVerification:
+  {
+    if (!m_settings.m_RollbackMode)
+      break;
+
+    s32 frame;
+    u64 hash;
+    packet >> frame;
+    packet >> hash;
+
+    auto& frame_hashes = m_rollback_verify_by_frame[frame];
+    frame_hashes[player.pid] = hash;
+
+    const size_t expected = GetRollbackVerificationPlayerCount();
+    if (frame_hashes.size() < expected)
+      break;
+
+    const auto host_it = frame_hashes.find(PlayerId{1});
+    if (host_it == frame_hashes.end())
+    {
+      WARN_LOG_FMT(NETPLAY, "Rollback verification missing host hash for frame {}", frame);
+      m_rollback_verify_by_frame.erase(frame);
+      break;
+    }
+
+    const u64 host_hash = host_it->second;
+    for (const auto& [pid, peer_hash] : frame_hashes)
+    {
+      if (peer_hash == host_hash)
+        continue;
+
+      const int pad_index = GetPlayerPadIndex(pid);
+      if (pad_index < 0)
+        continue;
+
+      sf::Packet spac;
+      spac << MessageID::DesyncDetected;
+      spac << pad_index;
+      spac << frame;
+      SendToClients(spac);
+    }
+
+    m_rollback_verify_by_frame.erase(frame);
+  }
+  break;
   default:
     PanicAlertFmtT("Unknown message with id:{0} received from player:{1} Kicking player!",
                    static_cast<u8>(mid), player.pid);
@@ -2678,5 +2769,26 @@ void NetPlayServer::ChunkedDataAbort()
   m_abort_chunked_data = true;
   m_chunked_data_event.Set();
   m_chunked_data_complete_event.Set();
+}
+
+int NetPlayServer::GetPlayerPadIndex(PlayerId pid) const
+{
+  for (size_t i = 0; i < m_pad_map.size(); ++i)
+  {
+    if (m_pad_map[i] == pid)
+      return static_cast<int>(i);
+  }
+  return -1;
+}
+
+size_t NetPlayServer::GetRollbackVerificationPlayerCount() const
+{
+  size_t count = 0;
+  for (const auto& [pid, player] : m_players)
+  {
+    if (PlayerHasControllerMapped(pid))
+      ++count;
+  }
+  return count;
 }
 }  // namespace NetPlay

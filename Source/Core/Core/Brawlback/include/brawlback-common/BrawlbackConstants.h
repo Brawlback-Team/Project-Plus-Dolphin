@@ -16,7 +16,7 @@ const bs32 FRAMEDATA_MAX_QUEUE_SIZE = 15;
 static_assert(FRAMEDATA_MAX_QUEUE_SIZE > MAX_ROLLBACK_FRAMES, "Framedata Max Queue Size isn't large enough (must be larger than max rollback frames).");
 const bs32 GAME_START_FRAME = 0;
 // before this frame we basically use delay-based netcode to ensure things are reasonably synced up before doing rollback stuff
-const bs32 GAME_FULL_START_FRAME = 0;
+const bs32 GAME_FULL_START_FRAME = 120;
 // constexpr bs32 MAX_REMOTE_PLAYERS = 3;
 const bs32 MAX_NUM_PLAYERS = 4;
 // constexpr bs32 BRAWLBACK_PORT = 7779;
@@ -37,3 +37,9 @@ const bs32 TIMESYNC_MAX_US_OFFSET = 10000; // 60% of a frame
 // #define USEC_IN_FRAME (MS_IN_FRAME*1000)
 // #define MS_TO_FRAMES(ms) (ms * 60 / 1000)
 // #define FRAMES_TO_MS(frames) (1000 * frames / 60)
+
+// Desync detection and recovery settings
+constexpr int DESYNC_MISMATCH_THRESHOLD = 5;          // Consecutive mismatches before desync
+constexpr int DESYNC_NOTIFICATION_COOLDOWN = 5000;    // Milliseconds between notifications
+constexpr int DESYNC_AUTO_RECOVERY_ATTEMPTS = 3;      // Max automatic recovery attempts
+constexpr int DESYNC_RECOVERY_ROLLBACK_FRAMES = 120;  // How far to rollback on desync

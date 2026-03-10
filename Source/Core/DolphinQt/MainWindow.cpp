@@ -1700,10 +1700,12 @@ bool MainWindow::NetPlayJoin()
   const std::string nickname = Config::Get(Config::NETPLAY_NICKNAME);
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
   const bool host_input_authority = network_mode == "hostinputauthority" || network_mode == "golf";
+  const bool host_rollback = network_mode == "rollback";
 
   if (server)
   {
     server->SetHostInputAuthority(host_input_authority);
+    server->SetRollback(host_rollback);
     server->AdjustMinimumPadBufferSize(Config::Get(Config::NETPLAY_MINIMUM_BUFFER_SIZE));
   }
 

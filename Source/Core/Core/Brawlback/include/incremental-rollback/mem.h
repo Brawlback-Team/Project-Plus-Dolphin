@@ -2,6 +2,7 @@
 #include "util.h"
 #include <utility>
 #include <boost/icl/interval_set.hpp>
+#include <brawlback-common/SavestateMemRegion.h>
 
 #define rbMemcpy(dst, src, size) fastMemcpy(dst, src, size)
 
@@ -32,6 +33,7 @@ struct TrackedBuffer
 
 extern std::vector<TrackedBuffer> TrackedMemList;
 extern std::vector<ExcludeBuffer> ExcludeMemList;
+extern std::vector<SavestateMemRegionInfo> LastFrameRegions;
     // passed in memory block MUST be allocated (at least on windows...) with VirtualAlloc and the MEM_WRITE_WATCH flag
 void TrackAlloc(void* ptr, size_t size);
 void ExcludeMem(void* ptr, size_t size);
@@ -39,8 +41,9 @@ void IncludeMem(void* ptr);
 void UntrackAlloc(void* ptr);
 void ResetAllocs(IncrementalRB::SavestateInfo& savestateInfo);
 void PrintTrackedBuf(const TrackedBuffer& buf);
-void ResetWrittenPages();
 int GetWrittenPages(char* base, u64 baseSize, std::vector<uintptr_t>& changedPageAddresses,
                     u64& pageCount);
-bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 maxEntries);
+std::vector<SavestateMemRegionInfo> GetWrittenAddresses(std::vector<SavestateMemRegionInfo> thisFrameRegions, std::vector<SavestateMemRegionInfo> previousFrameRegions);
+bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 maxEntries,
+                             std::vector<SavestateMemRegionInfo> region = {});
 void fastMemcpy(void* pvDest, void* pvSrc, size_t nBytes);

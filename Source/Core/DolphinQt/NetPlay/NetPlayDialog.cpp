@@ -397,7 +397,22 @@ void NetPlayDialog::ConnectWidgets()
     {
       const auto server = Settings::Instance().GetNetPlayServer();
       if (server)
+      {
         server->SetHostInputAuthority(enable);
+        server->SetRollback(m_rollback_mode);
+      }
+    }
+  };
+
+  const auto hia2_function = [this](bool enable) {
+    if (m_rollback_mode != enable)
+    {
+      const auto server = Settings::Instance().GetNetPlayServer();
+      if (server)
+      {
+        server->SetHostInputAuthority(m_host_input_authority);
+        server->SetRollback(enable);
+      }
     }
   };
 
@@ -406,7 +421,7 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_golf_mode_action, &QAction::toggled, this, [hia_function] { hia_function(true); });
   connect(m_fixed_delay_action, &QAction::toggled, this, [hia_function] { hia_function(false); });
   #ifdef _WIN32
-  connect(m_rollback_action, &QAction::toggled, this, [hia_function] { hia_function(false); });
+  connect(m_rollback_action, &QAction::toggled, this, [hia2_function] { hia2_function(true); });
   #endif
   connect(m_start_button, &QPushButton::clicked, this, &NetPlayDialog::OnStart);
   connect(m_quit_button, &QPushButton::clicked, this, &NetPlayDialog::reject);
@@ -1046,6 +1061,20 @@ void NetPlayDialog::OnHostInputAuthorityChanged(bool enabled)
       const QSignalBlocker blocker(m_minimum_buffer_size_box);
       m_minimum_buffer_size_box->setValue(Config::Get(Config::NETPLAY_CLIENT_BUFFER_SIZE));
     }
+  });
+}
+
+void NetPlayDialog::OnRollbackModeChanged(bool enabled)
+{
+  m_rollback_mode = enabled;
+  DisplayMessage(enabled ? tr("Rollback mode enabled") : tr("Rollback mode disabled"),
+                 "");
+
+  QueueOnObject(this, [this, enabled] {
+    m_minimum_buffer_size_box->setEnabled(enabled);
+    m_minimum_buffer_label->setEnabled(enabled);
+    m_minimum_buffer_size_box->setHidden(!enabled);
+    m_minimum_buffer_label->setHidden(!enabled);
   });
 }
 

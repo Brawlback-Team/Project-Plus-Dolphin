@@ -1,12 +1,31 @@
 #pragma once
 
 #include "util.h"
+#include <brawlback-common/SavestateMemRegion.h>
 #include <Common/ChunkFile.h>
 #include <Core/HW/Memmap.h>
+#include <vector>
+#include <string>
+#include <chrono>
 
 #ifdef DEBUG
 #define ENABLE_LOGGING
 #endif
+
+struct SavestateVerification
+{
+  u64 memory_hash;
+  s32 frame;
+  bool verified;
+  std::chrono::steady_clock::time_point timestamp;
+};
+
+struct CriticalMemoryRegion
+{
+  u8* ptr;
+  size_t size;
+  std::string name;
+};
 
 namespace IncrementalRB
 {
@@ -40,12 +59,21 @@ namespace IncrementalRB
     // must have been allocated with VirtualAlloc with the MEM_WRITE_WATCH flag
     // this sets our callbacks and tracks the memory block returned by GetGameStateCb and GetGamestateMemSizeCb
     void InitState(IncrementalRBCallbacks cb);
+    void RefreshTrackedRegions();
     // should be called at the END of every game simulation frame. Right now, this just saves the game state
     void SaveWrittenPages(u32 frame, bool resim);
-    void OnFrameEnd(s32 frame, bool isResim);
+    void SaveWritePagesExperimental(u32 frame, bool resim, std::vector<SavestateMemRegionInfo> region);
+    void OnFrameEnd(s32 frame, bool isResim, std::vector<SavestateMemRegionInfo> region = {});
     void Shutdown();
 
     bool Rollback(s32 currentFrame, s32 rollbackFrame);
 
-    void AddFrameCounterLocation(bu32 frameCounterPtr);
+    extern std::vector<SavestateVerification> g_verification_history;
+    extern std::vector<CriticalMemoryRegion> g_critical_regions;
+
+    u64 CalculateMemoryHash(const std::vector<CriticalMemoryRegion>& regions);
+    bool VerifyRollbackState(s32 frame);
+    void RecordVerificationPoint(s32 frame, u64 hash);
+    void DumpMemoryState(s32 frame, const std::string& reason);
+    void InitializeCriticalRegions();
     }

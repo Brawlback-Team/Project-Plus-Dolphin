@@ -15,6 +15,7 @@
 #include <span>
 #include <tuple>
 
+#include <incremental-rollback/incremental_rb.h>
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -38,7 +39,6 @@
 #include "Core/System.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/PixelEngine.h"
-#include <incremental-rollback/incremental_rb.h>
 
 namespace Memory
 {
@@ -688,21 +688,27 @@ bool MemoryManager::IsPageDirty(uintptr_t page_address)
 {
   return m_dirty_pages[page_address].dirty;
 }
-void MemoryManager::SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address)
+bool MemoryManager::IsPageInMainThread(uintptr_t page_address)
+{
+  return m_dirty_pages[page_address].in_mainthread;
+}
+void MemoryManager::SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address, bool in_mainthread)
 {
   if (m_dirty_pages.contains(page_address))
   {
     m_dirty_pages[page_address].dirty = dirty;
-    m_dirty_pages[page_address].address = dirty_address;
+    m_dirty_pages[page_address].fastmem_address = dirty_address;
+    m_dirty_pages[page_address].in_mainthread = in_mainthread;
   }
 }
 
-void MemoryManager::SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty)
+void MemoryManager::SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty, bool in_mainthread)
 {
   for (size_t i = 0; i < size; i++)
   {
     m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].dirty = dirty;
-    m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].address = address;
+    m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].fastmem_address = address;
+    m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].in_mainthread = in_mainthread;
   }
 }
 u64 MemoryManager::GetDirtyPageIndexFromAddress(u64 address)
@@ -773,6 +779,12 @@ u32 MemoryManager::FastmemAddressToEmulatedAddress(uintptr_t fault_address, Logi
 }
 bool MemoryManager::HandleFault(uintptr_t fault_address)
 {
+  constexpr u32 ACTIVE_THREAD = 0x800000E4;
+  constexpr u32 MAIN_THREAD_ADDR = 0x804dd558;
+  constexpr u32 BOOT_THREAD_ADDR = 0x8008f7b8;
+  const u32 active_thread_addr = Read_U32(ACTIVE_THREAD);
+  const bool write_in_mainthread =
+      active_thread_addr == MAIN_THREAD_ADDR || active_thread_addr == BOOT_THREAD_ADDR;
   bool fault_handled = false;
   uintptr_t logical_address = 0;
   auto addr = IsAddressInLogicalMemory(reinterpret_cast<u8*>(fault_address));
@@ -815,7 +827,7 @@ bool MemoryManager::HandleFault(uintptr_t fault_address)
     {
       return false;
     }
-    SetPageDirtyBit(page, true, logical_address);
+    SetPageDirtyBit(page, true, logical_address, write_in_mainthread);
     return true;
   }
   else if (IsAddressInFakeVMEML1Cache(fault_address))
@@ -825,7 +837,7 @@ bool MemoryManager::HandleFault(uintptr_t fault_address)
     {
       return false;
     }
-    SetPageDirtyBit(page, true, page);
+    SetPageDirtyBit(page, true, page, true);
     return true;
   }
 
@@ -858,7 +870,8 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
          page += page_size)
     {
       m_dirty_pages[page].dirty = false;
-      m_dirty_pages[page].address = page;
+      m_dirty_pages[page].fastmem_address = page;
+      m_dirty_pages[page].in_mainthread = true;
     }
   }
 

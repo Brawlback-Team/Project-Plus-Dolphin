@@ -174,9 +174,11 @@ enum class MessageID : u8
   ClientCapabilities = 0xA5,
   HostInputAuthority = 0xA6,
   PowerButton = 0xA7,
+  RollbackMode = 0xA8,
 
   TimeBase = 0xB0,
   DesyncDetected = 0xB1,
+  RollbackVerification = 0xB2,
 
   ComputeGameDigest = 0xC0,
   GameDigestProgress = 0xC1,

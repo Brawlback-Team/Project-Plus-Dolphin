@@ -18,7 +18,7 @@ TimeSync::TimeSync() {
 
 }
 
-bool TimeSync::shouldStallFrame(s32 currentFrame, s32 latestRemoteFrame, u8 numPlayers)
+bool TimeSync::shouldStallFrame(s32 currentFrame, s32 latestRemoteFrame, u8 numPlayers, s32 rollbackFrames)
 {
     s32 frameDiff = currentFrame - latestRemoteFrame;
 
@@ -27,10 +27,10 @@ bool TimeSync::shouldStallFrame(s32 currentFrame, s32 latestRemoteFrame, u8 numP
 
     // SLIPPI LOGIC
     bool frameDiffCheck;
-    if (ROLLBACK_IMPL)
+    if (ROLLBACK_IMPL && currentFrame > GAME_FULL_START_FRAME)
     {
       INFO_LOG_FMT(BRAWLBACK, "ROLLBACK IS ENABLED! FRAMEDIFF: {}", dispStr.str());
-      frameDiffCheck = frameDiff >= MAX_ROLLBACK_FRAMES;
+      frameDiffCheck = frameDiff >= rollbackFrames;
     }
     else
     {
@@ -126,101 +126,114 @@ void TimeSync::TimeSyncUpdate(u32 frame, u8 numPlayers) { // frame with delay
 
 
 // getting frame with delay
-void TimeSync::ReceivedRemoteFramedata(s32 frame, u8 localPlayerIdx, bool hasGameStarted) {
-    s64 curTime = (s64)Common::Timer::NowUs();
-    // update frame timing/offsets for time sync logic
-    
-    // Pad received, try to guess what our local time was when the frame was sent by our opponent
-    // before we initialized
-    // We can compare this to when we sent a pad for last frame to figure out how far/behind we
-    // are with respect to the opponent
+void TimeSync::ReceivedRemoteFramedata(s32 frame, u8 localPlayerIdx, bool hasGameStarted)
+{
+  s64 curTime = (s64)Common::Timer::NowUs();
+  // update frame timing/offsets for time sync logic
 
-    // SLIPPI LOGIC
-    auto timing = this->lastFrameTimings[localPlayerIdx];
-    if (!hasGameStarted)
-    {
-        // Handle case where opponent starts sending inputs before our game has reached frame 1. This will
-        // continuously say frame 0 is now to prevent opp from getting too far ahead
-        timing.frame = 0;
-        timing.timeUs = curTime;
-    }
+  // Pad received, try to guess what our local time was when the frame was sent by our opponent
+  // before we initialized
+  // We can compare this to when we sent a pad for last frame to figure out how far/behind we
+  // are with respect to the opponent
 
-    s64 opponentSendTimeUs = curTime - ((s64)this->pingUs[localPlayerIdx] / 2);
-    s64 frameDiffOffsetUs = USEC_IN_FRAME * (timing.frame - frame);
-    s64 timeOffsetUs = opponentSendTimeUs - timing.timeUs + frameDiffOffsetUs;
+  // SLIPPI LOGIC
+  auto timing = this->lastFrameTimings[localPlayerIdx];
+  if (!hasGameStarted)
+  {
+    // Handle case where opponent starts sending inputs before our game has reached frame 1. This
+    // will continuously say frame 0 is now to prevent opp from getting too far ahead
+    timing.frame = 0;
+    timing.timeUs = curTime;
+  }
 
-    if (hasGameStarted) {
-        INFO_LOG_FMT(BRAWLBACK, "[Offset] Opp Frame: {}, My Frame: {}. Time offset: {} ms\n", 
-                                              frame, timing.frame, (double)timeOffsetUs / 1000.0);
-    }
+  s64 opponentSendTimeUs = curTime - ((s64)this->pingUs[localPlayerIdx] / 2);
+  s64 frameDiffOffsetUs = USEC_IN_FRAME * (timing.frame - frame);
+  s64 timeOffsetUs = opponentSendTimeUs - timing.timeUs + frameDiffOffsetUs;
 
-    // Add this offset to circular buffer for use later
+  if (hasGameStarted)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "[Offset] Opp Frame: {}, My Frame: {}. Time offset: {} ms\n", frame,
+                 timing.frame, (double)timeOffsetUs / 1000.0);
+  }
 
-    // frameOffsetData is being treated as a "circular buffer". Hence this logic here
-    if (this->frameOffsetData[localPlayerIdx].buf.size() < ONLINE_LOCKSTEP_INTERVAL) {
-        this->frameOffsetData[localPlayerIdx].buf.push_back((s32)timeOffsetUs);
-    }
-    else {
-        this->frameOffsetData[localPlayerIdx].buf[this->frameOffsetData[localPlayerIdx].idx] = (s32)timeOffsetUs;
-    }
+  // Add this offset to circular buffer for use later
 
-    this->frameOffsetData[localPlayerIdx].idx = (this->frameOffsetData[localPlayerIdx].idx + 1) & ONLINE_LOCKSTEP_INTERVAL;
+  // frameOffsetData is being treated as a "circular buffer". Hence this logic here
+  if (this->frameOffsetData[localPlayerIdx].buf.size() < ONLINE_LOCKSTEP_INTERVAL)
+  {
+    this->frameOffsetData[localPlayerIdx].buf.push_back((s32)timeOffsetUs);
+  }
+  else
+  {
+    this->frameOffsetData[localPlayerIdx].buf[this->frameOffsetData[localPlayerIdx].idx] =
+        (s32)timeOffsetUs;
+  }
+
+  this->frameOffsetData[localPlayerIdx].idx =
+      (this->frameOffsetData[localPlayerIdx].idx + 1) & ONLINE_LOCKSTEP_INTERVAL;
 }
 
 
+
 // with delay
-void TimeSync::ProcessFrameAck(FrameAck* frameAck) {
-    std::lock_guard<std::mutex> lock(this->ackTimersMutex);
-    u8 localPlayerIdx = frameAck->playerIdx; // local player idx
-    int frame = frameAck->frame; // this is with frame delay
+void TimeSync::ProcessFrameAck(FrameAck* frameAck)
+{
+  std::lock_guard<std::mutex> lock(this->ackTimersMutex);
+  u8 localPlayerIdx = frameAck->playerIdx;  // local player idx
+  int frame = frameAck->frame;              // this is with frame delay
 
-    // SLIPPI LOGIC
+  // SLIPPI LOGIC
 
-    // if this current acked frame is more recent than the last acked frame, set it
-    int lastAcked = this->lastFrameAcked[localPlayerIdx];
-    if (frame <= lastAcked)
-    {
-      INFO_LOG_FMT(BRAWLBACK, "Ignoring duplicate/old ack for frame {} (last {}).\n", frame,
-                   lastAcked);
-      return;
-    }
-    this->lastFrameAcked[localPlayerIdx] = lastAcked;
+  // if this current acked frame is more recent than the last acked frame, set it
+  int lastAcked = this->lastFrameAcked[localPlayerIdx];
+  if (frame <= lastAcked)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Ignoring duplicate/old ack for frame {} (last {}).\n", frame,
+                 lastAcked);
+    return;
+  }
+  this->lastFrameAcked[localPlayerIdx] = frame;
 
-    // remove old timings
-    while (!this->ackTimers[localPlayerIdx].empty() && this->ackTimers[localPlayerIdx].front().frame < frame) {
-        this->ackTimers[localPlayerIdx].pop_front();
-    }
-
-    // don't get a ping if we don't have correct ack frame
-    if (this->ackTimers[localPlayerIdx].empty()) {
-        INFO_LOG_FMT(BRAWLBACK, "Empty acktimers\n");
-        return;
-    }
-    if (this->ackTimers[localPlayerIdx].front().frame != frame) {
-        INFO_LOG_FMT(BRAWLBACK, "frontframe and acked frame not equal\n");
-        return;
-    }
-
-    auto sendTime = this->ackTimers[localPlayerIdx].front().timeUs;
+  // remove old timings
+  while (!this->ackTimers[localPlayerIdx].empty() &&
+         this->ackTimers[localPlayerIdx].front().frame < frame)
+  {
     this->ackTimers[localPlayerIdx].pop_front();
+  }
 
-    // our ping is the current gametime - the time that the inputs were originally sent at
-    // inputs go from client 1 -> client 2 -> client 2 acks & sends ack to client 1 -> client 1 receives ack here
-    // so this is full RTT (round trip time).
-    u64 curTime = Common::Timer::NowUs();
-    this->pingUs[localPlayerIdx] = curTime - sendTime;
-    u64 rtt = this->pingUs[localPlayerIdx];
-    double rtt_ms = (double)rtt / 1000.0;
+  // don't get a ping if we don't have correct ack frame
+  if (this->ackTimers[localPlayerIdx].empty())
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Empty acktimers\n");
+    return;
+  }
+  if (this->ackTimers[localPlayerIdx].front().frame != frame)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "frontframe and acked frame not equal\n");
+    return;
+  }
 
-    INFO_LOG_FMT(BRAWLBACK, "Received ack for frame {} (w/o delay: {})  [pIdx {} rtt {} ms]\n",
-                 frame, frame - FRAME_DELAY, (unsigned int)localPlayerIdx, rtt_ms);
+  auto sendTime = this->ackTimers[localPlayerIdx].front().timeUs;
+  this->ackTimers[localPlayerIdx].pop_front();
 
-    if (frame % PING_DISPLAY_INTERVAL == 0) {
-        std::stringstream dispStr;
-        dispStr << "Ping (rtt): " << (int)rtt_ms << " ms\n";
-        //dispStr << "Time offset: " << (double)this->calcTimeOffsetUs(2) / 1000 << " ms\n";
-        dispStr << "Frame delay: " << FRAME_DELAY << "\n";
-    }
+  // our ping is the current gametime - the time that the inputs were originally sent at
+  // inputs go from client 1 -> client 2 -> client 2 acks & sends ack to client 1 -> client 1
+  // receives ack here so this is full RTT (round trip time).
+  u64 curTime = Common::Timer::NowUs();
+  this->pingUs[localPlayerIdx] = curTime - sendTime;
+  u64 rtt = this->pingUs[localPlayerIdx];
+  double rtt_ms = (double)rtt / 1000.0;
+
+  INFO_LOG_FMT(BRAWLBACK, "Received ack for frame {} (w/o delay: {})  [pIdx {} rtt {} ms]\n", frame,
+               frame - FRAME_DELAY, (unsigned int)localPlayerIdx, rtt_ms);
+
+  if (frame % PING_DISPLAY_INTERVAL == 0)
+  {
+    std::stringstream dispStr;
+    dispStr << "Ping (rtt): " << (int)rtt_ms << " ms\n";
+    // dispStr << "Time offset: " << (double)this->calcTimeOffsetUs(2) / 1000 << " ms\n";
+    dispStr << "Frame delay: " << FRAME_DELAY << "\n";
+  }
 }
 
 
