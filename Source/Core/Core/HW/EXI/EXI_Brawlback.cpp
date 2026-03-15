@@ -50,17 +50,11 @@ inline void SwapEndianSavestateMemRegionInfo(SavestateMemRegionInfo& memRegion)
   memRegion.address = swap_endian(memRegion.address);
   memRegion.size = swap_endian(memRegion.size);
 }
-void CEXIBrawlback::handleEndLoop(u8* payload)
+void CEXIBrawlback::handleEndLoop()
 {
-  if (NetPlay::IsNetPlayRunning() && NetPlay::IsStarted())
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    std::vector<SavestateMemRegionInfo> regions(sizeOfSavestatesRegions);
-    for (int i = 0; i < sizeOfSavestatesRegions; i++)
-    {
-      memcpy(&regions[i], payload + i * sizeof(SavestateMemRegionInfo), sizeof(SavestateMemRegionInfo));
-      SwapEndianSavestateMemRegionInfo(regions[i]);
-    }
-    IncrementalRB::OnFrameEnd(NetPlay::CurrentFrame(), NetPlay::IsRollingBack(), regions);
+    IncrementalRB::OnFrameEnd(NetPlay::CurrentFrame(), NetPlay::IsRollingBack());
     if (NetPlay::IsRollingBack() && NetPlay::CurrentFrame() != NetPlay::StopFrame())
     {
       NetPlay::IncrementCurrentFrame();
@@ -154,19 +148,11 @@ void CEXIBrawlback::handleGetInputs(bool local)
 }
 void CEXIBrawlback::handleGetNetworkingMode()
 {
-  u32 mode = NetPlay::IsInRollbackMode();
+  u32 mode = NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode();
   std::lock_guard<std::mutex> lock(read_queue_mutex);
   this->read_queue.clear();
   auto dataPtr = reinterpret_cast<u8*>(&mode);
   this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u32));
-}
-void CEXIBrawlback::handleGetSizeSavestates(u8* payload)
-{
-  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
-  {
-    memcpy(&sizeOfSavestatesRegions, payload, sizeof(int));
-    sizeOfSavestatesRegions = swap_endian(sizeOfSavestatesRegions);
-  }
 }
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
 {
@@ -204,7 +190,7 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   // just using these CMD's to track frame times lol
   case CMD_END_LOOP:
-    handleEndLoop(payload);
+    handleEndLoop();
     break;
   case CMD_START_LOOP:
     handleStartLoop(payload);
@@ -220,9 +206,6 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   case CMD_ROLLBACK_CHECK:
     handleGetNetworkingMode();
-    break;
-  case CMD_SIZE_SAVESTATES:
-    handleGetSizeSavestates(payload);
     break;
   default:
     // INFO_LOG_FMT(BRAWLBACK, "Default DMAWrite %u\n", (unsigned int)command_byte);

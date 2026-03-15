@@ -8,7 +8,6 @@
 #include <span>
 #include <string>
 #include <vector>
-#include <unordered_map>
 
 #include "Common/CommonTypes.h"
 #include "Common/MathUtil.h"
@@ -16,6 +15,7 @@
 #include "Common/Swap.h"
 #include "Common/MemoryUtil.h"
 #include "Core/PowerPC/MMU.h"
+#include <map>
 
 // Global declarations
 class PointerWrap;
@@ -115,7 +115,7 @@ public:
   void Clear();
 
   // Brawlback -- Misc
-  std::unordered_map<u64, DirtyPage>& GetDirtyPages() { return m_dirty_pages; }
+  std::map<u64, DirtyPage>& GetDirtyPages() { return m_dirty_pages; }
   std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
   std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
   bool GetTrackDirtyPagesEnabled() const { return m_track_dirty_pages; }
@@ -291,13 +291,9 @@ private:
 
   Core::System& m_system;
 
-  std::unordered_map<u64, DirtyPage> m_dirty_pages;
+  std::map<u64, DirtyPage> m_dirty_pages;
 
   bool m_track_dirty_pages = false;
-  bool IsEmulatedMemoryRegion(const PhysicalMemoryRegion& region);
-#ifdef _WIN32
-  std::optional<uintptr_t> ResolveEmulatedAddress(uintptr_t address);
-#endif
 
   void InitMMIO(bool is_wii);
 };

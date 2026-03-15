@@ -62,8 +62,7 @@ namespace IncrementalRB
     void RefreshTrackedRegions();
     // should be called at the END of every game simulation frame. Right now, this just saves the game state
     void SaveWrittenPages(u32 frame, bool resim);
-    void SaveWritePagesExperimental(u32 frame, bool resim, std::vector<SavestateMemRegionInfo> region);
-    void OnFrameEnd(s32 frame, bool isResim, std::vector<SavestateMemRegionInfo> region = {});
+    void OnFrameEnd(s32 frame, bool isResim);
     void Shutdown();
 
     bool Rollback(s32 currentFrame, s32 rollbackFrame);

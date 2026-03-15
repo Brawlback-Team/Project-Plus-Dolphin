@@ -753,7 +753,7 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
     if (m_net_settings.m_RollbackMode)
     {
       u8 sizeofFramedatas;
-      s32 maxFrame;
+      u32 maxFrame;
       PlayerId playerIndex;
       int config;
       packet >> config;
@@ -1407,37 +1407,19 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
   }
   else
   {
-    for (int f = ((int)inputs.at(local_player_port).Size()) - 1; f >= 0; f--)
-    {
-      if (inputs.at(local_player_port).Get(f) && inputs.at(local_player_port).Get(f)->frame == current_frame)
-      {
-        endIdx = f + 1;
-      }
-
-      if (inputs.at(local_player_port).Get(f) && inputs.at(local_player_port).Get(f)->frame == minAckFrame)
-      {
-        startIdx = f + 1;
-      }
-    }
+    endIdx = current_frame + 1;
+    startIdx = minAckFrame + 1;
   }
   std::vector<Inputs> localFramedatas = {};
 
   for (int i = startIdx; i < endIdx; i++)
   {
-    if (i < inputs.at(local_player_port).Size())
-    {
-      auto localFramedata = inputs.at(local_player_port).Get(i);
+    auto localFramedata = inputs.at(local_player_port).Get(i);
 
-      if (localFramedata.has_value())
-      {
-        localFramedatas.push_back(localFramedata.value());
-        INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata->frame);
-      }
-    }
-    else
+    if (localFramedata.has_value())
     {
-      ERROR_LOG_FMT(BRAWLBACK,
-                    "Requested more frame data than was available! This is very wrong!\n");
+      localFramedatas.push_back(localFramedata.value());
+      INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata->frame);
     }
   }
 
@@ -1446,10 +1428,10 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
   packet << static_cast<s8>(LocalPadToInGamePad(0));
   packet << static_cast<int>(Config::Get(Config::GetInfoForSIDevice(0)));
   // append number of framedatas that are in this packet
-  u8 sizeofFramedatas = (u8)localFramedatas.size();
+  u8 sizeofFramedatas = static_cast<u8>(localFramedatas.size());
   packet << sizeofFramedatas;
   s32 maxFrame = (localFramedatas.size() > 0) ? localFramedatas.back().frame : 0;
-  packet << local_player_port;
+  packet << static_cast<u8>(local_player_port);
   packet << maxFrame;
   for (auto& data : localFramedatas)
   {
@@ -1485,7 +1467,7 @@ u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
 
     u32 f = static_cast<u32>(last->frame);
 
-    if (f < lowestFrame)
+    if (f < lowestFrame || lowestFrame == 0)
     {
       lowestFrame = f;
     }
@@ -3683,7 +3665,6 @@ void OnFrameEnd()
         INFO_LOG_FMT(BRAWLBACK, "Rollback complete at frame {}", netplay_client->current_frame);
       }
 
-      // **ALWAYS INCREMENT IF NOT STALLED**
       if (!is_stalled)
       {
         netplay_client->current_frame++;

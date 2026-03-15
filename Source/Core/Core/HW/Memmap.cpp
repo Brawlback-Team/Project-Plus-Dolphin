@@ -779,6 +779,10 @@ u32 MemoryManager::FastmemAddressToEmulatedAddress(uintptr_t fault_address, Logi
 }
 bool MemoryManager::HandleFault(uintptr_t fault_address)
 {
+  if (m_dirty_pages.size() == 0)
+  {
+    return false;
+  }
   constexpr u32 ACTIVE_THREAD = 0x800000E4;
   constexpr u32 MAIN_THREAD_ADDR = 0x804dd558;
   constexpr u32 BOOT_THREAD_ADDR = 0x8008f7b8;

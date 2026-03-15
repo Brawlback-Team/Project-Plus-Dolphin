@@ -797,40 +797,9 @@ namespace IncrementalRB
   #endif
   }
 
-  void SaveWritePagesExperimental(u32 frame, bool resim, std::vector<SavestateMemRegionInfo> region)
+  void OnFrameEnd(s32 frame, bool resim)
   {
-    u32 savestateHead = frame % MAX_SAVESTATES;
-    Savestate& savestate = savestateInfo.savestates[savestateHead];
-
-    if (savestate.valid && !resim)
-    {
-    #ifdef ENABLE_LOGGING
-      INFO_LOG_FMT(BRAWLBACK, "EVICTING SAVESTATE!\n");
-    #endif
-      EvictSavestate(savestate);
-    }
-    savestate.frame = frame;
-    savestate.valid = GetAndResetWrittenPages(savestate.changedPages, MAX_NUM_CHANGED_PAGES, region);
-    OnPagesWritten(savestate);
-#ifdef ENABLE_LOGGING
-    u64 numChangedBytes = savestate.changedPages.size() * Common::PageSize();
-    float changedMB = numChangedBytes / 1024.0 / 1024.0;
-    INFO_LOG_FMT(BRAWLBACK, "Frame {}, head = {}\tNum changed pages = {}\tChanged MB = {}\n", frame,
-                 savestateHead, savestate.changedPages.size(), changedMB);
-#endif
-  }
-
-  void OnFrameEnd(s32 frame, bool resim, std::vector<SavestateMemRegionInfo> region)
-  {
-    if (region.size() > 0)
-    {
-      SaveWritePagesExperimental(frame, resim, region);
-    }
-    else
-    {
-      SaveWrittenPages(frame, resim);
-    }
-
+    SaveWrittenPages(frame, resim);
     bool should_verify = frame > 120;
 
     if (should_verify && !resim)

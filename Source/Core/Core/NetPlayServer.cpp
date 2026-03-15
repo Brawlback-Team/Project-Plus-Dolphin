@@ -929,7 +929,7 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
           spac << pad.frame;
         }
 
-        SendToClients(spac);
+        SendToClients(spac, player.pid);
       }
       else
       {

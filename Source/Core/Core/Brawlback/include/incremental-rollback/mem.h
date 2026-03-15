@@ -43,7 +43,5 @@ void ResetAllocs(IncrementalRB::SavestateInfo& savestateInfo);
 void PrintTrackedBuf(const TrackedBuffer& buf);
 int GetWrittenPages(char* base, u64 baseSize, std::vector<uintptr_t>& changedPageAddresses,
                     u64& pageCount);
-std::vector<SavestateMemRegionInfo> GetWrittenAddresses(std::vector<SavestateMemRegionInfo> thisFrameRegions, std::vector<SavestateMemRegionInfo> previousFrameRegions);
-bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 maxEntries,
-                             std::vector<SavestateMemRegionInfo> region = {});
+bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 maxEntries);
 void fastMemcpy(void* pvDest, void* pvSrc, size_t nBytes);

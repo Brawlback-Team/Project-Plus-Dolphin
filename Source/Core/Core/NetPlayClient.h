@@ -459,7 +459,6 @@ private:
   void OnPadMapping(sf::Packet& packet);
   void OnWiimoteMapping(sf::Packet& packet);
   void OnGBAConfig(sf::Packet& packet);
-  bool AllPlayersHaveInitialFrames() const;
   void OnPadData(sf::Packet& packet);
   void OnPadHostData(sf::Packet& packet);
   void OnWiimoteData(sf::Packet& packet);
