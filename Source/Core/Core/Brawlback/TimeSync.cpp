@@ -183,15 +183,6 @@ void TimeSync::ProcessFrameAck(FrameAck* frameAck)
   int frame = frameAck->frame;              // this is with frame delay
 
   // SLIPPI LOGIC
-
-  // if this current acked frame is more recent than the last acked frame, set it
-  int lastAcked = this->lastFrameAcked[localPlayerIdx];
-  if (frame <= lastAcked)
-  {
-    INFO_LOG_FMT(BRAWLBACK, "Ignoring duplicate/old ack for frame {} (last {}).\n", frame,
-                 lastAcked);
-    return;
-  }
   this->lastFrameAcked[localPlayerIdx] = frame;
 
   // remove old timings

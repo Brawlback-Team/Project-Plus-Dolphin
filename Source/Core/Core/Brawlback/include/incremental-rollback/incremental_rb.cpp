@@ -577,7 +577,7 @@ namespace IncrementalRB
       return false;
 
     // Calculate how many frames we need to roll back
-    s32 savestateOffset = currentFrame - rollbackFrame;
+    s32 savestateOffset = currentFrame - rollbackFrame - 1;
 
     if (rollbackFrame >= currentFrame || savestateOffset >= MAX_ROLLBACK_FRAMES ||
         savestateOffset <= 0)
@@ -589,11 +589,11 @@ namespace IncrementalRB
 
     // Savestates are captured at the END of each frame
     // To rollback to frame N, we need the savestate from frame N-1
-    s32 currentSavestateIdx = Wrap(currentFrame - 1, MAX_SAVESTATES);
+    s32 currentSavestateIdx = Wrap(currentFrame - 1 - 1, MAX_SAVESTATES);
 
     // The target savestate is the one captured at the end of (rollbackFrame - 1)
     // which gets us to the start of rollbackFrame
-    s32 targetSavestateIdx = Wrap(rollbackFrame - 1, MAX_SAVESTATES);
+    s32 targetSavestateIdx = Wrap(currentSavestateIdx - savestateOffset, MAX_SAVESTATES);
 
 #ifdef ENABLE_LOGGING
     INFO_LOG_FMT(BRAWLBACK, "Starting at game mem frame {}\n", currentFrame);
@@ -800,7 +800,7 @@ namespace IncrementalRB
   void OnFrameEnd(s32 frame, bool resim)
   {
     SaveWrittenPages(frame, resim);
-    bool should_verify = frame > 120;
+    bool should_verify = frame > 0;
 
     if (should_verify && !resim)
     {

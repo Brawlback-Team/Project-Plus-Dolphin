@@ -1394,11 +1394,11 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
   // end index = 0
   //
   // min ack frame = 10
-  // current frame = 13
-  // send frame    = 11, 12, 13
+  // current frame = 11
+  // send frame    = 11
   // -----------------
   // start index = 11
-  // end index = 14
+  // end index = 12
   int endIdx = 0, startIdx = 0;
   if (minAckFrame == -1)
   {
@@ -1425,13 +1425,13 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
 
   packet << frame_data_cmd;
   // TODO: Make this work for all local pads.
-  packet << static_cast<s8>(LocalPadToInGamePad(0));
+  packet << static_cast<PadIndex>(LocalPadToInGamePad(0));
   packet << static_cast<int>(Config::Get(Config::GetInfoForSIDevice(0)));
   // append number of framedatas that are in this packet
   u8 sizeofFramedatas = static_cast<u8>(localFramedatas.size());
   packet << sizeofFramedatas;
   s32 maxFrame = (localFramedatas.size() > 0) ? localFramedatas.back().frame : 0;
-  packet << static_cast<u8>(local_player_port);
+  packet << static_cast<PlayerId>(local_player_port);
   packet << maxFrame;
   for (auto& data : localFramedatas)
   {
@@ -1454,7 +1454,7 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
 }
 u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
 {
-  u32 lowestFrame = 0;
+  u32 latestFrame = 0;
 
   for (int i = 0; i < inputs.size(); i++)
   {
@@ -1463,17 +1463,19 @@ u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
 
     const Inputs* last = inputs.at(i).GetBack();
     if (!last)
+    {
       continue;
+    }
 
     u32 f = static_cast<u32>(last->frame);
 
-    if (f < lowestFrame || lowestFrame == 0)
+    if (f > latestFrame)
     {
-      lowestFrame = f;
+      latestFrame = f;
     }
   }
 
-  return lowestFrame;
+  return latestFrame;
 }
 void NetPlayClient::StoreInputs(Inputs& pad, int local_player_port)
 {
@@ -1580,93 +1582,64 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
                                            static_cast<u8>(inputs.size()), MAX_ROLLBACK_FRAMES);
   HandleInputs({pad_status, pad, current_frame + delay});
 
+  // https://gist.github.com/rcmagic/f8d76bca32b5609e85ab156db38387e9
   if (!is_stalled)
   {
-    for (s32 i = 0; i < inputs.size(); i++)
+    s32 remote_frame = GetLatestRemoteFrame(local_player_port);
+    auto is_synced = true;
+    auto final_frame = remote_frame;
+    for (int remote_player = 0; remote_player < inputs.size(); remote_player++)
     {
-      if (i != local_player_port && isRollbackMode(inputs, current_frame, i))
+      if (remote_player != local_player_port)
       {
-        s32 remoteFrame = inputs.at(i).GetBack()->frame;
-        s32 finalFrame = std::min(remoteFrame, current_frame);
-
-        bool isSynchronized = true;
-
-        auto shouldRollback = [](s32 latest_confirmed_frame, s32 frame, s32 remote_frame) -> bool {
-          return frame > latest_confirmed_frame && remote_frame > latest_confirmed_frame;
-        };
-        if (isRollbackMode(inputs, current_frame, i))
+        if (remote_frame > current_frame)
         {
-          auto ret = FindRemoteInputs(i, current_frame);
-          if (ret == std::nullopt)
+          final_frame = current_frame;
+        }
+
+        for (int i = latest_confirmed_frame + 1; i <= final_frame; i++)
+        {
+          auto remote_inputs = FindRemoteInputs(remote_player, i);
+          auto predict_inputs = GetPredictedInputs(remote_player, i);
+
+          auto compare_inputs = [](BrawlbackPad pad1, BrawlbackPad pad2) {
+            return pad1.buttons == pad2.buttons && pad1._buttons == pad2._buttons &&
+                   pad1.holdButtons == pad2.holdButtons &&
+                   pad1.rapidFireButtons == pad2.rapidFireButtons &&
+                   pad1.releasedButtons == pad2.releasedButtons &&
+                   pad1.newPressedButtons == pad2.newPressedButtons && pad1.stickX == pad2.stickX &&
+                   pad1.stickY == pad2.stickY && pad1.cStickX == pad2.cStickX &&
+                   pad1.cStickY == pad2.cStickY && pad1.LAnalogue == pad2.LAnalogue &&
+                   pad1.RAnalogue == pad2.RAnalogue && pad1.LTrigger == pad2.LTrigger &&
+                   pad1.RTrigger == pad2.RTrigger;
+          };
+
+          if (remote_inputs.has_value() && predict_inputs.has_value() &&
+              !compare_inputs(remote_inputs.value().game_pad, predict_inputs.value()))
           {
-            auto predict = FindRemoteInputs(i, latest_confirmed_frame);
-            if (predict != std::nullopt)
-            {
-              is_predicting = true;
-              predicted_inputs.at(i) = predict.value();
-            }
+            latest_confirmed_frame = i - 1;
+            is_synced = false;
+          }
+        }
+        if (is_synced)
+        {
+          latest_confirmed_frame = final_frame;
+          auto remote_inputs = FindRemoteInputs(remote_player, final_frame);
+          if (remote_inputs.has_value())
+          {
+            predicted_inputs.at(remote_player) = remote_inputs.value();
           }
           else
           {
-            is_predicting = false;
-          }
-        }
-        if (is_predicting && shouldRollback(latest_confirmed_frame, current_frame, remoteFrame) &&
-            latest_confirmed_frame > 0)
-        {
-          auto playerPredictedInputs = predicted_inputs.at(i).game_pad;
-          INFO_LOG_FMT(BRAWLBACK,
-                       "IS PREDICTING! LATEST CONFIRMED: {}, CURRENT FRAME: {}, FINAL FRAME: {}",
-                       latest_confirmed_frame, current_frame, finalFrame);
-          for (int f = latest_confirmed_frame + 1; f <= finalFrame; f++)
-          {
-            auto remoteInputs = FindRemoteInputs(i, f);
-            if (remoteInputs == std::nullopt)
-            {
-              ERROR_LOG_FMT(BRAWLBACK, "Couldn't find remote inputs for frame {}!\n", f);
-            }
-            else
-            {
-              PrintInputs(playerPredictedInputs);
-              PrintInputs(remoteInputs.value().game_pad);
-              if (!(playerPredictedInputs.buttons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs._buttons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.holdButtons == remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.rapidFireButtons ==
-                        remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.releasedButtons ==
-                        remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.newPressedButtons ==
-                        remoteInputs.value().game_pad.buttons &&
-                    playerPredictedInputs.stickX == remoteInputs.value().game_pad.stickX &&
-                    playerPredictedInputs.stickY == remoteInputs.value().game_pad.stickY &&
-                    playerPredictedInputs.cStickX == remoteInputs.value().game_pad.cStickX &&
-                    playerPredictedInputs.cStickY == remoteInputs.value().game_pad.cStickY &&
-                    playerPredictedInputs.LTrigger == remoteInputs.value().game_pad.LTrigger &&
-                    playerPredictedInputs.RTrigger == remoteInputs.value().game_pad.RTrigger &&
-                    playerPredictedInputs.LAnalogue == remoteInputs.value().game_pad.LAnalogue &&
-                    playerPredictedInputs.RAnalogue == remoteInputs.value().game_pad.RAnalogue))
-              {
-                // remote inputs don't match predicted
-                latest_confirmed_frame = f - 1;
-                isSynchronized = false;
-                INFO_LOG_FMT(BRAWLBACK, "Remote didn't match predicted inputs frame = {}\n", f);
-                break;
-              }
-            }
+            predicted_inputs.at(remote_player) = Inputs{};
+            predicted_inputs.at(remote_player).emu_pad =
+                GetDefaultPad(pad_config.at(remote_player));
+            predicted_inputs.at(remote_player).frame = final_frame;
           }
         }
 
-        if (isSynchronized)
+        if (current_frame > latest_confirmed_frame && remote_frame > latest_confirmed_frame)
         {
-          latest_confirmed_frame = finalFrame;
-          // INFO_LOG_FMT(BRAWLBACK, "is synchronized!\n");
-        }
-        else
-        {
-          // not synchronized, rollback & resim
-          INFO_LOG_FMT(BRAWLBACK, "Should rollback! frame = {} latestConfirmedFrame = {}\n",
-                       current_frame, latest_confirmed_frame);
           if (LoadFromFrame(current_frame, latest_confirmed_frame))
           {
             // if on frame 10 we rollback to frame 7 we need to simulate frames 7,8,9, and 10 to get
@@ -2785,62 +2758,25 @@ bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatu
 {
   if (m_net_settings.m_RollbackMode)
   {
-    int local_player_port = -1;
-    for (int i = 0; i < m_pad_map.size(); i++)
+    if (is_rollingback && inputs.at(pad_nb).Size() > current_frame)
     {
-      if (m_pad_map.at(i) == m_local_player->pid)
-        local_player_port = i;
-    }
-    if (pad_nb != local_player_port)
-    {
-      auto isRollbackMode = [](std::vector<RingBufferInput>& inputs, bu32 locFrame, u8 playerIdx) {
-        return ROLLBACK_IMPL &&                     // delay-based/rollback toggle
-               locFrame > GAME_FULL_START_FRAME &&  // give the game a bit of time in delay-based
-                                                    // mode to sync up
-               !inputs[playerIdx].Empty() &&        // some sanity checks
-               !inputs[playerIdx].Empty() && inputs[playerIdx].Size() >= MAX_ROLLBACK_FRAMES;
-      };
-      if (advance_frames == 0)
+      auto pad = inputs.at(pad_nb).Get(current_frame);
+      if (pad.has_value())
       {
-        *pad_status = GetDefaultPad(pad_config.at(pad_nb));
-      }
-      else if (isRollbackMode(inputs, current_frame, pad_nb))
-      {
-        auto ret = FindRemoteInputs(pad_nb, current_frame);
-        if (ret != std::nullopt)
-        {
-          *pad_status = ret.value().emu_pad;
-        }
-        else
-        {
-          *pad_status = predicted_inputs.at(pad_nb).emu_pad;
-        }
+        *pad_status = pad.value().emu_pad;
       }
       else
       {
-        auto ret = FindRemoteInputs(pad_nb, current_frame);
-        // no rollbacks, use delay-based
-        if (ret == std::nullopt)
-        {
-          *pad_status = GetDefaultPad(pad_config.at(pad_nb));
-        }
-        else
-        {
-          *pad_status = ret.value().emu_pad;
-        }
+        *pad_status = GetDefaultPad(pad_config[pad_nb]);
       }
+    }
+    else if (inputs.at(pad_nb).GetBack())
+    {
+      *pad_status = inputs.at(pad_nb).GetBack()->emu_pad;
     }
     else
     {
-      auto ret = FindRemoteInputs(pad_nb, current_frame);
-      if (ret != std::nullopt)
-      {
-        *pad_status = ret.value().emu_pad;
-      }
-      else
-      {
-        *pad_status = GetDefaultPad(pad_config.at(pad_nb));
-      }
+      *pad_status = GetDefaultPad(pad_config[pad_nb]);
     }
   }
   else
