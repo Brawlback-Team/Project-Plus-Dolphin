@@ -1361,79 +1361,72 @@ void NetPlayClient::OnSyncSaveData(sf::Packet& packet)
 bool NetPlayClient::LoadFromFrame(s32 origFrame, s32 frame)
 {
   return IncrementalRB::Rollback(origFrame, frame);
-        }
+}
 
 void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd)
 {
-  if (inputs.at(local_player_port).Empty())
+  const RingBufferInput& local_inputs = inputs.at(local_player_port);
+  if (local_inputs.Empty())
   {
     return;
   }
-  int minAckFrame = time_sync->getMinAckFrame(static_cast<u8>(inputs.size()));
-  minAckFrame = std::min(minAckFrame, (int)current_frame);
 
-  // ---------- WRONG ---------------
-  // 1 - 1 - (0 - 0) = 0, send no frames
-  // 2 - 1 - (1 - 0) = 0, send frames 1
-  // 3 - 1 - (2 - 1) = 1, send frames 2 to 3
-  // 4 - 1 - (3 - 1) = 1, send frames 2 to 4
-  // --------- GOAL -----------------
-  // on frame 100, send frame 100
-  // on frame 101, send frames 100 and 101
-  // ack frame 100
-  // on frame 101, send frames 101 and 102
-  // ack frame 101
-  // ack frame 102
-  // on frame 103, send frame 103
-
-  // min ack frame = -1
-  // current frame = 0
-  // send frame    = 0
-  // -----------------
-  // start index = 0
-  // end index = 0
-  //
-  // min ack frame = 10
-  // current frame = 11
-  // send frame    = 11
-  // -----------------
-  // start index = 11
-  // end index = 12
-  int endIdx = 0, startIdx = 0;
-  if (minAckFrame == -1)
+  const Inputs* oldest_local_input = local_inputs.GetFront();
+  const Inputs* newest_local_input = local_inputs.GetBack();
+  if (!oldest_local_input || !newest_local_input)
   {
-    startIdx = 0;
-    endIdx = (int)inputs.at(local_player_port).Size();
+    return;
   }
-  else
-  {
-    endIdx = current_frame + 1;
-    startIdx = minAckFrame + 1;
-  }
-  std::vector<Inputs> localFramedatas = {};
 
-  for (int i = startIdx; i < endIdx; i++)
-  {
-    auto localFramedata = inputs.at(local_player_port).Get(i);
+  s32 min_ack_frame = time_sync->getMinAckFrame(static_cast<u8>(inputs.size()));
+  const s32 latest_local_frame = newest_local_input->frame;
 
-    if (localFramedata.has_value())
+  if (min_ack_frame > latest_local_frame)
+    min_ack_frame = latest_local_frame;
+
+  s32 start_frame = oldest_local_input->frame;
+  if (min_ack_frame >= 0)
+    start_frame = std::max(start_frame, min_ack_frame + 1);
+
+  // The protocol stores the frame count in a u8, so never send more than 255
+  // frames in one packet or the count will wrap to 0 and stall ack progress.
+  constexpr s32 max_frames_per_packet = 0xff;
+  const s32 end_frame = std::min(latest_local_frame + 1, start_frame + max_frames_per_packet);
+
+  std::vector<Inputs> local_framedatas;
+  local_framedatas.reserve(static_cast<size_t>(std::max(0, end_frame - start_frame)));
+
+  for (s32 frame = start_frame; frame < end_frame; ++frame)
+  {
+    auto local_framedata = local_inputs.Get(frame);
+    if (!local_framedata.has_value())
     {
-      localFramedatas.push_back(localFramedata.value());
-      INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata->frame);
+      ERROR_LOG_FMT(BRAWLBACK, "Missing local input for frame {}", frame);
+      break;
     }
+
+    local_framedatas.push_back(local_framedata.value());
+    INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", local_framedata->frame);
+  }
+
+  if (local_framedatas.empty())
+  {
+    return;
   }
 
   packet << frame_data_cmd;
   // TODO: Make this work for all local pads.
   packet << static_cast<PadIndex>(LocalPadToInGamePad(0));
   packet << static_cast<int>(Config::Get(Config::GetInfoForSIDevice(0)));
-  // append number of framedatas that are in this packet
-  u8 sizeofFramedatas = static_cast<u8>(localFramedatas.size());
+
+  const u8 sizeofFramedatas = static_cast<u8>(local_framedatas.size());
   packet << sizeofFramedatas;
-  s32 maxFrame = (localFramedatas.size() > 0) ? localFramedatas.back().frame : 0;
+
+  const s32 maxFrame = local_framedatas.back().frame;
   packet << static_cast<PlayerId>(local_player_port);
   packet << maxFrame;
-  for (auto& data : localFramedatas)
+
+  for (auto& data : local_framedatas)
   {
     auto& pad = data.game_pad;
     auto& emu_pad = data.emu_pad;
@@ -1448,13 +1441,14 @@ void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, Messag
 
     packet << data.frame;
   }
-  this->SendAsync(std::move(packet), DEFAULT_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED);
 
+  SendAsync(std::move(packet), DEFAULT_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED);
   time_sync->TimeSyncUpdate(maxFrame, static_cast<u8>(inputs.size()));
 }
-u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
+u32 NetPlayClient::GetEarliestRemoteFrame(int local_player_port)
 {
-  u32 latestFrame = 0;
+  u32 latestFrame = UINT32_MAX;  // Start with max value to find minimum
+  bool has_any_input = false;
 
   for (int i = 0; i < inputs.size(); i++)
   {
@@ -1464,18 +1458,23 @@ u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
     const Inputs* last = inputs.at(i).GetBack();
     if (!last)
     {
-      continue;
+      // No inputs from this remote player yet - they're at frame 0
+      latestFrame = 0;
+      has_any_input = true;
+      break;  // Can't go lower than 0
     }
 
     u32 f = static_cast<u32>(last->frame);
+    has_any_input = true;
 
-    if (f > latestFrame)
+    if (f < latestFrame)
     {
       latestFrame = f;
     }
   }
 
-  return latestFrame;
+  // If no remote players have sent any data, return 0
+  return has_any_input ? latestFrame : 0;
 }
 void NetPlayClient::StoreInputs(Inputs& pad, int local_player_port)
 {
@@ -1578,14 +1577,14 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     pad_status = Pad::GetStatus(0);
   }
 
-  is_stalled = time_sync->shouldStallFrame(current_frame, GetLatestRemoteFrame(local_player_port),
+  is_stalled = time_sync->shouldStallFrame(current_frame, GetEarliestRemoteFrame(local_player_port),
                                            static_cast<u8>(inputs.size()), MAX_ROLLBACK_FRAMES);
   HandleInputs({pad_status, pad, current_frame + delay});
 
   // https://gist.github.com/rcmagic/f8d76bca32b5609e85ab156db38387e9
   if (!is_stalled)
   {
-    s32 remote_frame = GetLatestRemoteFrame(local_player_port);
+    s32 remote_frame = GetEarliestRemoteFrame(local_player_port);
     auto is_synced = true;
     auto final_frame = remote_frame;
     for (int remote_player = 0; remote_player < inputs.size(); remote_player++)

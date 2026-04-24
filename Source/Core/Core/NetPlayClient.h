@@ -326,7 +326,7 @@ public:
   bool IsRollingBack();
   bool IsStarted();
   bool IsInRollbackMode();
-  u32 GetLatestRemoteFrame(int local_player_port);
+  u32 GetEarliestRemoteFrame(int local_player_port);
   void StoreInputs(Inputs& pad, int local_player_port);
   size_t GetInputsSize();
   std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
