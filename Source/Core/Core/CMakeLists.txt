@@ -666,6 +666,14 @@ PRIVATE
   ZLIB::ZLIB
 )
 
+#Brawlback stuff
+target_include_directories(core PRIVATE Brawlback/include)
+
+target_sources(core PRIVATE
+  Brawlback/TimeSync.cpp
+  HW/EXI/EXI_Brawlback.cpp
+)
+
 if(LIBUDEV_FOUND)
   target_include_directories(core PRIVATE ${LIBUDEV_INCLUDE_DIR})
   target_link_libraries(core PRIVATE ${LIBUDEV_LIBRARY})
