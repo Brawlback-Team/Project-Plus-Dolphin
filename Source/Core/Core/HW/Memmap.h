@@ -13,9 +13,7 @@
 #include "Common/MathUtil.h"
 #include "Common/MemArena.h"
 #include "Common/Swap.h"
-#include "Common/MemoryUtil.h"
 #include "Core/PowerPC/MMU.h"
-#include <map>
 
 // Global declarations
 class PointerWrap;
@@ -56,17 +54,8 @@ struct LogicalMemoryView
 {
   void* mapped_pointer;
   u32 mapped_size;
-  u32 logical_base; // Brawlback
 };
 
-// Brawlback
-struct DirtyPage
-{
-  bool dirty;
-  u64 fastmem_address;
-  bool in_mainthread;
-};
-bool isFramePointerDirty();
 class MemoryManager
 {
 public:
@@ -113,32 +102,6 @@ public:
   void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table);
 
   void Clear();
-
-  // Brawlback -- Misc
-  std::map<u64, DirtyPage>& GetDirtyPages() { return m_dirty_pages; }
-  std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
-  std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
-  bool GetTrackDirtyPagesEnabled() const { return m_track_dirty_pages; }
-  void SetTrackDirtyPagesEnabled(bool enabled) { m_track_dirty_pages = enabled; }
-  u32 GetEmulatedAddress(u8* address);
-
-  // Brawlback -- Dirty Page Handling
-  #ifdef _WIN32
-  bool IsAddressDirty(uintptr_t address);
-  bool IsPageDirty(uintptr_t page_address);
-  bool IsPageInMainThread(uintptr_t page_address);
-  void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address, bool in_mainthread);
-  void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty, bool in_mainthread);
-  bool HandleChangeProtection(void* address, size_t size, u32 flag);
-  bool HandleFault(uintptr_t fault_address);
-  u64 GetDirtyPageIndexFromAddress(u64 address);
-  void WriteProtectPhysicalMemoryRegions();
-  void InitDirtyPages();
-  bool IsAddressInEmulatedMemory(uintptr_t address);
-  bool IsAddressInFakeVMEML1Cache(uintptr_t address);
-  u32 FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view);
-  bool IsFastmemArenaInitialized() const { return m_is_fastmem_arena_initialized; }
-  #endif
 
   // Routines to access physically addressed memory, designed for use by
   // emulated hardware outside the CPU. Use "Device_" prefix.
@@ -290,10 +253,6 @@ private:
   std::array<void*, PowerPC::BAT_PAGE_COUNT> m_logical_page_mappings{};
 
   Core::System& m_system;
-
-  std::map<u64, DirtyPage> m_dirty_pages;
-
-  bool m_track_dirty_pages = false;
 
   void InitMMIO(bool is_wii);
 };

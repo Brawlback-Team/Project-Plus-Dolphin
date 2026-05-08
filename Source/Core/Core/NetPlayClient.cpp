@@ -89,7 +89,6 @@
 #include "VideoCommon/VideoConfig.h"
 #include "Common/HookableEvent.h"
 #include "VideoCommon/VideoEvents.h"
-#include <incremental-rollback/incremental_rb.h>
 #include "Brawlback/TimeSync.h"
 #include "brawlback-common/BrawlbackPad.h"
 
@@ -1298,7 +1297,6 @@ void NetPlayClient::OnDesyncDetected(sf::Packet& packet)
 
   if (m_net_settings.m_RollbackMode)
   {
-    IncrementalRB::DumpMemoryState(frame, "network_desync");
 
     // In rollback mode, show warning but continue playing
     std::string message =
@@ -1360,7 +1358,7 @@ void NetPlayClient::OnSyncSaveData(sf::Packet& packet)
 
 bool NetPlayClient::LoadFromFrame(s32 origFrame, s32 frame)
 {
-  return IncrementalRB::Rollback(origFrame, frame);
+  return true;
 }
 
 void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd)

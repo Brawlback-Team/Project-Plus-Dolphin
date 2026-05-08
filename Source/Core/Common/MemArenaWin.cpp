@@ -36,9 +36,6 @@ using PUnmapViewOfFileEx = BOOL(WINAPI*)(PVOID BaseAddress, ULONG UnmapFlags);
 
 using PIsApiSetImplemented = BOOL(APIENTRY*)(PCSTR Contract);
 
-using PVirtualProtect = BOOL(WINAPI*)(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
-                                      PDWORD lpflOldProtect);
-
 namespace Common
 {
 struct WindowsMemoryRegion
@@ -81,14 +78,11 @@ static bool InitWindowsMemoryFunctions(WindowsMemoryFunctions* functions)
       functions->m_api_ms_win_core_memory_l1_1_6_handle.GetSymbolAddress("MapViewOfFile3FromApp");
   void* const address_UnmapViewOfFileEx =
       functions->m_kernel32_handle.GetSymbolAddress("UnmapViewOfFileEx");
-  void* const address_VirtualProtect =
-      functions->m_api_ms_win_core_memory_l1_1_6_handle.GetSymbolAddress("VirtualProtectFromApp");
   if (address_VirtualAlloc2 && address_MapViewOfFile3 && address_UnmapViewOfFileEx)
   {
     functions->m_address_VirtualAlloc2 = address_VirtualAlloc2;
     functions->m_address_MapViewOfFile3 = address_MapViewOfFile3;
     functions->m_address_UnmapViewOfFileEx = address_UnmapViewOfFileEx;
-    functions->m_address_VirtualProtect = address_VirtualProtect;
     return true;
   }
 
@@ -442,13 +436,6 @@ void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
   }
 
   UnmapViewOfFile(view);
-}
-
-bool MemArena::VirtualProtectMemoryRegion(void* data, size_t size, u32 flag)
-{
-  DWORD lpflOldProtect = 0;
-  return static_cast<PVirtualProtect>(m_memory_functions.m_address_VirtualProtect)(data, size, flag,
-                                                                                   &lpflOldProtect);
 }
 
 LazyMemoryRegion::LazyMemoryRegion()

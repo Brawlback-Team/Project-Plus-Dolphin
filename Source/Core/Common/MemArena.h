@@ -26,7 +26,6 @@ struct WindowsMemoryFunctions
   void* m_address_UnmapViewOfFileEx = nullptr;
   void* m_address_VirtualAlloc2 = nullptr;
   void* m_address_MapViewOfFile3 = nullptr;
-  void* m_address_VirtualProtect = nullptr;
 };
 #endif
 
@@ -116,16 +115,6 @@ public:
   ///
   void UnmapFromMemoryRegion(void* view, size_t size);
 
-  // Brawlback
-  ///
-  /// Virtual protect a section from the memory region previously mapped by CreateView.
-  ///
-  /// @param data Pointer to data to protect.
-  /// @param size Size of the protection.
-  /// @param flag What new permission to protect with.
-  ///
-  bool VirtualProtectMemoryRegion(void* data, size_t size, u32 flag);
-
 private:
 #ifdef _WIN32
   WindowsMemoryRegion* EnsureSplitRegionForMapping(void* address, size_t size);
@@ -195,14 +184,6 @@ public:
     const size_t block_index = offset / BLOCK_SIZE;
     if (m_writable_block_handles[block_index] == nullptr)
       MakeMemoryBlockWritable(block_index);
-#endif
-  }
-
-  void EnsureMemoryPagesWritable(size_t offset, size_t size)
-  {
-#ifdef _WIN32
-    for (const auto end_offset = offset + size; offset < end_offset; offset += BLOCK_SIZE)
-      EnsureMemoryPageWritable(offset);
 #endif
   }
 
