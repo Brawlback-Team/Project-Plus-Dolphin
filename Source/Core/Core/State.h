@@ -117,4 +117,22 @@ void UndoLoadState(Core::System& system);
 // for calling back into UI code without introducing a dependency on it in core
 using AfterLoadCallbackFunc = std::function<void()>;
 void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
+
+// Rollback netplay savestate support
+struct RollbackMemoryRegion
+{
+  u32 address;
+  u32 size;
+  u8* buffer;  // Pointer to allocated buffer (caller manages allocation/deallocation)
+};
+
+// Save a single memory region for rollback netplay.
+// This is a helper that abstracts away the memory copying logic.
+// region: The region to save (must have buffer pre-allocated)
+// Returns: true if save succeeded, false otherwise
+bool RollbackSaveRegion(Core::System& system, RollbackMemoryRegion& region);
+
+// Calculate a checksum for a memory region
+u64 RollbackChecksumRegion(const u8* buffer, u32 size);
+
 }  // namespace State

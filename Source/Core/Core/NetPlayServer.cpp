@@ -1412,6 +1412,20 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     }
   }
   break;
+  case MessageID::GekkoNetData:
+  {
+    // Forward GekkoNet data to all other clients
+    sf::Packet spac;
+    spac << MessageID::GekkoNetData;
+
+    // Copy raw GekkoNet payload (skip the MessageID byte)
+    const u8* data = static_cast<const u8*>(packet.getData()) + sizeof(MessageID);
+    size_t size = packet.getDataSize() - sizeof(MessageID);
+    spac.append(data, size);
+
+    SendToClients(spac, player.pid);
+  }
+  break;
   case MessageID::AckInputs:
   {
     Brawlback::FrameAck frame;

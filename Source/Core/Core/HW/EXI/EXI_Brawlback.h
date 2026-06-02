@@ -22,10 +22,11 @@ enum EXICommand : u8
   CMD_LOAD_STATE = 9,
   CMD_LOAD_STATE_SIZE = 10,
   CMD_GET_MISSING_REGIONS = 11,
-  CMD_START_LOOP_ROLLBACK = 12
+  CMD_START_LOOP_ROLLBACK = 12,
+  CMD_SEND_INPUTS = 13
 };
 
-struct State
+struct BrawlbackRegionState
 {
   u8* buffer;
   u64 size;
@@ -34,7 +35,7 @@ struct State
 
 struct Savestate
 {
-  std::vector<State> states;
+  std::vector<BrawlbackRegionState> states;
   u32 frame;
 };
 
@@ -42,14 +43,8 @@ struct AllocationRegionEntry
 {
   bu32 address;
   bu32 size;
-};
-
-struct AdditionalRegion
-{
-  AllocationRegionEntry entry;
-  u8* buffer;
-  u64 size;
-  u32 address;
+  char nameBuffer[30];
+  u8 nameSize;
 };
 
 class CEXIBrawlback : public ExpansionInterface::IEXIDevice
@@ -95,6 +90,7 @@ private:
   void handleGetPort();
   void handleGetInputs(bool local);
   void handleGetNetworkingMode();
+  void handleSendInputs();
 
 protected:
   void TransferByte(u8& byte) override;

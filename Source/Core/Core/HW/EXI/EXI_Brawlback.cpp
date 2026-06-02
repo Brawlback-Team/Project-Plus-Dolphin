@@ -1,4 +1,5 @@
 #include "EXI_Brawlback.h"
+#include "EXI_Brawlback.h"
 #include <Core/Brawlback/include/brawlback-common/ExiStructures.h>
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include "Common/CommonTypes.h"
 #include <Common/MemoryUtil.h>
 #include <Core/NetPlayClient.h>
+#include "Core/State.h"
 // --- Mutexes
 std::mutex read_queue_mutex = std::mutex();
 // -------------------------------
@@ -149,6 +151,8 @@ void CEXIBrawlback::handleStartLoopComplete()
   {
     bu32 address;
     bu32 size;
+    char nameBuffer[30];
+    u8 nameSize;
   };
   struct AllocationRegionDataHeader
   {
@@ -165,7 +169,7 @@ void CEXIBrawlback::handleStartLoopComplete()
   savestates[savestateIndex].frame = NetPlay::CurrentFrame();
 
   // Clear existing buffers for this savestate
-  for (State& state : savestates[savestateIndex].states)
+  for (BrawlbackRegionState& state : savestates[savestateIndex].states)
   {
     if (state.buffer != nullptr)
     {
@@ -178,15 +182,128 @@ void CEXIBrawlback::handleStartLoopComplete()
   AllocationRegionEntry* entries = reinterpret_cast<AllocationRegionEntry*>(
       start_loop_buffer.data() + sizeof(AllocationRegionDataHeader));
 
-  INFO_LOG_FMT(BRAWLBACK, "Processing complete data - Frame: {}, Region count: {}", NetPlay::CurrentFrame(),
-               header.regionCount);
+  INFO_LOG_FMT(BRAWLBACK, "Processing complete data - Frame: {}, Region count: {}",
+               NetPlay::CurrentFrame(), header.regionCount);
 
-  // Allocate and copy each region into its own buffer
-  auto& memory = Core::System::GetInstance().GetMemory();
+  // Define fixed regions that should always be saved
+  struct FixedRegion
+  {
+    u32 address;
+    u32 size;
+  };
+
+  const FixedRegion fixedRegions[] = {
+      {0x800064E0, 0x6380},   // 0x800064E0 - 0x8000C860
+      {0x804064E0, 0x8E360},  // 0x804064E0 - 0x80494840
+      {0x80494880, 0x1108D4},  // 0x80494880 - 0x805A5154
+  };
+
+  // Define regions to exclude from saving (volatile/non-deterministic memory)
+  struct ExcludedRegion
+  {
+    u32 address;
+    u32 size;
+  };
+
+  const ExcludedRegion excludedRegions[] = {
+      {0x8059FFF8, 0x00000004},  // Exclude frame counter or volatile data
+      {0x8059FFFC, 0x00000004},  // Exclude volatile region used for synchronization or temporary data
+      {0x805b5030, 0x00000078},  // Exclude extended volatile region
+  };
+  auto& system = Core::System::GetInstance();
+
+  // Helper function to check if an address range overlaps with excluded regions
+  auto isExcluded = [&excludedRegions](u32 address, u32 size) -> bool {
+    u32 range_end = address + size;
+    for (const ExcludedRegion& excluded : excludedRegions)
+    {
+      u32 excluded_end = excluded.address + excluded.size;
+      // Check for overlap
+      if (!(range_end <= excluded.address || address >= excluded_end))
+      {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // First, save all fixed regions (excluding volatile regions)
+  for (const FixedRegion& fixedRegion : fixedRegions)
+  {
+    u32 regionAddress = fixedRegion.address;
+    u32 regionSize = fixedRegion.size;
+
+    // Skip if this region overlaps with excluded regions
+    if (isExcluded(regionAddress, regionSize))
+    {
+      INFO_LOG_FMT(BRAWLBACK, "Skipping excluded fixed region - Address: 0x{:08X}, Size: 0x{:X}",
+                   regionAddress, regionSize);
+      continue;
+    }
+
+    // Allocate buffer for this region
+    u8* regionBuffer = static_cast<u8*>(Common::AllocateAlignedMemory(regionSize, 64));
+    if (regionBuffer == nullptr)
+    {
+      ERROR_LOG_FMT(BRAWLBACK, "Failed to allocate buffer for fixed region: 0x{:08X}", regionAddress);
+      continue;
+    }
+
+    // Use State::RollbackSaveRegion to copy the data
+    State::RollbackMemoryRegion region;
+    region.address = regionAddress;
+    region.size = regionSize;
+    region.buffer = regionBuffer;
+
+    if (State::RollbackSaveRegion(system, region))
+    {
+      // Store buffer and size in state
+      BrawlbackRegionState state;
+      state.buffer = regionBuffer;
+      state.size = regionSize;
+      state.address = regionAddress;
+      savestates[savestateIndex].states.push_back(state);
+
+      INFO_LOG_FMT(BRAWLBACK, "Saved fixed region - Address: 0x{:08X}, Size: 0x{:X}", regionAddress,
+                   regionSize);
+    }
+    else
+    {
+      ERROR_LOG_FMT(BRAWLBACK, "Failed to save fixed region: 0x{:08X}", regionAddress);
+      Common::FreeAlignedMemory(regionBuffer);
+    }
+  }
+
+  // Then allocate and copy each dynamic region from the game
   for (u32 i = 0; i < header.regionCount; i++)
   {
     u32 regionAddress = swap_endian(entries[i].address);
     u32 regionSize = swap_endian(entries[i].size);
+
+    // Check if this region overlaps with any fixed region to avoid duplication
+    bool isFixedRegionDuplicate = false;
+    for (const FixedRegion& fixedRegion : fixedRegions)
+    {
+      if (regionAddress == fixedRegion.address && regionSize == fixedRegion.size)
+      {
+        isFixedRegionDuplicate = true;
+        break;
+      }
+    }
+
+    if (isFixedRegionDuplicate)
+    {
+      INFO_LOG_FMT(BRAWLBACK, "Skipping duplicate region: 0x{:08X}", regionAddress);
+      continue;
+    }
+
+    // Skip if this region overlaps with excluded regions
+    if (isExcluded(regionAddress, regionSize))
+    {
+      INFO_LOG_FMT(BRAWLBACK, "Skipping excluded dynamic region - Address: 0x{:08X}, Size: 0x{:X}",
+                   regionAddress, regionSize);
+      continue;
+    }
 
     // Validate size before allocation
     if (regionSize == 0 || regionSize > 0x10000000)  // 256MB max sanity check
@@ -197,29 +314,56 @@ void CEXIBrawlback::handleStartLoopComplete()
 
     // Allocate buffer for this region
     u8* regionBuffer = static_cast<u8*>(Common::AllocateAlignedMemory(regionSize, 64));
-
-    // Copy region data from game memory
-    u8* sourceData = memory.GetSpanForAddress(regionAddress).data();
-    if (sourceData != nullptr && regionBuffer != nullptr)
+    if (regionBuffer == nullptr)
     {
-      memcpy(regionBuffer, sourceData, regionSize);
+      ERROR_LOG_FMT(BRAWLBACK, "Failed to allocate buffer for dynamic region: 0x{:08X}", regionAddress);
+      continue;
+    }
 
-      // Store buffer and size in state
-      State state;
-      state.buffer = regionBuffer;
-      state.size = regionSize;
-      state.address = regionAddress;
-      savestates[savestateIndex].states.push_back(state);
+    // Use State::RollbackSaveRegion to copy the data
+    State::RollbackMemoryRegion region;
+    region.address = regionAddress;
+    region.size = regionSize;
+    region.buffer = regionBuffer;
+
+    if (State::RollbackSaveRegion(system, region))
+    {
+      // Check if this state already exists
+      bool isDuplicate = false;
+      for (const BrawlbackRegionState& existingState : savestates[savestateIndex].states)
+      {
+        if (existingState.address == regionAddress && existingState.size == regionSize)
+        {
+          isDuplicate = true;
+          break;
+        }
+      }
+
+      if (!isDuplicate)
+      {
+        // Store buffer and size in state
+        BrawlbackRegionState state;
+        state.buffer = regionBuffer;
+        state.size = regionSize;
+        state.address = regionAddress;
+        savestates[savestateIndex].states.push_back(state);
+      }
+      else
+      {
+        // Free the buffer since we're not using it
+        Common::FreeAlignedMemory(regionBuffer);
+        INFO_LOG_FMT(BRAWLBACK, "Skipping duplicate state: 0x{:08X}", regionAddress);
+      }
     }
     else
     {
-      INFO_LOG_FMT(BRAWLBACK, "Invalid source address: 0x{:08X}", regionAddress);
-      if (regionBuffer != nullptr)
-      {
-        Common::FreeAlignedMemory(regionBuffer);
-      }
+      ERROR_LOG_FMT(BRAWLBACK, "Failed to save dynamic region: 0x{:08X}", regionAddress);
+      Common::FreeAlignedMemory(regionBuffer);
     }
   }
+
+  INFO_LOG_FMT(BRAWLBACK, "Total regions saved: {} (3 fixed + {} dynamic)",
+               savestates[savestateIndex].states.size(), header.regionCount);
 
   // Clear the buffer after processing
   start_loop_buffer.clear();
@@ -300,7 +444,7 @@ void CEXIBrawlback::handleLoadStateComplete()
 
   header.regionCount = swap_endian(header.regionCount);
 
-  bu32 frame = NetPlay::CurrentFrame() - NetPlay::AdvanceFrames();
+  bu32 frame = NetPlay::CurrentFrame();
 
   INFO_LOG_FMT(BRAWLBACK, "Loading state for frame: {}, Region count: {}", frame,
                header.regionCount);
@@ -311,6 +455,14 @@ void CEXIBrawlback::handleLoadStateComplete()
 
   // Get the savestate for this frame
   Savestate& frame_state = savestates[frame % 5];
+  if (frame_state.frame != frame)
+  {
+    INFO_LOG_FMT(BRAWLBACK, "Warning: No savestate found for frame {}, expected frame {}",
+                 frame_state.frame, frame);
+    // Clear missing regions and return early since we have no state to load
+    missing_regions.clear();
+    return;
+  }
 
   // Restore each region specified in the payload
   auto& memory = Core::System::GetInstance().GetMemory();
@@ -319,17 +471,13 @@ void CEXIBrawlback::handleLoadStateComplete()
   missing_regions.clear();
 
   // First, restore all regions from the saved state that are in the entries list
-  // and track which saved regions are NOT in the entries list (additional_regions)
-  u32 restored_count = 0;
-  for (const State& state : frame_state.states)
+  for (const BrawlbackRegionState& state : frame_state.states)
   {
     if (state.buffer != nullptr)
     {
       memory.CopyToEmu(state.address, state.buffer, state.size);
     }
   }
-
-  INFO_LOG_FMT(BRAWLBACK, "Restored {} regions from savestate", restored_count);
   
   // Now find regions requested in entries but not present in savestate (missing_regions)
   for (u32 i = 0; i < header.regionCount; i++)
@@ -339,7 +487,7 @@ void CEXIBrawlback::handleLoadStateComplete()
 
     // Check if this region exists in the saved state
     bool found_in_entries = false;
-    for (const State& state : frame_state.states)
+    for (const BrawlbackRegionState& state : frame_state.states)
     {
       if (state.address == regionAddress && state.size == regionSize)
       {
@@ -423,37 +571,23 @@ void CEXIBrawlback::handleGetInputs(bool local)
 {
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    // TODO: Doubles?
-    std::optional<NetPlay::Inputs> pad = std::nullopt;
-    std::optional<BrawlbackPad> predicted_pad = std::nullopt;
-    BrawlbackPad game_pad = BrawlbackPad{};
-    for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
+    int player_port = -1;
+    const auto& pad_map = NetPlay::netplay_client->GetPadMapping();
+    const auto local_pid = NetPlay::netplay_client->GetLocalPlayerId();
+
+    for (int i = 0; i < (int)pad_map.size(); i++)
     {
-      if (local && NetPlay::netplay_client->GetPadMapping().at(i) ==
-                       NetPlay::netplay_client->GetLocalPlayerId())
+      const bool is_local = (pad_map.at(i) == local_pid);
+      if (local ? is_local : !is_local)
       {
-        pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
-        predicted_pad =
-            NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
-        break;
-      }
-      else if (!local && NetPlay::netplay_client->GetPadMapping().at(i) !=
-                             NetPlay::netplay_client->GetLocalPlayerId())
-      {
-        pad = NetPlay::netplay_client->FindRemoteInputs(i, NetPlay::netplay_client->current_frame);
-        predicted_pad =
-            NetPlay::netplay_client->GetPredictedInputs(i, NetPlay::netplay_client->current_frame);
+        player_port = i;
         break;
       }
     }
-    if (pad != std::nullopt)
-    {
-      game_pad = pad.value().game_pad;
-    }
-    else if (predicted_pad != std::nullopt)
-    {
-      game_pad = predicted_pad.value();
-    }
+
+    const s32 frame = NetPlay::netplay_client->current_frame;
+    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(player_port, frame);
+
     std::lock_guard<std::mutex> lock(read_queue_mutex);
     this->read_queue.clear();
     auto dataPtr = reinterpret_cast<u8*>(&game_pad);
@@ -468,6 +602,19 @@ void CEXIBrawlback::handleGetNetworkingMode()
   auto dataPtr = reinterpret_cast<u8*>(&mode);
   this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u32));
 }
+void CEXIBrawlback::handleSendInputs()
+{
+  sf::Packet packet;
+  NetPlay::MessageID message_id = NetPlay::MessageID::PadData;
+  int local_player_port = -1;
+  for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
+  {
+    if (NetPlay::netplay_client->GetPadMapping().at(i) == NetPlay::netplay_client->GetLocalPlayerId())
+      local_player_port = i;
+  }
+  NetPlay::netplay_client->SendInputs(packet, local_player_port, message_id);
+}
+
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
 {
 }
@@ -532,6 +679,9 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   case CMD_ROLLBACK_CHECK:
     handleGetNetworkingMode();
+    break;
+  case CMD_SEND_INPUTS:
+    handleSendInputs();
     break;
   default:
     break;

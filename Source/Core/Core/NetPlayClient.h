@@ -3,6 +3,7 @@
 
 #pragma once
 
+#define GEKKONET_STATIC
 #include <SFML/Network/Packet.hpp>
 #include <array>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include "Brawlback/TimeSync.h"
 #include "Brawlback/include/brawlback-common/BrawlbackPad.h"
 #include "Brawlback/include/json.hpp"
+#include "Brawlback/include/GekkoNet/GekkoLib/include/gekkonet.h"
 
 using json = nlohmann::json;
 
@@ -54,6 +56,20 @@ struct Inputs
   GCPadStatus emu_pad;
   BrawlbackPad game_pad;
   s32 frame;
+};
+struct CoreRollbackState
+{
+  unsigned char* buffer = nullptr;
+  int len = 0;
+  int checksum = 0;
+  int frame = 0;
+};
+struct PendingGekkoSave
+{
+  int frame = 0;
+  unsigned int* checksum = nullptr;
+  unsigned int* stateLen = nullptr;
+  unsigned char* state = nullptr;
 };
 class NetPlayUI
 {
@@ -132,6 +148,7 @@ public:
 
   NetPlayClient(const std::string& address, const u16 port, NetPlayUI* dialog,
                 const std::string& name, const NetTraversalConfig& traversal_config);
+  bool load_gekko_state(GekkoGameEvent* event);
   ~NetPlayClient() override;
 
   std::vector<const Player*> GetPlayers();
@@ -225,6 +242,10 @@ public:
   static SyncIdentifier GetSDCardIdentifier();
   static SyncIdentifier GetBrawlFileIdentifier();
 
+  bool process_pending_saves();
+
+  int rollback_execute_end_frame();
+
   // Brawlback
   struct RingBufferInput
   {
@@ -303,10 +324,20 @@ public:
       return &buffer[tail];
     }
 
+    const Inputs* GetIndex(size_t index) const
+    {
+      if (index >= Size())
+        return nullptr;
+      size_t idx = (tail + index) & (CAPACITY - 1);
+      return &buffer[idx];
+    }
+
     bool Empty() const { return head == tail; }
 
     size_t Size() const
     {
+      if (head == 0 && tail == 0)
+        return 0;
       if (head >= tail)
         return head - tail;
       return CAPACITY - tail + head;
@@ -326,18 +357,22 @@ public:
   bool IsRollingBack();
   bool IsStarted();
   bool IsInRollbackMode();
-  u32 GetEarliestRemoteFrame(int local_player_port);
-  void StoreInputs(Inputs& pad, int local_player_port);
+  u32 GetLatestRemoteFrame(int local_player_port);
+  void StoreInputs(Inputs pad, int local_player_port);
   size_t GetInputsSize();
   std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
-  std::optional<BrawlbackPad> GetPredictedInputs(int playerIdx, s32 frame);
+  const Inputs* GetBackRemoteInputs(int playerIdx);
+  BrawlbackPad GetPredictedInputs(int playerIdx, s32 frame);
   void SendRollbackVerification(s32 frame, u64 hash);
+  void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
+  GCPadStatus GetInputForFrame(int player_port, s32 frame) const;
+  BrawlbackPad GetBrawlbackInputForFrame(int player_port, s32 frame) const;
 
   // Only for use in NetPlayClient.cpp >:(
   s32 current_frame = 0;
   // Only for use in NetPlayClient.cpp >:(
   s32 frame_to_stop_at = 0;
-  s32 latest_confirmed_frame = 0;
+  std::array<s32, 4> latest_confirmed_frame = {0, 0, 0, 0};  // Per-player tracking
   s32 advance_frames = 1;
 
   bool done_fast_forwarding;
@@ -348,6 +383,25 @@ public:
   void NotifyDesync(int player_index, s32 frame);
   std::string GetPlayerName(int player_index);
 
+  // Desync debugging
+  struct DesyncDebugInfo
+  {
+    s32 frame;
+    int player_index;
+    std::string savestate_path;
+    std::chrono::steady_clock::time_point timestamp;
+    BrawlbackPad predicted_pad;
+    BrawlbackPad actual_pad;
+    u64 state_hash;
+  };
+
+  std::vector<DesyncDebugInfo> m_desync_history;
+  static constexpr size_t MAX_DESYNC_HISTORY = 10;
+
+  void DumpDesyncSavestate(int player_index, s32 frame, const BrawlbackPad& predicted, 
+                          const BrawlbackPad& actual);
+  void CompareDesyncSavestates();
+  u64 ComputeCurrentStateHash();
 
 protected:
   struct AsyncQueueEntry
@@ -461,6 +515,7 @@ private:
   void OnGBAConfig(sf::Packet& packet);
   void OnPadData(sf::Packet& packet);
   void OnPadHostData(sf::Packet& packet);
+  void OnGekkoNetData(sf::Packet& packet);
   void OnWiimoteData(sf::Packet& packet);
   void OnPadBufferMinimum(sf::Packet& packet);
   void OnPadBufferPlayer(sf::Packet& packet);
@@ -476,6 +531,7 @@ private:
   void FromJson(const json& j, BrawlbackPad& i);
   void FromJson(const json& j, GCPadStatus& i);
   void FromJson(const json& j, Inputs& i);
+  void CloseSession();
   void OnStartGame(sf::Packet& packet);
   void OnStopGame(sf::Packet& packet);
   void OnPowerButton();
@@ -536,16 +592,41 @@ private:
 
   // Brawlback
   std::vector<RingBufferInput> inputs;
-  std::vector<Inputs> predicted_inputs;
+  std::vector<RingBufferInput> predicted_inputs;
   std::vector<int> pad_config;
-  int delay = 1;
+  int delay = 2;
   std::condition_variable wait_for_inputs;
   bool is_in_match = false;
 
   bool LoadFromFrame(s32 origFrame, s32 frame);
-  void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
   void PrintInputs(BrawlbackPad& pad);
   void HandleInputs(Inputs pad);
+  Inputs PredictInput(int player_index, s32 frame);
+
+  void apply_gekko_frame_pacing();
+
+  bool submit_local_input(GCPadStatus* input, size_t playerIndex);
+
+  void set_environment_value(const char* name, const std::string& value);
+
+  std::string make_rollback_log_prefix();
+
+  std::filesystem::path create_rollback_log_directory();
+
+  void reset_rollback_log_session();
+
+  std::filesystem::path get_gekko_log_path();
+
+  void write_gekko_log(const std::string& message);
+  const char* gekko_session_event_name(GekkoSessionEventType type);
+  void log_session_events();
+  const char* gekko_game_event_name(GekkoGameEventType type);
+  bool save_gekko_state(const PendingGekkoSave& save);
+  bool RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
+                                 int buffer_capacity, int frame);
+  bool RollbackLoadGameState(const CoreRollbackState& state);
+  int rollback_execute_begin_frame();
+  bool latch_gekko_input(GekkoGameEvent* event);
 
   // Desync tracking
   std::map<int, s32> m_last_desync_frame;  // Track last desync per player

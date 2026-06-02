@@ -27,6 +27,9 @@
     <ProjectReference Include="$(CoreDir)Common\SCMRevGen.vcxproj">
       <Project>{41279555-f94f-4ebc-99de-af863c10c5c4}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(CoreDir)Core\Brawlback\include\GekkoNet\GekkoLib\GekkoLib.vcxproj">
+      <Project>{f984af21-c578-4124-b8d5-f817c2eab13c}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(ExternalsDir)Bochs_disasm\exports.props" />
   <Import Project="$(ExternalsDir)bzip2\exports.props" />
@@ -68,18 +71,25 @@
     <BuildInfoTemplate>Common\build_info.txt.in</BuildInfoTemplate>
     <BuildInfoOutput>$(BinaryOutputDir)build_info.txt</BuildInfoOutput>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LibraryPath>C:\Users\jwhit\Documents\Code\Brawlback\Project-Plus-Dolphin\Source\Core\Core\Brawlback\include\GekkoNet\lib;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LibraryPath>C:\Users\jwhit\Documents\Code\Brawlback\Project-Plus-Dolphin\Source\Core\Core\Brawlback\include\GekkoNet\lib;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(CoreDir)Core\Brawlback\include;$(ExternalsDir)zstd\zstd\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(CoreDir)Core\Brawlback\include\GekkoNet\GekkoLib\include;$(CoreDir)Core\Brawlback\include;$(ExternalsDir)zstd\zstd\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>$(CoreDir)Core\Brawlback\include;$(ExternalsDir)zstd\zstd\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(CoreDir)Core\Brawlback\include\GekkoNet\GekkoLib\include;$(CoreDir)Core\Brawlback\include;$(ExternalsDir)zstd\zstd\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <Text Include="$(BuildInfoTemplate)" />
+    <Text Include="Core\Brawlback\include\GekkoNet\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Core\Brawlback\TimeSync.cpp" />
@@ -116,6 +126,16 @@
     <None Include="Core\Brawlback\include\brawlback-common\.git" />
     <None Include="Core\Brawlback\include\brawlback-common\.gitignore" />
     <None Include="Core\Brawlback\include\brawlback-common\README.md" />
+    <None Include="Core\Brawlback\include\GekkoNet\.clang-tidy" />
+    <None Include="Core\Brawlback\include\GekkoNet\.cmake-format.json" />
+    <None Include="Core\Brawlback\include\GekkoNet\.editorconfig" />
+    <None Include="Core\Brawlback\include\GekkoNet\.git" />
+    <None Include="Core\Brawlback\include\GekkoNet\.gitattributes" />
+    <None Include="Core\Brawlback\include\GekkoNet\.gitignore" />
+    <None Include="Core\Brawlback\include\GekkoNet\GekkoLib\GekkoLib.vcxproj" />
+    <None Include="Core\Brawlback\include\GekkoNet\GekkoNet.sln" />
+    <None Include="Core\Brawlback\include\GekkoNet\LICENSE" />
+    <None Include="Core\Brawlback\include\GekkoNet\README.md" />
   </ItemGroup>
   <UsingTask TaskName="GetProductVersion" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
     <ParameterGroup>

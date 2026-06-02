@@ -101,7 +101,7 @@ void TimeSync::startGame(u8 numPlayers)
     timing.frame = 0;
     timing.timeUs = Common::Timer::NowUs();
     this->lastFrameTimings[i] = timing;
-    this->lastFrameAcked[i] = -1;
+    this->lastFrameAcked[i] = 0;
 
     // Reset ack timers
     this->ackTimers[i].clear();
@@ -229,10 +229,10 @@ void TimeSync::ProcessFrameAck(FrameAck* frameAck)
 
 
 int TimeSync::getMinAckFrame(u8 numPlayers) {
-    int minAckFrame = -1;
+    int minAckFrame = 0;
     for (int i = 0; i < numPlayers; i++) {
         //INFO_LOG_FMT(BRAWLBACK, "lastFrameAcked[{}]: {}", i, this->lastFrameAcked[i]);
-        if (minAckFrame == -1 || (this->lastFrameAcked[i] < minAckFrame && this->lastFrameAcked[i] != -1))
+        if (minAckFrame == 0 || (this->lastFrameAcked[i] < minAckFrame && this->lastFrameAcked[i] != 0))
             minAckFrame = this->lastFrameAcked[i];
     }
     INFO_LOG_FMT(BRAWLBACK, "MIN ACK FRAME: {}\n", minAckFrame);

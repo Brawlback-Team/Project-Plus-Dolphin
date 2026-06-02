@@ -801,7 +801,13 @@ if(UNIX)
   )
 endif()
 
-if(WIN32 OR LINUX)
+# Link GekkoNet library for Brawlback rollback networking
+if(WIN32)
+  target_include_directories(core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/GekkoNet/include")
+  target_compile_definitions(core PUBLIC GEKKONET_STATIC)
+  target_link_libraries(core PUBLIC "${CMAKE_SOURCE_DIR}/x64/Release/GekkoLib.lib")
+endif()
+
   target_sources(core PRIVATE HW/EXI/BBA/IPC.cpp)
   target_link_libraries(core PRIVATE cpp-ipc::ipc)
 endif()

@@ -1035,4 +1035,47 @@ void UndoSaveState(Core::System& system)
   LoadAs(system, File::GetUserPath(D_STATESAVES_IDX) + "lastState.sav");
 }
 
+bool RollbackSaveRegion(Core::System& system, RollbackMemoryRegion& region)
+{
+  if (region.buffer == nullptr)
+  {
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveRegion: null buffer for region 0x{:08X}", region.address);
+    return false;
+  }
+
+  if (region.size == 0)
+  {
+    WARN_LOG_FMT(BRAWLBACK, "RollbackSaveRegion: zero-size region at 0x{:08X}", region.address);
+    return true;  // Nothing to save, but not an error
+  }
+
+  auto& memory = system.GetMemory();
+  u8* source_data = memory.GetSpanForAddress(region.address).data();
+
+  if (source_data == nullptr)
+  {
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveRegion: invalid source address 0x{:08X}", region.address);
+    return false;
+  }
+
+  // Copy the memory region
+  memcpy(region.buffer, source_data, region.size);
+
+  return true;
+}
+
+u64 RollbackChecksumRegion(const u8* buffer, u32 size)
+{
+  if (buffer == nullptr || size == 0)
+    return 0;
+
+  u64 checksum = 0;
+  for (u32 i = 0; i < size; ++i)
+  {
+    checksum = (checksum * 31) + buffer[i];  // Simple rolling hash
+  }
+
+  return checksum;
+}
+
 }  // namespace State
