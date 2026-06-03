@@ -233,7 +233,7 @@ std::mutex g_GekkoLogMutex;
 std::filesystem::path g_GekkoLogDirectory;
 std::string g_GekkoLogPrefix;
 int g_GekkoLogFrames = 0;
-GCPadStatus g_GekkoLastSubmittedInput = GCPadStatus{};
+Inputs g_GekkoLastSubmittedInput = Inputs{};
 long long g_GekkoLastLoadStateUs = 0;
 long long g_GekkoLastSaveStateUs = 0;
 long long g_GekkoLastRunFrameUs = 0;
@@ -248,8 +248,7 @@ double g_GekkoSpeedScale = 1.0;
 // Ring buffer: g_Inputs[player_port][frame % g_GekkoInputRingSize] = GCPadStatus
 // g_BrawlbackInputs[player_port][frame % g_GekkoInputRingSize] = BrawlbackPad
 // Size is set to (input_prediction_window + 1) at session start.
-std::vector<std::vector<GCPadStatus>> g_Inputs;
-std::vector<std::vector<BrawlbackPad>> g_BrawlbackInputs;
+std::vector<std::vector<Inputs>> g_Inputs;
 int g_GekkoInputRingSize = 0;
 // Timesync sample state. Counter wraps every kGekkoTimesyncIntervalFrames
 // to trigger a fresh frames_ahead sample. TargetScale is what g_GekkoSpeedScale
@@ -567,7 +566,7 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
 
 bool NetPlayClient::latch_gekko_input(GekkoGameEvent* event)
 {
-  const int expectedBytes = static_cast<int>(inputs.size() * sizeof(GCPadStatus));
+  const int expectedBytes = static_cast<int>(inputs.size() * sizeof(Inputs));
   if (event->data.adv.inputs == nullptr ||
       static_cast<int>(event->data.adv.input_len) < expectedBytes)
   {
@@ -649,6 +648,7 @@ bool NetPlayClient::load_gekko_state(GekkoGameEvent* event)
            << " len=" << event->data.load.state_len << " elapsed_us=" << g_GekkoLastLoadStateUs;
     write_gekko_log(stream.str());
   }
+  current_frame = event->data.load.frame;
   return true;
 }
 bool NetPlayClient::Connect()
@@ -1241,9 +1241,6 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
           }
           // clamp size of remote player framedata queue
           inputs.at(playerIndex).Push(pad);
-          // Write into the BrawlbackPad ring buffer for EXI reads
-          if (static_cast<size_t>(playerIndex) < g_BrawlbackInputs.size() && g_GekkoInputRingSize > 0)
-            g_BrawlbackInputs[static_cast<size_t>(playerIndex)][pad.frame % g_GekkoInputRingSize] = pad.game_pad;
 
           auto current_inputs = json{};
           ToJson(current_inputs, pad);
@@ -1573,7 +1570,6 @@ void NetPlayClient::CloseSession()
   g_GekkoLocalHandles.clear();
   g_GekkoInputRingSize = 0;
   g_Inputs.clear();
-  g_BrawlbackInputs.clear();
   g_GekkoLatchedInput.clear();
   g_GekkoHasLatchedInput = false;
 }
@@ -1691,7 +1687,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     config.num_players = static_cast<unsigned char>(2);
     config.max_spectators = 0;
     config.input_prediction_window = static_cast<unsigned char>(clampedPredictionWindow);
-    config.input_size = static_cast<unsigned int>(sizeof(GCPadStatus));
+    config.input_size = static_cast<unsigned int>(sizeof(Inputs));
     config.state_size = kGekkoStateCapacity;
     config.limited_saving = false;
     config.desync_detection = true;
@@ -1704,17 +1700,14 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
 
     gekko_set_runahead(g_GekkoSession, 0);
     g_GekkoPlayers = 2;
-    g_GekkoInputSize = sizeof(GCPadStatus);
+    g_GekkoInputSize = sizeof(Inputs);
     g_GekkoLocalHandle = -1;
     g_GekkoRemoteHandle = -1;
     g_GekkoPlayerHandles.assign(static_cast<size_t>(2), -1);
     g_GekkoLocalHandles.assign(static_cast<size_t>(2), -1);
     g_GekkoInputRingSize = clampedPredictionWindow + 1;
     g_Inputs.assign(static_cast<size_t>(2),
-                    std::vector<GCPadStatus>(static_cast<size_t>(g_GekkoInputRingSize)));
-    g_BrawlbackInputs.assign(static_cast<size_t>(2),
-                             std::vector<BrawlbackPad>(static_cast<size_t>(g_GekkoInputRingSize)));
-    g_GekkoLatchedInput.assign(static_cast<size_t>(2 * sizeof(GCPadStatus)), 0);
+                    std::vector<Inputs>(static_cast<size_t>(g_GekkoInputRingSize)));
     g_GekkoHasLatchedInput = false;
     g_GekkoFrameInputBuffer.clear();
     g_GekkoMaxObservedFrame = -1;
@@ -2232,7 +2225,7 @@ void NetPlayClient::apply_gekko_frame_pacing()
   }
 }
 
-bool NetPlayClient::submit_local_input(GCPadStatus* input, size_t playerIndex)
+bool NetPlayClient::submit_local_input(Inputs* input, size_t playerIndex)
 {
   bool submitted = false;
   const int handle =
@@ -2710,7 +2703,6 @@ bool NetPlayClient::RollbackLoadGameState(const CoreRollbackState& state)
 
   // Restore all regions from the buffer
   u32 offset = 0;
-  u64 checksum = 0;
 
   for (const FixedRegion& region : fixedRegions)
   {
@@ -2730,23 +2722,7 @@ bool NetPlayClient::RollbackLoadGameState(const CoreRollbackState& state)
     // Copy the memory region from buffer back to emulated memory
     memcpy(dest_data, state.buffer + offset, region.size);
 
-    // Recompute checksum for verification
-    for (u32 i = 0; i < region.size; ++i)
-    {
-      checksum = (checksum * 31) + state.buffer[offset + i];
-    }
-
     offset += region.size;
-  }
-
-  // Verify checksum if provided
-  u32 computed_checksum = static_cast<u32>(checksum & 0xFFFFFFFF);
-  if (state.checksum != 0 && static_cast<u32>(state.checksum) != computed_checksum)
-  {
-    WARN_LOG_FMT(BRAWLBACK,
-                 "RollbackLoadGameState: checksum mismatch (expected {:#010x}, got {:#010x})",
-                 state.checksum, computed_checksum);
-    // Don't fail on checksum mismatch, just warn - the state was already copied
   }
 
   INFO_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: successfully loaded state for frame {} ({} bytes)",
@@ -2802,16 +2778,16 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
       Inputs local_input{};
       local_input.game_pad = pad;
       local_input.emu_pad = (g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-                                ? g_Inputs[g_GekkoLocalPlayer][current_frame % g_GekkoInputRingSize]
+                                ? g_Inputs[g_GekkoLocalPlayer][current_frame % g_GekkoInputRingSize].emu_pad
                                 : GCPadStatus{};
       local_input.frame = current_frame;
       // Also write into the BrawlbackPad ring buffer for EXI reads
-      if (local_player_port < (int)g_BrawlbackInputs.size() && g_GekkoInputRingSize > 0)
-        g_BrawlbackInputs[local_player_port][current_frame % g_GekkoInputRingSize] = pad;
+      if (local_player_port < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
+        g_Inputs[local_player_port][current_frame % g_GekkoInputRingSize].game_pad = pad;
     }
   }
 
-  GCPadStatus* localInputPtr =
+  Inputs* localInputPtr =
       (g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
           ? &g_Inputs[g_GekkoLocalPlayer][current_frame % g_GekkoInputRingSize]
           : nullptr;
@@ -2942,7 +2918,7 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
                 playerPort < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
             {
               g_Inputs[playerPort][event->data.adv.frame % g_GekkoInputRingSize] =
-                  ((GCPadStatus*)(event->data.adv.inputs))[handle];
+                  ((Inputs*)(event->data.adv.inputs))[handle];
             }
           }
 
@@ -3026,14 +3002,14 @@ GCPadStatus NetPlayClient::GetInputForFrame(int player_port, s32 frame) const
 {
   if (player_port < 0 || player_port >= (int)g_Inputs.size() || g_GekkoInputRingSize <= 0)
     return GCPadStatus{};
-  return g_Inputs[player_port][frame % g_GekkoInputRingSize];
+  return g_Inputs[player_port][frame % g_GekkoInputRingSize].emu_pad;
 }
 
 BrawlbackPad NetPlayClient::GetBrawlbackInputForFrame(int player_port, s32 frame) const
 {
-  if (player_port < 0 || player_port >= (int)g_BrawlbackInputs.size() || g_GekkoInputRingSize <= 0)
+  if (player_port < 0 || player_port >= (int)g_Inputs.size() || g_GekkoInputRingSize <= 0)
     return BrawlbackPad{};
-  return g_BrawlbackInputs[player_port][frame % g_GekkoInputRingSize];
+  return g_Inputs[player_port][frame % g_GekkoInputRingSize].game_pad;
 }
 
 bool NetPlayClient::IsStarted()
@@ -4144,14 +4120,14 @@ bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatu
         }
         const int ingame_pad = LocalPadToInGamePad(local_pad);
         if (ingame_pad < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-          g_Inputs[ingame_pad][current_frame % g_GekkoInputRingSize] = local_pad_status;
+          g_Inputs[ingame_pad][current_frame % g_GekkoInputRingSize].emu_pad = local_pad_status;
       }
     }
 
     if (batching)
     {
       if (pad_nb < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-        *pad_status = g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize];
+        *pad_status = g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize].emu_pad;
     }
 
     if (!batching)
@@ -4170,7 +4146,7 @@ bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatu
         }
       }
       if (pad_nb < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-        g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize] = *pad_status;
+        g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize].emu_pad = *pad_status;
     }
   }
   else

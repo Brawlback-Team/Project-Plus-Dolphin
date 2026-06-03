@@ -605,7 +605,7 @@ private:
 
   void apply_gekko_frame_pacing();
 
-  bool submit_local_input(GCPadStatus* input, size_t playerIndex);
+  bool submit_local_input(Inputs* input, size_t playerIndex);
 
   void set_environment_value(const char* name, const std::string& value);
 

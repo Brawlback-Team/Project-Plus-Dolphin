@@ -571,22 +571,10 @@ void CEXIBrawlback::handleGetInputs(bool local)
 {
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    int player_port = -1;
-    const auto& pad_map = NetPlay::netplay_client->GetPadMapping();
-    const auto local_pid = NetPlay::netplay_client->GetLocalPlayerId();
-
-    for (int i = 0; i < (int)pad_map.size(); i++)
-    {
-      const bool is_local = (pad_map.at(i) == local_pid);
-      if (local ? is_local : !is_local)
-      {
-        player_port = i;
-        break;
-      }
-    }
+    const auto local_pid = NetPlay::netplay_client->GetLocalPlayerId() - 1;
 
     const s32 frame = NetPlay::netplay_client->current_frame;
-    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(player_port, frame);
+    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(local_pid, frame);
 
     std::lock_guard<std::mutex> lock(read_queue_mutex);
     this->read_queue.clear();
