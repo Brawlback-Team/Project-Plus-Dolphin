@@ -564,59 +564,6 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
   }
 }
 
-bool NetPlayClient::latch_gekko_input(GekkoGameEvent* event)
-{
-  const int expectedBytes = static_cast<int>(inputs.size() * sizeof(Inputs));
-  if (event->data.adv.inputs == nullptr ||
-      static_cast<int>(event->data.adv.input_len) < expectedBytes)
-  {
-    write_gekko_log("sync_input result=fail reason=shape");
-    return false;
-  }
-
-  if (static_cast<int>(g_GekkoLatchedInput.size()) != expectedBytes)
-  {
-    g_GekkoLatchedInput.resize(static_cast<size_t>(expectedBytes));
-  }
-  std::memset(g_GekkoLatchedInput.data(), 0, static_cast<size_t>(expectedBytes));
-  for (int player = 1; player <= g_GekkoPlayers; player++)
-  {
-    const size_t playerIndex = static_cast<size_t>(player - 1);
-    const int handle =
-        playerIndex < g_GekkoPlayerHandles.size() ? g_GekkoPlayerHandles[playerIndex] : -1;
-    if (handle < 0 || handle >= g_GekkoPlayers)
-    {
-      write_gekko_log("sync_input result=fail reason=handle_map");
-      return false;
-    }
-
-    std::memcpy(g_GekkoLatchedInput.data() + (playerIndex * static_cast<size_t>(g_GekkoInputSize)),
-                event->data.adv.inputs + (handle * g_GekkoInputSize),
-                static_cast<size_t>(g_GekkoInputSize));
-  }
-  g_GekkoHasLatchedInput = true;
-
-  if (g_GekkoLogEnabled &&
-      (g_GekkoLogFrames < kGekkoMaxLoggedFrames || g_GekkoLatchedInput != g_GekkoLastLatchedInput))
-  {
-    std::ostringstream stream;
-    stream << "sync_input result=ok frame=" << event->data.adv.frame
-           << " rolling_back=" << (event->data.adv.rolling_back ? "true" : "false")
-           << " running_ahead=" << (event->data.adv.running_ahead ? "true" : "false");
-    for (int player = 0; player < g_GekkoPlayers; player++)
-    {
-      uint32_t input = 0;
-      std::memcpy(&input, g_GekkoLatchedInput.data() + (player * g_GekkoInputSize),
-                  std::min(g_GekkoInputSize, static_cast<int>(sizeof(input))));
-      stream << " p" << (player + 1) << "=" << hex_input(input);
-    }
-    write_gekko_log(stream.str());
-    g_GekkoLastLatchedInput = g_GekkoLatchedInput;
-    g_GekkoLogFrames++;
-  }
-  return true;
-}
-
 bool NetPlayClient::load_gekko_state(GekkoGameEvent* event)
 {
   const auto beginTime = std::chrono::steady_clock::now();
@@ -1159,106 +1106,7 @@ void NetPlayClient::OnPadData(sf::Packet& packet)
     PadIndex map;
     packet >> map;
 
-    if (m_net_settings.m_RollbackMode)
-    {
-      u8 sizeofFramedatas;
-      u32 maxFrame;
-      PlayerId playerIndex;
-      int config;
-      packet >> config;
-      packet >> sizeofFramedatas;
-      packet >> playerIndex;
-      packet >> maxFrame;
-
-      pad_config.at(playerIndex) = config;
-
-      if (sizeofFramedatas > 0)
-      {
-        sf::Packet ackDataPacket = sf::Packet();
-        auto cmdbyte = MessageID::AckInputs;
-        ackDataPacket << cmdbyte;
-        ackDataPacket << maxFrame;
-        ackDataPacket << playerIndex;
-        Send(ackDataPacket, DEFAULT_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED);
-      }
-
-      std::vector<Inputs> pads(sizeofFramedatas);
-      for (u8 i = 0; i < sizeofFramedatas; i++)
-      {
-        Inputs pad_inputs;
-        packet >> pad_inputs.game_pad.buttons >> pad_inputs.game_pad._buttons >>
-            pad_inputs.game_pad.holdButtons >> pad_inputs.game_pad.rapidFireButtons >>
-            pad_inputs.game_pad.newPressedButtons >> pad_inputs.game_pad.releasedButtons >>
-            pad_inputs.game_pad.stickX >> pad_inputs.game_pad.stickY >>
-            pad_inputs.game_pad.cStickX >> pad_inputs.game_pad.cStickY >>
-            pad_inputs.game_pad.LAnalogue >> pad_inputs.game_pad.RAnalogue >>
-            pad_inputs.game_pad.LTrigger >> pad_inputs.game_pad.RTrigger;
-
-        packet >> pad_inputs.emu_pad.button >> pad_inputs.emu_pad.stickX >>
-            pad_inputs.emu_pad.stickY >> pad_inputs.emu_pad.substickX >>
-            pad_inputs.emu_pad.substickY >> pad_inputs.emu_pad.triggerLeft >>
-            pad_inputs.emu_pad.triggerRight >> pad_inputs.emu_pad.analogA >>
-            pad_inputs.emu_pad.analogB >> pad_inputs.emu_pad.isConnected;
-
-        packet >> pad_inputs.frame;
-
-        pads[i] = pad_inputs;
-      }
-      if (sizeofFramedatas > 0)
-      {
-        std::lock_guard<std::mutex> lock(crit_netplay_client);
-        for (auto pad : pads)
-        {
-          if (!inputs.at(playerIndex).Empty())
-          {
-            // if the remote frame we're trying to process is not newer than the most recent frame,
-            // we don't care about it
-            if (pad.frame <= inputs.at(playerIndex).GetBack()->frame)
-            {
-              ERROR_LOG_FMT(BRAWLBACK, "Remote input is already accounted for! {} <= {}\n",
-                            pad.frame, inputs.at(playerIndex).GetBack()->frame);
-              continue;
-            }
-            // Fill in any missing frames with the last known input to maintain sequentiality
-            // This handles cases where packets were lost and frames arrive out of order
-            s32 last_frame = inputs.at(playerIndex).GetBack()->frame;
-            if (pad.frame > last_frame + 1)
-            {
-              WARN_LOG_FMT(BRAWLBACK, "Remote input gap detected! {} to {}, filling missing frames\n",
-                           last_frame, pad.frame);
-              // Replicate the last input for missing frames
-              Inputs filler = *inputs.at(playerIndex).GetBack();
-              for (s32 f = last_frame + 1; f < pad.frame; f++)
-              {
-                filler.frame = f;
-                inputs.at(playerIndex).Push(filler);
-                auto filler_inputs = json{};
-                ToJson(filler_inputs, filler);
-                std::string port = fmt::format("{}_{}", "player_port", playerIndex);
-                inputs_output[port].push_back(filler_inputs);
-              }
-            }
-          }
-          // clamp size of remote player framedata queue
-          inputs.at(playerIndex).Push(pad);
-
-          auto current_inputs = json{};
-          ToJson(current_inputs, pad);
-          std::string port = fmt::format("{}_{}", "player_port", playerIndex);
-
-          inputs_output[port].push_back(current_inputs);
-        }
-        int local_player_port = -1;
-        for (int i = 0; i < m_pad_map.size(); i++)
-        {
-          if (m_pad_map.at(i) == m_local_player->pid)
-            local_player_port = i;
-        }
-        time_sync->ReceivedRemoteFramedata(maxFrame, static_cast<u8>(local_player_port),
-                                           start_inputs);
-      }
-    }
-    else
+    if (!m_net_settings.m_RollbackMode)
     {
       GCPadStatus pad;
       packet >> pad.button;
@@ -1497,7 +1345,6 @@ void NetPlayClient::ToJson(json& j, const GCPadStatus& i)
 }
 void NetPlayClient::ToJson(json& j, const Inputs& i)
 {
-  j["frame"] = i.frame;
   ToJson(j, i.game_pad);
   ToJson(j, i.emu_pad);
 }
@@ -1530,14 +1377,14 @@ void NetPlayClient::FromJson(const json& j, GCPadStatus& i)
 }
 void NetPlayClient::FromJson(const json& j, Inputs& i)
 {
-  j.at("frame").get_to(i.frame);
   FromJson(j, i.game_pad);
   FromJson(j, i.emu_pad);
 }
 void NetPlayClient::CloseSession()
 {
   g_GekkoStopRequested.store(false, std::memory_order_relaxed);
-  inputs.clear();
+  g_GekkoExecuting.store(false, std::memory_order_relaxed);
+
   if (g_GekkoSession != nullptr)
   {
     gekko_destroy(&g_GekkoSession);
@@ -1546,7 +1393,8 @@ void NetPlayClient::CloseSession()
 
   {
     std::lock_guard<std::mutex> lock(g_GekkoPacketMutex);
-    for (auto* result : g_GekkoNetResults)
+    // Free g_GekkoPacketResults (allocated in gekko_enet_receive_data)
+    for (auto* result : g_GekkoPacketResults)
     {
       if (result)
       {
@@ -1557,10 +1405,19 @@ void NetPlayClient::CloseSession()
         delete result;
       }
     }
+    g_GekkoPacketResults.clear();
     g_GekkoNetResults.clear();
+    // Free address data still held in pending incoming packets
+    for (auto& pkt : g_GekkoIncomingPackets)
+    {
+      if (pkt.addr.data)
+        delete static_cast<PlayerId*>(pkt.addr.data);
+    }
     g_GekkoIncomingPackets.clear();
   }
+
   g_GekkoSession = nullptr;
+  g_GekkoNetAdapter = nullptr;
   g_GekkoPlayers = 0;
   g_GekkoInputSize = 0;
   g_GekkoLocalPlayer = 0;
@@ -1571,7 +1428,25 @@ void NetPlayClient::CloseSession()
   g_GekkoInputRingSize = 0;
   g_Inputs.clear();
   g_GekkoLatchedInput.clear();
+  g_GekkoLastLatchedInput.clear();
   g_GekkoHasLatchedInput = false;
+  g_GekkoPendingSaves.clear();
+  g_GekkoFrameInputBuffer.clear();
+  g_GekkoMaxObservedFrame = -1;
+  g_GekkoLastSubmittedInput = Inputs{};
+  g_GekkoWaitingLoops = 0;
+  g_GekkoLocalInputLogRepeats = 0;
+  g_GekkoPacingLogFrames = 0;
+  g_GekkoLogFrames = 0;
+  g_GekkoSpeedScale = 1.0;
+  g_GekkoTimesyncTargetScale = 1.0;
+  g_GekkoTimesyncSampleCounter = 0;
+  g_GekkoClientReplayInputs.clear();
+  g_GekkoClientReplayIndex = 0;
+  g_GekkoLastLoadStateUs = 0;
+  g_GekkoLastSaveStateUs = 0;
+  g_GekkoLastRunFrameUs = 0;
+  g_GekkoLastPendingSaveUs = 0;
 }
 
 void NetPlayClient::OnStartGame(sf::Packet& packet)
@@ -1679,6 +1554,10 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
 
   if (IsInRollbackMode())
   {
+    // Ensure any previous session is fully torn down before creating a new one.
+    if (g_GekkoSession != nullptr)
+      CloseSession();
+
     gekko_create(&g_GekkoSession, GekkoGameSession);
     GekkoConfig config = {};
     const int clampedLocalDelay = std::clamp(delay, 0, 10);
@@ -1712,29 +1591,12 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     g_GekkoFrameInputBuffer.clear();
     g_GekkoMaxObservedFrame = -1;
     g_GekkoPendingSaves.clear();
-    inputs.clear();
-    predicted_inputs.clear();
     pad_config.clear();
 
     for (auto player : m_players)
     {
       if (player.first == m_local_player->pid)
       {
-        RingBufferInput empty_pads = {};
-        auto conf = Config::Get(Config::GetInfoForSIDevice(0));
-        for (int i = 0; i < delay; i++)
-        {
-          Inputs empty_pad = Inputs{};
-          empty_pad.emu_pad = GetDefaultPad(conf);
-          empty_pad.frame = i;
-          empty_pad.game_pad = BrawlbackPad{};
-          empty_pads.Push(empty_pad);
-        }
-        inputs.push_back(empty_pads);
-
-        pad_config.push_back(conf);
-
-        
         const int handle = gekko_add_actor(g_GekkoSession, GekkoLocalPlayer, nullptr);
         if (handle < 0)
         {
@@ -1757,10 +1619,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
       else
       {
         pad_config.push_back(12);
-        inputs.push_back({});
 
-        // For remote players in ENet implementation, create a GekkoNetAddress with the player ID
-        // The actual network routing is handled by ENet via QueueGekkoPacket
         auto* remote_player_id = new PlayerId(player.first);
         GekkoNetAddress remote_address = {};
         remote_address.data = remote_player_id;
@@ -1788,14 +1647,8 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
       }
       std::string port = fmt::format("{}_{}", "player_port", player.first);
       inputs_output[port] = json::array();
-      predicted_inputs.push_back(RingBufferInput{});
     }
     current_frame = 0;
-    if (!time_sync)
-    {
-      time_sync = std::make_unique<Brawlback::TimeSync>();
-    }
-    time_sync->startGame(static_cast<u8>(inputs.size()));
   }
   
   m_dialog->OnMsgStartGame();
@@ -1913,170 +1766,6 @@ void NetPlayClient::OnSyncSaveData(sf::Packet& packet)
     break;
   }
 }
-
-bool NetPlayClient::LoadFromFrame(s32 origFrame, s32 frame)
-{
-  return true;
-}
-
-void NetPlayClient::SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd)
-{
-  if (inputs.at(local_player_port).Empty())
-    return;
-
-  // broadcast this local framedata
-
-  // each frame we send local inputs to the other client(s)
-  // those clients then acknowledge those inputs and send that ack(nowledgement)
-  // back to us. All acked inputs are irrelevant (unless we need to rollback)
-  // since we know for a fact the remote client has them.
-  // We track what frame of inputs has been acked ("localHeadFrame")
-  // so that when we go to send inputs, we only send the un-acked ones.
-  // We send *all* unacked inputs so that when the remote client doesn't receive inputs, and needs
-  // to rollback the next packet will have all the inputs that that client hasn't received.
-  int minAckFrame = this->time_sync->getMinAckFrame((int)inputs.size());
-
-  // clamp to current frame to prevent it dropping local inputs that haven't been used yet
-  minAckFrame = std::min(minAckFrame, current_frame);
-
-  int localPadQueueSize = (int)inputs.at(local_player_port).Size();
-  if (localPadQueueSize == 0)
-    return;  // no inputs, nothing to send
-  int endIdx = 0, startIdx = 0;
-  std::vector<Inputs> localFramedatas = {};
-  if (minAckFrame == -1)
-  {
-    startIdx = 0;
-    endIdx = (int)inputs.at(local_player_port).Size();
-  }
-  else
-  {
-    for (int f = 0; f < (int)inputs.at(local_player_port).Size(); f++)
-    {
-      if (inputs.at(local_player_port).GetIndex(f)->frame == minAckFrame)
-      {
-        startIdx = f + 1;
-        break;
-      }
-    }
-
-    for (int f = (int)inputs.at(local_player_port).Size() - 1; f >= 0; f--)
-    {
-      if (inputs.at(local_player_port).GetIndex(f)->frame <= current_frame)
-      {
-        endIdx = f + 1;
-        break;
-      }
-    }
-  }
-
-  for (int i = startIdx; i < endIdx; i++)
-  {
-    if (i < inputs.at(local_player_port).Size())
-    {
-      auto localFramedata = inputs.at(local_player_port).GetIndex(i);
-
-      localFramedatas.push_back(*localFramedata);
-      INFO_LOG_FMT(BRAWLBACK, "INPUT TO SEND FRAME: {}\n", localFramedata->frame);
-    }
-    else
-    {
-      ERROR_LOG_FMT(BRAWLBACK,
-                    "Requested more frame data than was available! This is very wrong!\n");
-    }
-  }
-
-  if (localFramedatas.empty())
-  {
-    return;
-  }
-
-  packet << frame_data_cmd;
-  // TODO: Make this work for all local pads.
-  packet << static_cast<PadIndex>(LocalPadToInGamePad(0));
-  packet << static_cast<int>(pad_config.at(local_player_port));
-
-  const u8 sizeofFramedatas = static_cast<u8>(localFramedatas.size());
-  packet << sizeofFramedatas;
-
-  const s32 maxFrame = localFramedatas.back().frame;
-  packet << static_cast<PlayerId>(local_player_port);
-  packet << maxFrame;
-
-  for (auto& data : localFramedatas)
-  {
-    auto& pad = data.game_pad;
-    auto& emu_pad = data.emu_pad;
-    packet << pad.buttons << pad._buttons << pad.holdButtons << pad.rapidFireButtons
-           << pad.newPressedButtons << pad.releasedButtons << pad.stickX << pad.stickY
-           << pad.cStickX << pad.cStickY << pad.LAnalogue << pad.RAnalogue << pad.LTrigger
-           << pad.RTrigger;
-
-    packet << emu_pad.button << emu_pad.stickX << emu_pad.stickY << emu_pad.substickX
-           << emu_pad.substickY << emu_pad.triggerLeft << emu_pad.triggerRight << emu_pad.analogA
-           << emu_pad.analogB << emu_pad.isConnected;
-
-    packet << data.frame;
-  }
-
-  SendAsync(std::move(packet), DEFAULT_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED);
-  time_sync->TimeSyncUpdate(maxFrame, static_cast<u8>(inputs.size()));
-}
-u32 NetPlayClient::GetLatestRemoteFrame(int local_player_port)
-{
-  u32 latestFrame = 0;  // Start with max value to find minimum
-  bool has_any_input = false;
-
-  for (int i = 0; i < inputs.size(); i++)
-  {
-    if (i == local_player_port)
-      continue;
-
-    const Inputs* last = inputs.at(i).GetBack();
-    if (!last)
-    {
-      // No inputs from this remote player yet - they're at frame 0
-      latestFrame = 0;
-      has_any_input = true;
-      break;  // Can't go lower than 0
-    }
-
-    u32 f = static_cast<u32>(last->frame);
-    has_any_input = true;
-
-    if (f > latestFrame || latestFrame == 0)
-    {
-      latestFrame = f;
-    }
-  }
-
-  // If no remote players have sent any data, return 0
-  return has_any_input ? latestFrame : 0;
-}
-void NetPlayClient::StoreInputs(Inputs pad, int local_player_port)
-{
-  const Inputs* last = inputs.at(local_player_port).GetBack();
-
-  bool is_sequential_input = inputs.at(local_player_port).Empty() ||
-                             inputs.at(local_player_port).GetBack()->frame == pad.frame - 1;
-
-  if (is_sequential_input)
-  {
-    // Store local framedata using RingBufferInput
-    inputs.at(local_player_port).Push(pad);
-
-    auto current_inputs = json{};
-    ToJson(current_inputs, pad);
-    std::string port = fmt::format("{}_{}", "player_port", local_player_port);
-
-    inputs_output[port].push_back(current_inputs);
-  }
-  else
-  {
-    ERROR_LOG_FMT(BRAWLBACK, "Non-sequential input: last={}, new={}", last ? last->frame : -1,
-                  pad.frame);
-  }
-}
 void NetPlayClient::PrintInputs(BrawlbackPad& pad)
 {
   INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
@@ -2095,89 +1784,6 @@ void NetPlayClient::PrintInputs(BrawlbackPad& pad)
   INFO_LOG_FMT(BRAWLBACK, "ANALOG A: {}\n", pad.LAnalogue);
   INFO_LOG_FMT(BRAWLBACK, "ANALOG B: {}\n", pad.RAnalogue);
   INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
-}
-void NetPlayClient::HandleInputs(Inputs pad)
-{
-
-  if (!is_stalled)
-  {
-    // this->SendCmdToGame(EXICommand::CMD_TIMESYNC);
-  }
-  else
-  {
-    advance_frames = 0;
-  }
-}
-Inputs NetPlayClient::PredictInput(int player_index, s32 frame)
-{
-  auto make_default = [this, player_index](s32 f) {
-    Inputs predicted{};
-    predicted.frame = f;
-    predicted.emu_pad =
-        GetDefaultPad((player_index >= 0 && static_cast<size_t>(player_index) < pad_config.size()) ?
-                          pad_config[static_cast<size_t>(player_index)] :
-                          12);
-    predicted.game_pad = BrawlbackPad{};
-    return predicted;
-  };
-
-  if (player_index < 0 || static_cast<size_t>(player_index) >= inputs.size())
-    return make_default(frame);
-
-  const size_t idx = static_cast<size_t>(player_index);
-
-  // Exact authoritative input always wins.
-  if (const auto exact = inputs[idx].Get(frame); exact.has_value())
-    return exact.value();
-
-  // If predicted_inputs buffer doesn't exist for this player, we can't cache predictions
-  if (idx >= predicted_inputs.size())
-    return make_default(frame);
-
-  // Reuse cached prediction if present.
-  if (const auto cached = predicted_inputs[idx].Get(frame); cached.has_value())
-    return cached.value();
-
-  const Inputs* last_confirmed = inputs[idx].GetBack();
-  const Inputs* last_predicted = predicted_inputs[idx].GetBack();
-
-  Inputs seed = make_default(-1);
-
-  if (last_confirmed && (!last_predicted || last_confirmed->frame >= last_predicted->frame))
-    seed = *last_confirmed;
-  else if (last_predicted)
-    seed = *last_predicted;
-
-  if (seed.frame >= frame)
-  {
-    seed.frame = frame;
-    // Cache this prediction before returning
-    predicted_inputs[idx].Push(seed);
-    return seed;
-  }
-
-  // Fill a parallel prediction timeline for missing frames by copying last state forward.
-  const s32 first_frame_to_generate = seed.frame + 1;
-
-  if (first_frame_to_generate > seed.frame + 1)
-    seed.frame = first_frame_to_generate - 1;
-
-  // Always generate predictions up to and including the requested frame
-  for (s32 f = first_frame_to_generate; f <= frame; ++f)
-  {
-    Inputs next = seed;
-    next.frame = f;
-    predicted_inputs[idx].Push(next);
-    seed = next;
-  }
-
-  // The prediction should now be cached, retrieve it
-  if (const auto predicted = predicted_inputs[idx].Get(frame); predicted.has_value())
-    return predicted.value();
-
-  // Fallback (shouldn't reach here if ring buffer is working correctly)
-  seed.frame = frame;
-  return seed;
 }
 void NetPlayClient::apply_gekko_frame_pacing()
 {
@@ -2764,23 +2370,9 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
 
   // Store the local player's input into the inputs buffer so it can be sent to the remote player.
   {
-    int local_player_port = -1;
-    for (int i = 0; i < (int)m_pad_map.size(); i++)
+    int local_player_port = m_local_player->pid - 1;
+    if (local_player_port >= 0 && local_player_port < (int)g_GekkoPlayers)
     {
-      if (m_pad_map.at(i) == m_local_player->pid)
-      {
-        local_player_port = i;
-        break;
-      }
-    }
-    if (local_player_port >= 0 && local_player_port < (int)inputs.size())
-    {
-      Inputs local_input{};
-      local_input.game_pad = pad;
-      local_input.emu_pad = (g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-                                ? g_Inputs[g_GekkoLocalPlayer][current_frame % g_GekkoInputRingSize].emu_pad
-                                : GCPadStatus{};
-      local_input.frame = current_frame;
       // Also write into the BrawlbackPad ring buffer for EXI reads
       if (local_player_port < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
         g_Inputs[local_player_port][current_frame % g_GekkoInputRingSize].game_pad = pad;
@@ -3021,27 +2613,6 @@ bool NetPlayClient::IsInRollbackMode()
 {
   return m_net_settings.m_RollbackMode;
 }
-
-size_t NetPlayClient::GetInputsSize()
-{
-  return inputs.size();
-}
-
-BrawlbackPad NetPlayClient::GetPredictedInputs(int playerIdx, s32 frame)
-{
-  return PredictInput(playerIdx, frame).game_pad;
-}
-
-std::optional<Inputs> NetPlayClient::FindRemoteInputs(int playerIdx, s32 frame)
-{
-  return inputs.at(playerIdx).Get(frame);
-}
-
-const Inputs* NetPlayClient::GetBackRemoteInputs(int playerIdx)
-{
-  return inputs.at(playerIdx).GetBack();
-}
-
 void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
 {
   packet >> m_sync_save_data_count;
@@ -4464,6 +4035,18 @@ bool NetPlayClient::StopGame()
 {
   InvokeStop();
 
+  if (IsInRollbackMode())
+  {
+    CloseSession();
+    game_started.store(false);
+    g_GekkoSpeedScale = 1.0;
+    g_GekkoTimesyncTargetScale = 1.0;
+    g_GekkoTimesyncSampleCounter = 0;
+    current_frame = 0;
+    advance_frames = 0;
+    Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0);
+  }
+
   NetPlay_Disable();
 
   // stop game
@@ -5128,11 +4711,6 @@ s32 AdvanceFrames()
 void IncrementCurrentFrame()
 {
   netplay_client->current_frame++;
-}
-
-size_t FramesSize()
-{
-  return netplay_client->GetInputsSize();
 }
 
 }  // namespace NetPlay

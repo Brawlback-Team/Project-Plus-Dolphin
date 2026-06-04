@@ -571,10 +571,12 @@ void CEXIBrawlback::handleGetInputs(bool local)
 {
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    const auto local_pid = NetPlay::netplay_client->GetLocalPlayerId() - 1;
+    const int local_pid = static_cast<int>(NetPlay::netplay_client->GetLocalPlayerId()) - 1;
+    const int remote_pid = local_pid == 0 ? 1 : 0;
+    const int player_pid = local ? local_pid : remote_pid;
 
     const s32 frame = NetPlay::netplay_client->current_frame;
-    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(local_pid, frame);
+    BrawlbackPad game_pad = NetPlay::netplay_client->GetBrawlbackInputForFrame(player_pid, frame);
 
     std::lock_guard<std::mutex> lock(read_queue_mutex);
     this->read_queue.clear();
@@ -589,18 +591,6 @@ void CEXIBrawlback::handleGetNetworkingMode()
   this->read_queue.clear();
   auto dataPtr = reinterpret_cast<u8*>(&mode);
   this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(u32));
-}
-void CEXIBrawlback::handleSendInputs()
-{
-  sf::Packet packet;
-  NetPlay::MessageID message_id = NetPlay::MessageID::PadData;
-  int local_player_port = -1;
-  for (int i = 0; i < NetPlay::netplay_client->GetPadMapping().size(); i++)
-  {
-    if (NetPlay::netplay_client->GetPadMapping().at(i) == NetPlay::netplay_client->GetLocalPlayerId())
-      local_player_port = i;
-  }
-  NetPlay::netplay_client->SendInputs(packet, local_player_port, message_id);
 }
 
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
@@ -667,9 +657,6 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   case CMD_ROLLBACK_CHECK:
     handleGetNetworkingMode();
-    break;
-  case CMD_SEND_INPUTS:
-    handleSendInputs();
     break;
   default:
     break;

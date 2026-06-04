@@ -90,7 +90,6 @@ private:
   void handleGetPort();
   void handleGetInputs(bool local);
   void handleGetNetworkingMode();
-  void handleSendInputs();
 
 protected:
   void TransferByte(u8& byte) override;

@@ -917,7 +917,6 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
           packet >> pad.emu_pad.button >> pad.emu_pad.stickX >> pad.emu_pad.stickY >> pad.emu_pad.substickX
                  >> pad.emu_pad.substickY >> pad.emu_pad.triggerLeft >> pad.emu_pad.triggerRight
                  >> pad.emu_pad.analogA >> pad.emu_pad.analogB >> pad.emu_pad.isConnected;
-          packet >> pad.frame;
           spac << pad.game_pad.buttons << pad.game_pad._buttons << pad.game_pad.holdButtons << pad.game_pad.rapidFireButtons <<
               pad.game_pad.newPressedButtons << pad.game_pad.releasedButtons << pad.game_pad.stickX << pad.game_pad.stickY <<
               pad.game_pad.cStickX << pad.game_pad.cStickY << pad.game_pad.LAnalogue << pad.game_pad.RAnalogue << pad.game_pad.LTrigger <<
@@ -926,7 +925,6 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
               pad.emu_pad.substickX << pad.emu_pad.substickY << pad.emu_pad.triggerLeft <<
               pad.emu_pad.triggerRight << pad.emu_pad.analogA << pad.emu_pad.analogB <<
               pad.emu_pad.isConnected;
-          spac << pad.frame;
         }
 
         SendToClients(spac, player.pid);

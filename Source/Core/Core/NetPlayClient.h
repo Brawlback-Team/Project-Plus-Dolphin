@@ -55,7 +55,6 @@ struct Inputs
 {
   GCPadStatus emu_pad;
   BrawlbackPad game_pad;
-  s32 frame;
 };
 struct CoreRollbackState
 {
@@ -247,124 +246,16 @@ public:
   int rollback_execute_end_frame();
 
   // Brawlback
-  struct RingBufferInput
-  {
-    static constexpr size_t CAPACITY = 256;  // Power of 2 for fast modulo
-    std::array<Inputs, CAPACITY> buffer;
-    size_t head = 0;
-    size_t tail = 0;
-    s32 min_frame = 0;
-    s32 max_frame = -1;
-
-    std::optional<Inputs> PopFront()
-    {
-      if (Empty())
-        return std::nullopt;
-
-      Inputs result = buffer[tail];
-      tail = (tail + 1) & (CAPACITY - 1);
-
-      // Update min_frame if buffer is not empty
-      if (!Empty())
-        min_frame = buffer[tail].frame;
-      else
-      {
-        // Reset when buffer becomes empty
-        min_frame = 0;
-        max_frame = -1;
-      }
-
-      return result;
-    }
-
-    void Push(const Inputs& input)
-    {
-      if (input.frame <= max_frame)
-        return;  // Ignore old inputs
-
-      size_t next_head = (head + 1) & (CAPACITY - 1);
-      if (next_head == tail)
-      {
-        // Buffer full, advance tail
-        tail = (tail + 1) & (CAPACITY - 1);
-        min_frame = buffer[tail].frame;
-      }
-
-      buffer[head] = input;
-      max_frame = input.frame;
-      head = next_head;
-    }
-
-    std::optional<Inputs> Get(s32 frame) const
-    {
-      if (frame < min_frame || frame > max_frame)
-        return std::nullopt;
-
-      // Linear search for the frame
-      for (size_t i = tail; i != head; i = (i + 1) & (CAPACITY - 1))
-      {
-        if (buffer[i].frame == frame)
-          return buffer[i];
-      }
-      return std::nullopt;
-    }
-
-    const Inputs* GetBack() const
-    {
-      if (head == tail)
-        return nullptr;
-      size_t last_idx = (head == 0) ? (CAPACITY - 1) : (head - 1);
-      return &buffer[last_idx];
-    }
-
-    const Inputs* GetFront() const
-    {
-      if (head == tail)
-        return nullptr;
-      return &buffer[tail];
-    }
-
-    const Inputs* GetIndex(size_t index) const
-    {
-      if (index >= Size())
-        return nullptr;
-      size_t idx = (tail + index) & (CAPACITY - 1);
-      return &buffer[idx];
-    }
-
-    bool Empty() const { return head == tail; }
-
-    size_t Size() const
-    {
-      if (head == 0 && tail == 0)
-        return 0;
-      if (head >= tail)
-        return head - tail;
-      return CAPACITY - tail + head;
-    }
-
-    bool HasFrame(s32 frame) const { return frame >= min_frame && frame <= max_frame; }
-
-    void Clear()
-    {
-      head = 0;
-      tail = 0;
-      min_frame = 0;
-      max_frame = -1;
-    }
-  };
   void OnFrameStart(BrawlbackPad& pad);
   bool IsRollingBack();
   bool IsStarted();
   bool IsInRollbackMode();
   u32 GetLatestRemoteFrame(int local_player_port);
   void StoreInputs(Inputs pad, int local_player_port);
-  size_t GetInputsSize();
   std::optional<Inputs> FindRemoteInputs(int playerIdx, s32 frame);
   const Inputs* GetBackRemoteInputs(int playerIdx);
   BrawlbackPad GetPredictedInputs(int playerIdx, s32 frame);
   void SendRollbackVerification(s32 frame, u64 hash);
-  void SendInputs(sf::Packet& packet, int local_player_port, MessageID frame_data_cmd);
   GCPadStatus GetInputForFrame(int player_port, s32 frame) const;
   BrawlbackPad GetBrawlbackInputForFrame(int player_port, s32 frame) const;
 
@@ -397,12 +288,6 @@ public:
 
   std::vector<DesyncDebugInfo> m_desync_history;
   static constexpr size_t MAX_DESYNC_HISTORY = 10;
-
-  void DumpDesyncSavestate(int player_index, s32 frame, const BrawlbackPad& predicted, 
-                          const BrawlbackPad& actual);
-  void CompareDesyncSavestates();
-  u64 ComputeCurrentStateHash();
-
 protected:
   struct AsyncQueueEntry
   {
@@ -591,8 +476,6 @@ private:
   std::string m_wii_sync_redirect_folder;
 
   // Brawlback
-  std::vector<RingBufferInput> inputs;
-  std::vector<RingBufferInput> predicted_inputs;
   std::vector<int> pad_config;
   int delay = 2;
   std::condition_variable wait_for_inputs;
@@ -601,7 +484,6 @@ private:
   bool LoadFromFrame(s32 origFrame, s32 frame);
   void PrintInputs(BrawlbackPad& pad);
   void HandleInputs(Inputs pad);
-  Inputs PredictInput(int player_index, s32 frame);
 
   void apply_gekko_frame_pacing();
 
@@ -625,7 +507,6 @@ private:
   bool RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
                                  int buffer_capacity, int frame);
   bool RollbackLoadGameState(const CoreRollbackState& state);
-  int rollback_execute_begin_frame();
   bool latch_gekko_input(GekkoGameEvent* event);
 
   // Desync tracking
