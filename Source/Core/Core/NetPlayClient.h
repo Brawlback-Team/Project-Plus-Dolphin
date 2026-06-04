@@ -51,6 +51,19 @@ struct SerializedWiimoteState;
 namespace NetPlay
 {
 // Brawlback
+// Callback codes pushed into the queue for each GekkoGameEvent type.
+// The game reads this list via CMD_GET_CALLBACK_CODES and calls the
+// corresponding CMD_EXECUTE_* command for each code.
+enum GekkoCallbackCode : u8
+{
+  CALLBACK_NONE = 0,
+  CALLBACK_SAVE = 1,
+  CALLBACK_LOAD = 2,
+  CALLBACK_ADVANCE = 3,
+  CALLBACK_ADVANCE_ROLLBACK = 4,
+  CALLBACK_ADVANCE_RUNAHEAD = 5
+};
+
 struct Inputs
 {
   GCPadStatus emu_pad;
@@ -69,6 +82,18 @@ struct PendingGekkoSave
   unsigned int* checksum = nullptr;
   unsigned int* stateLen = nullptr;
   unsigned char* state = nullptr;
+};
+struct PendingGekkoLoad
+{
+  int frame = 0;
+  unsigned int state_len = 0;
+  unsigned char* state = nullptr;
+};
+struct PendingGekkoAdvance
+{
+  int frame = 0;
+  bool rolling_back = false;
+  bool running_ahead = false;
 };
 class NetPlayUI
 {
@@ -258,6 +283,12 @@ public:
   void SendRollbackVerification(s32 frame, u64 hash);
   GCPadStatus GetInputForFrame(int player_port, s32 frame) const;
   BrawlbackPad GetBrawlbackInputForFrame(int player_port, s32 frame) const;
+
+  // Callback-code queue: populated by OnFrameStart, consumed by EXI handlers
+  std::vector<u8> PopCallbackCodes();
+  bool ExecutePendingSave();
+  bool ExecutePendingLoad();
+  s32 ExecuteAdvanceFrame();
 
   // Only for use in NetPlayClient.cpp >:(
   s32 current_frame = 0;
@@ -508,6 +539,13 @@ private:
                                  int buffer_capacity, int frame);
   bool RollbackLoadGameState(const CoreRollbackState& state);
   bool latch_gekko_input(GekkoGameEvent* event);
+
+  // Pending event queues filled by OnFrameStart, drained by EXI execute commands
+  std::vector<u8> m_gekko_callback_codes;
+  std::vector<PendingGekkoSave> m_pending_gekko_saves;
+  std::vector<PendingGekkoLoad> m_pending_gekko_loads;
+  std::vector<PendingGekkoAdvance> m_pending_gekko_advances;
+  std::mutex m_gekko_callback_mutex;
 
   // Desync tracking
   std::map<int, s32> m_last_desync_frame;  // Track last desync per player

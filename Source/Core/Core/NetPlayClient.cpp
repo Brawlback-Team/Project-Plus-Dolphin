@@ -2386,6 +2386,7 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
   submit_local_input(localInputPtr, g_GekkoLocalPlayer);
   g_GekkoHasLatchedInput = false;
   g_GekkoPendingSaves.clear();
+  advance_frames = 0;
   {
     if (g_GekkoStopRequested.load(std::memory_order_relaxed))
     {
@@ -2446,61 +2447,57 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
       g_GekkoWaitingLoops = 0;
     }
 
-    bool deferSavesUntilFrameEnd = false;
     bool hasRealAdvance = false;
     summaryEventCount += count;
-    advance_frames = 0;
-    for (int i = 0; i < count; i++)
+
+    // Collect all events into the callback queue; the actual save/load/advance
+    // work is deferred and performed by EXI execute commands triggered by the game.
     {
-      GekkoGameEvent* event = events[i];
-      if (event == nullptr)
-      {
-        continue;
-      }
+      std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+      m_gekko_callback_codes.clear();
+      m_pending_gekko_saves.clear();
+      m_pending_gekko_loads.clear();
+      m_pending_gekko_advances.clear();
 
-      switch (event->type)
+      for (int i = 0; i < count; i++)
       {
-      case GekkoSaveEvent:
-      {
-        summarySaveCount++;
-        PendingGekkoSave save;
-        save.frame = event->data.save.frame;
-        save.checksum = event->data.save.checksum;
-        save.stateLen = event->data.save.state_len;
-        save.state = event->data.save.state;
-        if (deferSavesUntilFrameEnd)
+        GekkoGameEvent* event = events[i];
+        if (event == nullptr)
+          continue;
+
+        switch (event->type)
         {
-          write_gekko_log("save_state result=deferred");
-          g_GekkoPendingSaves.push_back(save);
+        case GekkoSaveEvent:
+        {
+          summarySaveCount++;
+          PendingGekkoSave save;
+          save.frame = event->data.save.frame;
+          save.checksum = event->data.save.checksum;
+          save.stateLen = event->data.save.state_len;
+          save.state = event->data.save.state;
+          m_pending_gekko_saves.push_back(save);
+          m_gekko_callback_codes.push_back(static_cast<u8>(CALLBACK_SAVE));
+          write_gekko_log("queue_callback type=save frame=" + std::to_string(save.frame));
+          break;
         }
-        else if (!save_gekko_state(save))
+        case GekkoLoadEvent:
         {
-          return;
+          summaryLoadCount++;
+          PendingGekkoLoad load;
+          load.frame = event->data.load.frame;
+          load.state_len = event->data.load.state_len;
+          load.state = event->data.load.state;
+          m_pending_gekko_loads.push_back(load);
+          m_gekko_callback_codes.push_back(static_cast<u8>(CALLBACK_LOAD));
+          write_gekko_log("queue_callback type=load frame=" + std::to_string(load.frame));
+          break;
         }
-        else
+        case GekkoAdvanceEvent:
         {
-          summarySaveUs += g_GekkoLastSaveStateUs;
-        }
-        break;
-      }
-      case GekkoLoadEvent:
-        summaryLoadCount++;
-        write_gekko_log("load_state begin");
-        if (!load_gekko_state(event))
-        {
-          return;
-        }
-        summaryLoadUs += g_GekkoLastLoadStateUs;
-        break;
-      case GekkoAdvanceEvent:
-        write_gekko_log("advance_frame begin");
-        advance_frames++;
-        {
+          // Latch inputs for this advance event immediately so EXI reads
+          // see the correct data when CMD_EXECUTE_ADVANCE is processed.
           const auto latchInputTime = std::chrono::steady_clock::now();
-
-          // Extract inputs from the GekkoNet event and store them in g_Inputs
-          // event->data.adv.inputs is indexed by GekkoNet handle, not player port.
-          // Use g_GekkoPlayerHandles to map player port -> handle -> correct input slot.
+          advance_frames++;
           for (int playerPort = 0; playerPort < g_GekkoPlayers; playerPort++)
           {
             const int handle = (playerPort < (int)g_GekkoPlayerHandles.size())
@@ -2513,40 +2510,41 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
                   ((Inputs*)(event->data.adv.inputs))[handle];
             }
           }
-
           summaryLatchInputUs += std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now() - latchInputTime)
                                      .count();
 
-          if (event->data.adv.rolling_back || event->data.adv.running_ahead)
+          PendingGekkoAdvance adv;
+          adv.frame = event->data.adv.frame;
+          adv.rolling_back = event->data.adv.rolling_back;
+          adv.running_ahead = event->data.adv.running_ahead;
+          m_pending_gekko_advances.push_back(adv);
+
+          GekkoCallbackCode code;
+          if (event->data.adv.rolling_back)
           {
-            if (event->data.adv.rolling_back)
-            {
-              summaryRollbackAdvanceCount++;
-            }
-            if (event->data.adv.running_ahead)
-            {
-              summaryRunaheadAdvanceCount++;
-            }
-            const auto runFrameBeginTime = std::chrono::steady_clock::now();
-            // Send advance frames to EXI here
-            g_GekkoLastRunFrameUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                        std::chrono::steady_clock::now() - runFrameBeginTime)
-                                        .count();
-            summaryResimUs += g_GekkoLastRunFrameUs;
-            summaryMaxResimUs = std::max(summaryMaxResimUs, g_GekkoLastRunFrameUs);
-            g_GekkoHasLatchedInput = false;
+            code = CALLBACK_ADVANCE_ROLLBACK;
+            summaryRollbackAdvanceCount++;
+          }
+          else if (event->data.adv.running_ahead)
+          {
+            code = CALLBACK_ADVANCE_RUNAHEAD;
+            summaryRunaheadAdvanceCount++;
           }
           else
           {
-            write_gekko_log("advance_frame result=real_frame_ready");
+            code = CALLBACK_ADVANCE;
             hasRealAdvance = true;
-            deferSavesUntilFrameEnd = true;
           }
+          m_gekko_callback_codes.push_back(static_cast<u8>(code));
+          write_gekko_log("queue_callback type=advance frame=" + std::to_string(adv.frame)
+                          + " rollback=" + std::to_string(adv.rolling_back)
+                          + " runahead=" + std::to_string(adv.running_ahead));
           break;
         }
-      default:
-        break;
+        default:
+          break;
+        }
       }
     }
 
@@ -2588,6 +2586,80 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
 bool NetPlayClient::IsRollingBack()
 {
   return is_rollingback.load();
+}
+
+std::vector<u8> NetPlayClient::PopCallbackCodes()
+{
+  std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+  std::vector<u8> codes = std::move(m_gekko_callback_codes);
+  m_gekko_callback_codes.clear();
+  return codes;
+}
+
+bool NetPlayClient::ExecutePendingSave()
+{
+  PendingGekkoSave save;
+  {
+    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+    if (m_pending_gekko_saves.empty())
+      return false;
+    save = m_pending_gekko_saves.front();
+    m_pending_gekko_saves.erase(m_pending_gekko_saves.begin());
+  }
+  write_gekko_log("execute_save frame=" + std::to_string(save.frame));
+  if (!save_gekko_state(save))
+  {
+    write_gekko_log("execute_save result=fail");
+    return false;
+  }
+  write_gekko_log("execute_save result=ok");
+  return true;
+}
+
+bool NetPlayClient::ExecutePendingLoad()
+{
+  PendingGekkoLoad load;
+  {
+    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+    if (m_pending_gekko_loads.empty())
+      return false;
+    load = m_pending_gekko_loads.front();
+    m_pending_gekko_loads.erase(m_pending_gekko_loads.begin());
+  }
+  write_gekko_log("execute_load frame=" + std::to_string(load.frame));
+  // Build a synthetic GekkoGameEvent on the stack so we can reuse load_gekko_state
+  GekkoGameEvent event = {};
+  event.type = GekkoLoadEvent;
+  event.data.load.frame = load.frame;
+  event.data.load.state_len = load.state_len;
+  event.data.load.state = load.state;
+  if (!load_gekko_state(&event))
+  {
+    write_gekko_log("execute_load result=fail");
+    return false;
+  }
+  write_gekko_log("execute_load result=ok");
+  return true;
+}
+
+s32 NetPlayClient::ExecuteAdvanceFrame()
+{
+  PendingGekkoAdvance adv;
+  {
+    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+    if (m_pending_gekko_advances.empty())
+      return -1;
+    adv = m_pending_gekko_advances.front();
+    m_pending_gekko_advances.erase(m_pending_gekko_advances.begin());
+  }
+  if (adv.rolling_back || adv.running_ahead)
+  {
+    g_GekkoHasLatchedInput = false;
+  }
+  write_gekko_log("execute_advance frame=" + std::to_string(adv.frame)
+                  + " rollback=" + std::to_string(adv.rolling_back)
+                  + " runahead=" + std::to_string(adv.running_ahead));
+  return static_cast<s32>(adv.frame);
 }
 
 GCPadStatus NetPlayClient::GetInputForFrame(int player_port, s32 frame) const
@@ -4601,6 +4673,14 @@ int NetPlayClient::rollback_execute_end_frame()
                                  .count();
   long long debugEndUs = 0;
   g_GekkoHasLatchedInput = false;
+  // Flush any callback queue entries that were never consumed by the game this frame.
+  {
+    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
+    m_gekko_callback_codes.clear();
+    m_pending_gekko_saves.clear();
+    m_pending_gekko_loads.clear();
+    m_pending_gekko_advances.clear();
+  }
   if (g_GekkoLogEnabled)
   {
     const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(

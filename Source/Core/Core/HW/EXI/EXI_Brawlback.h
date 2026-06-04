@@ -23,7 +23,12 @@ enum EXICommand : u8
   CMD_LOAD_STATE_SIZE = 10,
   CMD_GET_MISSING_REGIONS = 11,
   CMD_START_LOOP_ROLLBACK = 12,
-  CMD_SEND_INPUTS = 13
+  CMD_SEND_INPUTS = 13,
+  // Callback-code queue commands
+  CMD_GET_CALLBACK_CODES = 14,
+  CMD_EXECUTE_SAVE = 15,
+  CMD_EXECUTE_LOAD = 16,
+  CMD_EXECUTE_ADVANCE = 17
 };
 
 struct BrawlbackRegionState
@@ -76,6 +81,16 @@ private:
   // Store missing regions from last load state operation
   std::vector<AllocationRegionEntry> missing_regions;
 
+  // Region list parsed from the last complete start_loop payload;
+  // consumed by handleExecuteSave to do the actual memory reads.
+  struct PendingSaveRegionList
+  {
+    u32 frame = 0;
+    std::vector<AllocationRegionEntry> entries;
+    bool valid = false;
+  };
+  PendingSaveRegionList pending_save_region_list;
+
   // --- DMA handlers
   void handleEndFrame();
   void handleEndLoop();
@@ -88,8 +103,13 @@ private:
   void handleLoadStateComplete();
   void handleGetMissingRegions();
   void handleGetPort();
-  void handleGetInputs(bool local);
+  void handleGetInputs(bool local, u8* payload);
   void handleGetNetworkingMode();
+  // Callback-code queue
+  void handleGetCallbackCodes();
+  void handleExecuteSave();
+  void handleExecuteLoad();
+  void handleExecuteAdvance();
 
 protected:
   void TransferByte(u8& byte) override;
