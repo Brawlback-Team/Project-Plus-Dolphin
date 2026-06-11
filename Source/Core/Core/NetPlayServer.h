@@ -57,6 +57,7 @@ public:
   bool StartGame();
   bool RequestStartGame();
   void AbortGameStart();
+  void SetRollback(const bool enable);
 
   PadMappingArray GetPadMapping() const;
   void SetPadMapping(const PadMappingArray& mappings);
@@ -216,5 +217,6 @@ private:
   Common::TraversalClient* m_traversal_client = nullptr;
   NetPlayUI* m_dialog = nullptr;
   NetPlayIndex m_index;
+  bool m_rollback_mode;
 };
 }  // namespace NetPlay

@@ -1,7 +1,6 @@
 // Copyright 2010 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#define GEKKONET_STATIC
 #include "Core/NetPlayClient.h"
 
 #include <algorithm>
@@ -1148,35 +1147,6 @@ void NetPlayClient::OnPadHostData(sf::Packet& packet)
       m_first_pad_status_received_event.Set();
     }
   }
-}
-
-void NetPlayClient::SendRollbackVerification(s32 frame, u64 hash)
-{
-  std::lock_guard lk(crit_netplay_client);
-
-  if (!IsInRollbackMode() || !IsStarted())
-  {
-    INFO_LOG_FMT(BRAWLBACK, 
-                 "SendRollbackVerification skipped - RollbackMode: {} | Started: {}",
-                 IsInRollbackMode(), IsStarted());
-    return;
-  }
-
-  auto verify_start = std::chrono::high_resolution_clock::now();
-
-  sf::Packet packet;
-  packet << MessageID::RollbackVerification;
-  packet << frame;
-  packet << hash;
-
-  netplay_client->SendAsync(std::move(packet));
-
-  auto verify_duration = std::chrono::duration_cast<std::chrono::microseconds>(
-      std::chrono::high_resolution_clock::now() - verify_start);
-
-  INFO_LOG_FMT(BRAWLBACK, 
-               "ROLLBACK VERIFICATION SENT - Frame: {} | Hash: {:#018x} | SendTime: {}µs",
-               frame, hash, verify_duration.count());
 }
 
 void NetPlayClient::OnWiimoteData(sf::Packet& packet)

@@ -194,6 +194,8 @@ enum class MessageID : u8
   SyncSaveData = 0xF1,
   SyncCodes = 0xF2,
   AckInputs = 0xF3,
+  GekkoNetData = 0xF4,
+  RollbackMode = 0xF5
 };
 
 enum class ConnectionError : u8

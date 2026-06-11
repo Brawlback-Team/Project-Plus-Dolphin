@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
-
-#define GEKKONET_STATIC
 #include <SFML/Network/Packet.hpp>
 #include <array>
 #include <chrono>

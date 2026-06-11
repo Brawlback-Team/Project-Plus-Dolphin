@@ -1129,6 +1129,11 @@ void NetPlayDialog::OnTtlDetermined(u8 ttl)
   DisplayMessage(tr("Using TTL %1 for probe packet").arg(QString::number(ttl)), "");
 }
 
+void NetPlayDialog::OnRollbackModeChanged(bool enabled)
+{
+  QueueOnObject(this, [this, enabled] { m_rollback_action->setChecked(enabled); });
+}
+
 bool NetPlayDialog::IsRecording()
 {
   const std::optional<bool> is_recording = RunOnObject(m_record_input_action, &QAction::isChecked);

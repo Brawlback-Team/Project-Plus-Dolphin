@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project>
   <Import Project="..\VSProps\Base.Macros.props" />
   <Import Project="$(VSPropsDir)Base.Targets.props" />
@@ -40,6 +40,7 @@
   <Import Project="$(ExternalsDir)FatFs\exports.props" />
   <Import Project="$(ExternalsDir)fmt\exports.props" />
   <Import Project="$(ExternalsDir)FreeSurround\exports.props" />
+  <Import Project="$(CoreDir)Core\Brawlback\include\exports.props" />
   <Import Project="$(ExternalsDir)glslang\exports.props" />
   <Import Project="$(ExternalsDir)imgui\exports.props" />
   <Import Project="$(ExternalsDir)implot\exports.props" />
