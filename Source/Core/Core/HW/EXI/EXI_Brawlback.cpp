@@ -40,6 +40,7 @@ void CEXIBrawlback::handleEndFrame()
 {
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
+    Core::System::GetInstance().GetMemory().is_in_main_thread = false;
     NetPlay::OnFrameEnd();
   }
 }
@@ -52,7 +53,7 @@ void CEXIBrawlback::handleEndLoop()
 {
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
-    NetPlay::IncrementCurrentFrame();
+    //NetPlay::IncrementCurrentFrame();
   }
 }
 inline void SwapBrawlbackPadDataEndianess(BrawlbackPad& pad)
@@ -130,6 +131,7 @@ void CEXIBrawlback::handleStartLoopRollback(u8* payload)
     memcpy(&pad, payload, sizeof(BrawlbackPad));
     SwapBrawlbackPadDataEndianess(pad);
     NetPlay::OnFrameStart(pad);
+    Core::System::GetInstance().GetMemory().is_in_main_thread = true;
 
     // Send the callback-code queue to the game instead of a raw advance_frames value.
     handleGetCallbackCodes();
@@ -371,50 +373,21 @@ void CEXIBrawlback::handleExecuteSave()
   if (!NetPlay::IsNetPlayRunning() || !NetPlay::IsInRollbackMode() || !NetPlay::netplay_client)
     return;
 
-  u32 frame = -1;
-  if (pending_save_region_list.size() != 0)
+  u32 frame = NetPlay::CurrentFrame();
+
+  // Execute the GekkoNet-level save (writes state into Gekko's buffer, including dynamic regions).
+  bool ok = NetPlay::netplay_client->ExecutePendingSave();
+
+  INFO_LOG_FMT(BRAWLBACK, "handleExecuteSave: frame={} ok={}", frame, ok);
+
+  u8 result = ok ? 1 : 0;
   {
-    frame = pending_save_region_list.begin()->frame;
-
-    // Pass the dynamic region list to NetPlayClient so RollbackSaveGameStateInto includes them.
-    {
-      std::vector<NetPlay::DynamicSaveRegion> dynamic_regions;
-      std::vector<NetPlay::DynamicSaveRegion> existing_regions = NetPlay::netplay_client->GetDynamicSaveRegions(frame - 1);
-      for (const AllocationRegionEntry& entry : pending_save_region_list[0].entries)
-      {
-        NetPlay::DynamicSaveRegion r;
-        r.address = entry.address;
-        r.size = entry.size;
-        dynamic_regions.push_back(r);
-      }
-      NetPlay::netplay_client->SetDynamicSaveRegions(frame, dynamic_regions);
-    }
-
-    // Execute the GekkoNet-level save (writes state into Gekko's buffer, including dynamic regions).
-    bool ok = NetPlay::netplay_client->ExecutePendingSave();
-
-    INFO_LOG_FMT(BRAWLBACK, "handleExecuteSave: frame={} ok={}", frame, ok);
-
-    pending_save_region_list.erase(pending_save_region_list.begin());
-
-    u8 result = ok ? 1 : 0;
-    {
-      std::lock_guard<std::mutex> lock(read_queue_mutex);
-      this->read_queue.clear();
-      auto resultPtr = reinterpret_cast<u8*>(&result);
-      this->read_queue.insert(this->read_queue.end(), resultPtr, resultPtr + sizeof(u8));
-    }
+    std::lock_guard<std::mutex> lock(read_queue_mutex);
+    this->read_queue.clear();
+    auto resultPtr = reinterpret_cast<u8*>(&result);
+    this->read_queue.insert(this->read_queue.end(), resultPtr, resultPtr + sizeof(u8));
   }
-  else
-  {
-    u8 result = 0;
-    {
-      std::lock_guard<std::mutex> lock(read_queue_mutex);
-      this->read_queue.clear();
-      auto resultPtr = reinterpret_cast<u8*>(&result);
-      this->read_queue.insert(this->read_queue.end(), resultPtr, resultPtr + sizeof(u8));
-    }
-  }
+  
 }
 
 void CEXIBrawlback::handleExecuteLoad()
@@ -422,57 +395,7 @@ void CEXIBrawlback::handleExecuteLoad()
   if (!NetPlay::IsNetPlayRunning() || !NetPlay::IsInRollbackMode() || !NetPlay::netplay_client)
     return;
 
-  u32 frame = -1;
-  if (pending_load_region_list.size() != 0)
-  {
-    frame = pending_load_region_list.begin()->frame;
-
-    // Compare the game's requested load regions against what was saved for this frame.
-    const std::vector<NetPlay::DynamicSaveRegion>& saved_regions =
-        NetPlay::netplay_client->GetDynamicSaveRegions(static_cast<int>(frame));
-
-    missing_regions.clear();
-    for (const AllocationRegionEntry& entry : pending_load_region_list[0].entries)
-    {
-      u32 regionAddress = entry.address;
-      u32 regionSize = entry.size;
-
-      bool found = false;
-      for (const NetPlay::DynamicSaveRegion& saved : saved_regions)
-      {
-        if (saved.address == regionAddress && saved.size == regionSize)
-        {
-          found = true;
-          break;
-        }
-      }
-
-      if (!found)
-      {
-        INFO_LOG_FMT(BRAWLBACK, "handleExecuteLoad: missing region Address=0x{:08X}, Size={}",
-                     regionAddress, regionSize);
-        AllocationRegionEntry missing;
-        missing.address = entry.address;
-        missing.size = entry.size;
-        missing_regions.push_back(missing);
-      }
-    }
-
-    INFO_LOG_FMT(BRAWLBACK, "handleExecuteLoad: frame={} missing_regions={}", frame,
-                 missing_regions.size());
-
-    NetPlay::netplay_client->ExecutePendingLoad();
-    pending_load_region_list.erase(pending_load_region_list.begin());
-  }
-
-  // Return the count of missing regions to the game
-  {
-    std::lock_guard<std::mutex> lock(read_queue_mutex);
-    this->read_queue.clear();
-    bu32 missingCount = static_cast<bu32>(missing_regions.size());
-    auto countPtr = reinterpret_cast<u8*>(&missingCount);
-    this->read_queue.insert(this->read_queue.end(), countPtr, countPtr + sizeof(bu32));
-  }
+  NetPlay::netplay_client->ExecutePendingLoad();
 }
 
 void CEXIBrawlback::handleExecuteAdvance()

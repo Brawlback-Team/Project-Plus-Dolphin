@@ -552,8 +552,7 @@ private:
   std::vector<PendingGekkoLoad> m_pending_gekko_loads;
   std::vector<PendingGekkoAdvance> m_pending_gekko_advances;
   mutable std::mutex m_gekko_callback_mutex;
-  // Dynamic regions provided by the game (from handleStartLoopComplete), keyed by frame
-  std::unordered_map<int, std::vector<DynamicSaveRegion>> m_dynamic_save_regions;
+  // Dynamic regions are now handled by IncrementalRB system automatically
 
   // Desync tracking
   std::map<int, s32> m_last_desync_frame;  // Track last desync per player

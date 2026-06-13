@@ -21,6 +21,7 @@
 #include <Core/HW/GPFifo.h>
 #include <Core/HW/HSP/HSP.h>
 #include <Core/HW/WII_IPC.h>
+#include <Core/HW/Memmap.h>
 #include <Core/IOS/IOS.h>
 #include <Core/Movie.h>
 #include <VideoCommon/VideoBackendBase.h>
@@ -362,21 +363,21 @@ namespace IncrementalRB
       TrackAlloc(*physical_entries[i].out_pointer, physical_entries[i].size);
     }
     // Threading Stuff
-    //ExcludeMem(GetPointer(0x805a5154), 0x805b5158 - 0x805a5154);  // Main Stack
-               
-    ExcludeMem(GetPointer(0x80009760), 0x805b5158 - 0x80009760);  // Data Sections, BSS, Main Stack
-    ExcludeMem(GetPointer(0x805bf420), 0x28);                    // ??? OSAlarm
-    ExcludeMem(GetPointer(0x805bacc0), 0x28);                    // PAD OSAlarm
-    ExcludeMem(GetPointer(0x805b85e0), 0x28);                    // OSALarmSleep OSAlarm
+    //ExcludeMem(GetPointer(0x80009760), 0x805b5158 - 0x80009760);  // Data Sections, BSS, Main Stack
+    ExcludeMem(GetPointer(0x805a5154), 0x805b5158 - 0x805a5154);  // Main Stack
+    //ExcludeMem(GetPointer(0x805bf420), 0x28);                    // ??? OSAlarm
+    //ExcludeMem(GetPointer(0x805bacc0), 0x28);                    // PAD OSAlarm
+    //ExcludeMem(GetPointer(0x805b85e0), 0x28);                    // OSALarmSleep OSAlarm
     // Heaps
     ExcludeMem(GetPointer(0x817ba5a0), 0x817ca5a0 - 0x817ba5a0); // Syringe
-    ExcludeMem(GetPointer(0x93604000), 0x4000);                   // EXI Transfer
+    ExcludeMem(GetPointer(0x94000000), 0x3FBFFFF);                // SavestateHeap
     //ExcludeMem(GetPointer(0x92163a00), 0x00de6700);              //  InfoExtraResource
     //ExcludeMem(GetPointer(0x914c9f00), 0x00c99b00);               //  MenuResource
     ExcludeMem(GetPointer(0x805d1e60), 0x00040100);              // RenderFifo
     ExcludeMem(GetPointer(0x9134cc00), 0x0012c200);              // CopyFB
     ExcludeMem(GetPointer(0x805ca260), 0x00007c00);              // Thread
     ExcludeMem(GetPointer(0x90199800), 0x00cc7c00);              // Sound
+    ExcludeMem(GetPointer(0x804dd558), 0x4);                     // VI (Retrace Count)
     //ExcludeMem(GetPointer(0x80b8db60), 0x80c23a60 - 0x80b8db60); // Effect*/
 
     std::sort(ExcludeMemList.begin(), ExcludeMemList.end(), [](const ExcludeBuffer& a, const ExcludeBuffer& b){ return a.buffer.data < b.buffer.data; });
@@ -455,72 +456,81 @@ namespace IncrementalRB
 
     if (excludeSet.size() > 0)
     {
+      // Build interval set from changed pages - each page becomes a closed interval [page, page+pageSize]
       TIntervalSet changedSet;
       for (u32 i = 0; i < savestate.changedPages.size(); i++)
       {
         changedSet += boost::icl::discrete_interval<uintptr_t>::closed(
-            savestate.changedPages[i], savestate.changedPages[i] + pageSize);
+            savestate.changedPages[i], savestate.changedPages[i] + pageSize - 1);
       }
 
+      // Compute which memory ranges to actually copy (changed pages minus excluded regions)
       auto difference = changedSet - excludeSet;
+
+      // For each resulting interval, copy from afterCopies to changedPages addresses
       for (auto it = difference.begin(); it != difference.end(); ++it)
       {
-        auto orig_ptr = (uintptr_t)it->lower();
-        u8* ssData = nullptr;
-        size_t size = 0;
-        if (boost::icl::contains(*it, it->lower()))
-        {
-          auto itOrig = std::find(std::begin(savestate.changedPages), savestate.changedPages.end(),
-                                  it->lower());
-          if (itOrig != savestate.changedPages.end())
-          {
-            size_t index = std::distance(std::begin(savestate.changedPages), itOrig);
-            ssData = (u8*)savestate.afterCopies[index];
-            size = it->upper() - it->lower();
-            if (!boost::icl::contains(*it, it->upper()))
-            {
-              size--;
-            }
-          }
-        }
-        else
-        {
-          uintptr_t lowerPage =
-              reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)it->lower(), pageSize));
-          auto itOrig = std::find(std::begin(savestate.changedPages), savestate.changedPages.end(),
-                                  lowerPage);
-          if (itOrig != savestate.changedPages.end() && it->upper() - it->lower() > 0)
-          {
-            orig_ptr = lowerPage + (it->lower() - lowerPage + 1);
-            size_t index = std::distance(std::begin(savestate.changedPages), itOrig);
-            ssData = (u8*)(savestate.afterCopies[index] + (it->lower() - lowerPage + 1));
-            size = it->upper() - it->lower() - 1;
-            if (!boost::icl::contains(*it, it->upper()))
-            {
-              size--;
-            }
-          }
-        }
-        if (ssData && size > 0)
-        {
-          auto orig = (u8*)orig_ptr;
+        uintptr_t copyStartAddr = it->lower();
+        uintptr_t copyEndAddr = it->upper();
+        size_t totalCopySize = (copyEndAddr - copyStartAddr) + 1; // +1 because interval is closed
 
-          if (size >= pageSize && size % pageSize == 0)
+        // Handle intervals that may span multiple pages
+        uintptr_t currentAddr = copyStartAddr;
+        size_t remainingBytes = totalCopySize;
+
+        while (remainingBytes > 0)
+        {
+          // Find which page this address belongs to
+          uintptr_t pageAddr = reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)currentAddr, pageSize));
+
+          // Binary search for the page in changedPages
+          auto pageIt = std::lower_bound(savestate.changedPages.begin(), savestate.changedPages.end(), pageAddr);
+          if (pageIt == savestate.changedPages.end() || *pageIt != pageAddr)
           {
-            rbMemcpy(orig, ssData, size);
+            // Page not found - skip to next page boundary
+            size_t bytesToNextPage = pageSize - (currentAddr - pageAddr);
+            currentAddr += bytesToNextPage;
+            remainingBytes = (remainingBytes > bytesToNextPage) ? (remainingBytes - bytesToNextPage) : 0;
+            continue;
+          }
+
+          size_t pageIndex = std::distance(savestate.changedPages.begin(), pageIt);
+
+          // Calculate offset within the page where we start copying
+          size_t offsetInPage = currentAddr - pageAddr;
+
+          // Calculate how many bytes to copy from this page
+          size_t bytesInThisPage = std::min(pageSize - offsetInPage, remainingBytes);
+
+          // Source: afterCopies data at the found page index, offset by how far into the page we are
+          u8* srcData = reinterpret_cast<u8*>(savestate.afterCopies[pageIndex]) + offsetInPage;
+
+          // Destination: the actual address where we want to restore data
+          u8* destData = reinterpret_cast<u8*>(currentAddr);
+
+          // Copy the data for this page chunk
+          if (bytesInThisPage == pageSize && offsetInPage == 0)
+          {
+            rbMemcpy(destData, srcData, bytesInThisPage);
           }
           else
           {
-            memcpy(orig, ssData, size);
+            memcpy(destData, srcData, bytesInThisPage);
           }
+
+          currentAddr += bytesInThisPage;
+          remainingBytes -= bytesInThisPage;
         }
       }
     }
     else
     {
+      // No exclusions - simple case: copy all pages from afterCopies to changedPages addresses
       for (u32 i = 0; i < savestate.changedPages.size(); i++)
       {
-        rbMemcpy((void*)savestate.changedPages[i], (void*)savestate.afterCopies[i], pageSize);
+        void* dest = (void*)savestate.changedPages[i];
+        void* src = (void*)savestate.afterCopies[i];
+        rbMemcpy(dest, src, pageSize);
       }
     }
     
@@ -664,10 +674,10 @@ namespace IncrementalRB
     //PROFILE_FUNCTION();
     u32 savestateHead = frame % MAX_SAVESTATES;
     Savestate& savestate = savestateInfo.savestates[savestateHead];
-    if (savestate.valid && !resim)
+    if (savestate.valid)
     {
       #ifdef ENABLE_LOGGING
-        INFO_LOG_FMT(BRAWLBACK, "EVICTING SAVESTATE!\n");
+        INFO_LOG_FMT(BRAWLBACK, "EVICTING SAVESTATE! (resim={})\n", resim);
       #endif
       EvictSavestate(savestate);
     }
@@ -680,10 +690,13 @@ namespace IncrementalRB
     OnPagesWritten(savestate);
 
   #ifdef ENABLE_LOGGING
+    // Check if frame counter page is dirty when saving dirty pages (observation only, no forcing)
+    bool frameCounterDirty = Memory::isFramePointerDirty();
+
     u64 numChangedBytes = savestate.changedPages.size() * Common::PageSize();
     float changedMB = numChangedBytes / 1024.0 / 1024.0;
-    INFO_LOG_FMT(BRAWLBACK, "Frame {}, head = {}\tNum changed pages = {}\tChanged MB = {}\n",
-                 frame, savestateHead, savestate.changedPages.size(), changedMB);
+    INFO_LOG_FMT(BRAWLBACK, "Frame {}, head = {}\tNum changed pages = {}\tChanged MB = {}\tFrame counter page dirty = {}\n",
+                 frame, savestateHead, savestate.changedPages.size(), changedMB, frameCounterDirty);
   #endif
   }
 

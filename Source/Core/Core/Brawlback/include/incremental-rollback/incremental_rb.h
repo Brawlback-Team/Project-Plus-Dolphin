@@ -36,6 +36,10 @@ namespace IncrementalRB
         GetPointerCb getPointer = nullptr;
         GetPhysicalRegionsCb getPhysicalRegions = nullptr;
     };
+
+    // External declaration for savestateInfo
+    extern SavestateInfo savestateInfo;
+
     // NOTE: gamestate pointer returned by the GetGameStateCb
     // must have been allocated with VirtualAlloc with the MEM_WRITE_WATCH flag
     // this sets our callbacks and tracks the memory block returned by GetGameStateCb and GetGamestateMemSizeCb

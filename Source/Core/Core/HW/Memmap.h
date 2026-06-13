@@ -63,6 +63,7 @@ struct DirtyPage
 {
   bool dirty;
   u64 address;
+  bool is_main_thread_write;
 };
 bool isFramePointerDirty();
 class MemoryManager
@@ -117,13 +118,15 @@ public:
   std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
   std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
   u32 GetEmulatedAddress(u8* address);
+  bool is_in_main_thread;
 
   // Brawlback -- Dirty Page Handling
   #ifdef _WIN32
   bool IsAddressDirty(uintptr_t address);
   bool IsPageDirty(uintptr_t page_address);
-  void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address);
-  void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty);
+  bool IsPageMainThreadWrite(uintptr_t page_address);
+  void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address, bool is_main_thread_write);
+  void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty, bool is_main_thread_write);
   bool HandleChangeProtection(void* address, size_t size, u32 flag);
   bool HandleFault(uintptr_t fault_address);
   u64 GetDirtyPageIndexFromAddress(u64 address);

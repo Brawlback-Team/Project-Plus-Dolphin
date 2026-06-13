@@ -95,6 +95,9 @@
 #include "Brawlback/TimeSync.h"
 #include "brawlback-common/BrawlbackPad.h"
 #include "Core/Brawlback/include/GekkoNet/GekkoLib/include/gekkonet.h"
+#include <Common/MemoryUtil.h>
+#include <incremental-rollback/incremental_rb.h>
+#include <immintrin.h>
 
 namespace NetPlay
 {
@@ -191,7 +194,7 @@ struct CoreRollbackRunFrameStats
 
 static std::mutex crit_netplay_client;
 NetPlayClient* netplay_client = nullptr;
-constexpr unsigned int kGekkoStateCapacity = 64u * 1024u * 1024u;
+constexpr unsigned int kGekkoStateCapacity = 80 * 1024u * 1024u;
 constexpr int kGekkoMaxLoggedFrames = 600;
 constexpr int kGekkoWaitSleepUs = 100;
 constexpr float kGekkoTimesyncDeadzone = 0.5f;
@@ -1416,9 +1419,7 @@ void NetPlayClient::CloseSession()
   g_GekkoLastSaveStateUs = 0;
   g_GekkoLastRunFrameUs = 0;
   g_GekkoLastPendingSaveUs = 0;
-  for (auto& [frame, regions] : m_dynamic_save_regions)
-    regions.clear();
-  m_dynamic_save_regions.clear();
+  // m_dynamic_save_regions is no longer used
 }
 
 void NetPlayClient::OnStartGame(sf::Packet& packet)
@@ -1533,16 +1534,15 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     gekko_create(&g_GekkoSession, GekkoGameSession);
     GekkoConfig config = {};
     const int clampedLocalDelay = std::clamp(delay, 0, 10);
-    const int clampedPredictionWindow = std::clamp(7, 1, 10);
     g_GekkoLocalPlayer = static_cast<int>(m_local_player->pid) - 1;
     config.num_players = static_cast<unsigned char>(2);
     config.max_spectators = 0;
-    config.input_prediction_window = static_cast<unsigned char>(clampedPredictionWindow);
+    config.input_prediction_window = MAX_ROLLBACK_FRAMES - 1;
     config.input_size = static_cast<unsigned int>(sizeof(Inputs));
     config.state_size = kGekkoStateCapacity;
     config.limited_saving = false;
     config.desync_detection = true;
-    config.check_distance = 10;
+    config.check_distance = MAX_ROLLBACK_FRAMES - 1;
     gekko_start(g_GekkoSession, &config);
 
     // Use our custom ENet-based adapter
@@ -1556,7 +1556,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     g_GekkoRemoteHandle = -1;
     g_GekkoPlayerHandles.assign(static_cast<size_t>(2), -1);
     g_GekkoLocalHandles.assign(static_cast<size_t>(2), -1);
-    g_GekkoInputRingSize = clampedPredictionWindow + 1;
+    g_GekkoInputRingSize = MAX_ROLLBACK_FRAMES + 1;
     g_Inputs.assign(static_cast<size_t>(2),
                     std::vector<Inputs>(static_cast<size_t>(g_GekkoInputRingSize)));
     g_GekkoHasLatchedInput = false;
@@ -2015,7 +2015,6 @@ const char* NetPlayClient::gekko_game_event_name(GekkoGameEventType type)
 bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
 {
   const auto beginTime = std::chrono::steady_clock::now();
-  CoreRollbackState state;
   const int coreFrame = std::max(0, save.frame);
   if (g_GekkoLogEnabled)
   {
@@ -2033,52 +2032,49 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
     return false;
   }
 
-  if (save.frame < 0)
-  {
-    *save.stateLen = 0;
-    if (save.checksum != nullptr)
-    {
-      *save.checksum = 0;
-    }
-    write_gekko_log("save_state result=skipped reason=pre_frame_baseline");
-    return true;
-  }
+  // Use IncrementalRB to save the current state
+  IncrementalRB::SaveWrittenPages(static_cast<u32>(coreFrame), NetPlay::netplay_client->IsRollingBack());
 
-  if (!RollbackSaveGameStateInto(state, save.state, static_cast<int>(kGekkoStateCapacity),
-                                     coreFrame))
+  // Get the savestate from IncrementalRB
+  u32 savestateIdx = static_cast<u32>(coreFrame) % MAX_SAVESTATES;
+  IncrementalRB::Savestate& savestate = IncrementalRB::savestateInfo.savestates[savestateIdx];
+
+  if (!savestate.valid)
   {
     g_GekkoLastSaveStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now() - beginTime)
                                  .count();
     std::ostringstream stream;
-    stream << "save_state result=fail elapsed_us=" << g_GekkoLastSaveStateUs;
+    stream << "save_state result=fail reason=invalid_savestate elapsed_us=" << g_GekkoLastSaveStateUs;
     write_gekko_log(stream.str());
     return false;
   }
 
-  if (state.len < 1 || static_cast<unsigned int>(state.len) > kGekkoStateCapacity)
+  // Copy the savestate data to the provided buffer
+  // The afterCopies vector contains pointers to the saved page data
+  u32 totalSize = 0;
+  for (size_t i = 0; i < savestate.afterCopies.size(); ++i)
+  {
+    totalSize += static_cast<u32>(Common::PageSize());
+  }
+
+  if (totalSize > kGekkoStateCapacity)
   {
     std::ostringstream stream;
-    stream << "save_state result=fail reason=state_too_large len=" << state.len
+    stream << "save_state result=fail reason=state_too_large len=" << totalSize
            << " capacity=" << kGekkoStateCapacity;
     write_gekko_log(stream.str());
     return false;
   }
 
-  if (state.buffer != save.state)
-  {
-    write_gekko_log("save_state result=fail reason=state_not_written_in_place");
-    return false;
-  }
-
+  // Set the state pointer to the arena's backing memory
+  // IncrementalRB stores the pages in the arena, so we can just point to it
   if (save.stateLen != nullptr)
   {
-    *save.stateLen = static_cast<unsigned int>(state.len);
+    *save.stateLen = totalSize;
   }
-  if (save.checksum != nullptr)
-  {
-    *save.checksum = static_cast<unsigned int>(state.checksum);
-  }
+
+  *save.checksum = 0;
 
   g_GekkoLastSaveStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now() - beginTime)
@@ -2088,8 +2084,8 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
       (g_GekkoLogFrames < kGekkoMaxLoggedFrames || g_GekkoLastSaveStateUs >= 2000))
   {
     std::ostringstream stream;
-    stream << "save_state result=ok frame=" << save.frame << " len=" << state.len
-           << " checksum=" << static_cast<unsigned int>(state.checksum)
+    stream << "save_state result=ok frame=" << save.frame << " len=" << totalSize
+           << " checksum=" << 0
            << " elapsed_us=" << g_GekkoLastSaveStateUs;
     write_gekko_log(stream.str());
   }
@@ -2097,319 +2093,34 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
   return true;
 }
 
+// This function is no longer needed as IncrementalRB::SaveWrittenPages handles saving
+// Keep stub for backward compatibility
 bool NetPlayClient::RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
                                               int buffer_capacity, int frame)
 {
-  if (buffer == nullptr || buffer_capacity <= 0)
-  {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: invalid buffer parameters");
-    return false;
-  }
-
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-
-  // Define fixed regions that should always be saved
-  struct FixedRegion
-  {
-    u32 address;
-    u32 size;
-  };
-  const FixedRegion fixedRegions[] = {
-      {0x800064E0, 0x6380},
-      {0x804064E0, 0x8E360},
-      {0x80494880, 0x1108D4},
-  };
-
-  // Define regions to exclude from saving (volatile/non-deterministic memory)
-  struct ExcludedRegion
-  {
-    u32 address;
-    u32 size;
-  };
-
-  const ExcludedRegion excludedRegions[] = {
-      {0x8059FFF8, 0x00000004},  // Exclude frame counter or volatile data
-      {0x8059FFFC, 0x00000004},  // Exclude volatile region
-      {0x805b5030, 0x00000078},  // Exclude extended volatile region
-      {0x805a08c0, 0x00000004}   // Exclude additional volatile region
-  };
-
-  // Helper function to get excluded regions that overlap with a given range
-  auto getOverlappingExclusions = [&excludedRegions](u32 address, u32 size,
-                                                     std::vector<ExcludedRegion>& overlaps) {
-    u32 range_end = address + size;
-    for (const ExcludedRegion& excluded : excludedRegions)
-    {
-      u32 excluded_end = excluded.address + excluded.size;
-      // Check for overlap
-      if (!(range_end <= excluded.address || address >= excluded_end))
-      {
-        overlaps.push_back(excluded);
-      }
-    }
-  };
-
-  // Calculate total size needed (fixed + dynamic regions, minus excluded portions)
-  u32 total_size = 0;
-  for (const FixedRegion& region : fixedRegions)
-  {
-    std::vector<ExcludedRegion> overlaps;
-    getOverlappingExclusions(region.address, region.size, overlaps);
-
-    u32 region_size = region.size;
-    for (const ExcludedRegion& excluded : overlaps)
-    {
-      // Calculate how much of the excluded region overlaps with this region
-      u32 overlap_start = std::max(region.address, excluded.address);
-      u32 overlap_end = std::min(region.address + region.size, excluded.address + excluded.size);
-      u32 overlap_size = overlap_end - overlap_start;
-      region_size -= overlap_size;
-    }
-    total_size += region_size;
-  }
-
-  for (const DynamicSaveRegion& region : m_dynamic_save_regions[frame])
-  {
-    // Skip if already covered by a fixed region
-    bool isFixed = false;
-    for (const FixedRegion& fr : fixedRegions)
-    {
-      if (region.address == fr.address && region.size == fr.size)
-      {
-        isFixed = true;
-        break;
-      }
-    }
-    if (!isFixed)
-    {
-      std::vector<ExcludedRegion> overlaps;
-      getOverlappingExclusions(region.address, region.size, overlaps);
-
-      u32 region_size = region.size;
-      for (const ExcludedRegion& excluded : overlaps)
-      {
-        u32 overlap_start = std::max(region.address, excluded.address);
-        u32 overlap_end = std::min(region.address + region.size, excluded.address + excluded.size);
-        u32 overlap_size = overlap_end - overlap_start;
-        region_size -= overlap_size;
-      }
-      total_size += region_size;
-    }
-  }
-
-  if (total_size > static_cast<u32>(buffer_capacity))
-  {
-    ERROR_LOG_FMT(BRAWLBACK,
-                  "RollbackSaveGameStateInto: buffer too small (need {} bytes, have {} bytes)",
-                  total_size, buffer_capacity);
-    return false;
-  }
-
-  // Save all regions into the buffer
-  u32 offset = 0;
-  u64 checksum = 0;
-
-  auto saveRegionIntoBuffer = [&](u32 address, u32 size) -> bool {
-    std::vector<ExcludedRegion> overlaps;
-    getOverlappingExclusions(address, size, overlaps);
-
-    if (overlaps.empty())
-    {
-      // No exclusions, copy the entire region
-      u8* source_data = memory.GetSpanForAddress(address).data();
-      if (source_data == nullptr)
-      {
-        ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: invalid source address 0x{:08X}",
-                      address);
-        return false;
-      }
-      memcpy(buffer + offset, source_data, size);
-      for (u32 i = 0; i < size; ++i)
-        checksum = (checksum * 31) + source_data[i];
-      offset += size;
-    }
-    else
-    {
-      // Sort overlapping exclusions by address
-      std::sort(
-          overlaps.begin(), overlaps.end(),
-          [](const ExcludedRegion& a, const ExcludedRegion& b) { return a.address < b.address; });
-
-      u32 current_pos = address;
-      u32 region_end = address + size;
-
-      for (const ExcludedRegion& excluded : overlaps)
-      {
-        u32 excluded_start = std::max(address, excluded.address);
-        u32 excluded_end = std::min(region_end, excluded.address + excluded.size);
-
-        // Copy the portion before the excluded region
-        if (current_pos < excluded_start)
-        {
-          u32 copy_size = excluded_start - current_pos;
-          u8* source_data = memory.GetSpanForAddress(current_pos).data();
-          if (source_data == nullptr)
-          {
-            ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: invalid source address 0x{:08X}",
-                          current_pos);
-            return false;
-          }
-          memcpy(buffer + offset, source_data, copy_size);
-          for (u32 i = 0; i < copy_size; ++i)
-            checksum = (checksum * 31) + source_data[i];
-          offset += copy_size;
-        }
-
-        // Skip the excluded region
-        current_pos = excluded_end;
-      }
-
-      // Copy the portion after the last excluded region
-      if (current_pos < region_end)
-      {
-        u32 copy_size = region_end - current_pos;
-        u8* source_data = memory.GetSpanForAddress(current_pos).data();
-        if (source_data == nullptr)
-        {
-          ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: invalid source address 0x{:08X}",
-                        current_pos);
-          return false;
-        }
-        memcpy(buffer + offset, source_data, copy_size);
-        for (u32 i = 0; i < copy_size; ++i)
-          checksum = (checksum * 31) + source_data[i];
-        offset += copy_size;
-      }
-    }
-    return true;
-  };
-
-  for (const FixedRegion& region : fixedRegions)
-  {
-    if (!saveRegionIntoBuffer(region.address, region.size))
-      return false;
-  }
-
-  for (const DynamicSaveRegion& region : m_dynamic_save_regions[frame])
-  {
-    // Skip if already covered by a fixed region
-    bool isFixed = false;
-    for (const FixedRegion& fr : fixedRegions)
-    {
-      if (region.address == fr.address && region.size == fr.size)
-      {
-        isFixed = true;
-        break;
-      }
-    }
-    if (isFixed)
-      continue;
-    if (!saveRegionIntoBuffer(region.address, region.size))
-      return false;
-  }
-
-  // Fill out the state structure
-  state.buffer = buffer;
-  state.len = static_cast<int>(offset);
-  state.checksum = static_cast<int>(checksum & 0xFFFFFFFF);  // Use lower 32 bits
-  state.frame = frame;
-
-  return true;
+  ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: deprecated function called, use IncrementalRB::SaveWrittenPages instead");
+  return false;
 }
 
 bool NetPlayClient::RollbackLoadGameState(const CoreRollbackState& state)
 {
-  if (state.buffer == nullptr || state.len <= 0)
+  if (state.frame < 0)
   {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: invalid buffer parameters (buffer={}, len={})",
-                  static_cast<void*>(state.buffer), state.len);
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: invalid frame {}", state.frame);
     return false;
   }
 
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
+  bool success = IncrementalRB::Rollback(current_frame + 1, state.frame);
 
-  // Define the same fixed regions as in RollbackSaveGameStateInto
-  struct FixedRegion
+  if (!success)
   {
-    u32 address;
-    u32 size;
-  };
-
-  const FixedRegion fixedRegions[] = {
-      {0x800064E0, 0x6380},    // 0x800064E0 - 0x8000C860
-      {0x804064E0, 0x8E360},   // 0x804064E0 - 0x80494840
-      {0x80494880, 0x1108D4},  // 0x80494880 - 0x805A5154
-  };
-
-  // Define the same excluded regions
-  struct ExcludedRegion
-  {
-    u32 address;
-    u32 size;
-  };
-
-  const ExcludedRegion excludedRegions[] = {{}
-  };
-
-  // Helper function to check if an address range overlaps with excluded regions
-  auto isExcluded = [&excludedRegions](u32 address, u32 size) -> bool {
-    u32 range_end = address + size;
-    for (const ExcludedRegion& excluded : excludedRegions)
-    {
-      u32 excluded_end = excluded.address + excluded.size;
-      // Check for overlap
-      if (!(range_end <= excluded.address || address >= excluded_end))
-      {
-        return true;
-      }
-    }
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: IncrementalRB::Rollback failed for frame {}",
+                  state.frame);
     return false;
-  };
-
-  // Restore all regions from the buffer
-  u32 offset = 0;
-
-  auto loadRegionFromBuffer = [&](u32 address, u32 size) -> bool {
-    if (isExcluded(address, size))
-      return true;
-    u8* dest_data = memory.GetSpanForAddress(address).data();
-    if (dest_data == nullptr)
-    {
-      ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: invalid destination address 0x{:08X}", address);
-      return false;
-    }
-    memcpy(dest_data, state.buffer + offset, size);
-    offset += size;
-    return true;
-  };
-
-  for (const FixedRegion& region : fixedRegions)
-  {
-    if (!loadRegionFromBuffer(region.address, region.size))
-      return false;
   }
 
-  for (const DynamicSaveRegion& region : m_dynamic_save_regions[state.frame])
-  {
-    bool isFixed = false;
-    for (const FixedRegion& fr : fixedRegions)
-    {
-      if (region.address == fr.address && region.size == fr.size)
-      {
-        isFixed = true;
-        break;
-      }
-    }
-    if (isFixed)
-      continue;
-    if (!loadRegionFromBuffer(region.address, region.size))
-      return false;
-  }
-
-  INFO_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: successfully loaded state for frame {} ({} bytes)",
-               state.frame, state.len);
+  INFO_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: successfully loaded state for frame {}",
+               state.frame);
 
   return true;
 }
@@ -2617,6 +2328,8 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
           write_gekko_log("queue_callback type=advance frame=" + std::to_string(adv.frame)
                           + " rollback=" + std::to_string(adv.rolling_back)
                           + " runahead=" + std::to_string(adv.running_ahead));
+
+          
           break;
         }
         default:
@@ -2657,7 +2370,6 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
         }
       }
       write_gekko_log("begin_frame result=real_frame");
-      current_frame++;
     }
   }
 }
@@ -2666,20 +2378,16 @@ bool NetPlayClient::IsRollingBack()
   return is_rollingback.load();
 }
 
+// Dynamic save regions are no longer needed as IncrementalRB handles page tracking automatically
 void NetPlayClient::SetDynamicSaveRegions(int frame, std::vector<DynamicSaveRegion> regions)
 {
-  m_dynamic_save_regions[frame] = std::move(regions);
+  // No-op: IncrementalRB handles this automatically
 }
 
 const std::vector<DynamicSaveRegion>& NetPlayClient::GetDynamicSaveRegions(int frame) const
 {
-  auto it = m_dynamic_save_regions.find(frame);
-  if (it == m_dynamic_save_regions.end())
-  {
-    static const std::vector<NetPlay::DynamicSaveRegion> empty;
-    return empty;
-  }
-  return it->second;
+  static const std::vector<NetPlay::DynamicSaveRegion> empty;
+  return empty;
 }
 
 std::vector<u8> NetPlayClient::PopCallbackCodes()
@@ -2740,7 +2448,8 @@ bool NetPlayClient::ExecutePendingLoad()
     write_gekko_log("execute_load result=fail");
     return false;
   }
-  write_gekko_log("execute_load result=ok");
+  // Update current_frame to match the loaded frame to prevent desync
+  write_gekko_log("execute_load result=ok current_frame=" + std::to_string(current_frame));
   return true;
 }
 
@@ -2758,6 +2467,7 @@ s32 NetPlayClient::ExecuteAdvanceFrame()
   {
     g_GekkoHasLatchedInput = false;
   }
+  current_frame = adv.frame;
   write_gekko_log("execute_advance frame=" + std::to_string(adv.frame)
                   + " rollback=" + std::to_string(adv.rolling_back)
                   + " runahead=" + std::to_string(adv.running_ahead));

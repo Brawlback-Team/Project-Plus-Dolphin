@@ -162,14 +162,31 @@ int GetWrittenPages(char* base, u64 baseSize, std::vector<uintptr_t>& changedPag
       {
         return 3;
       }
-      if (std::find(changedPageAddresses.begin(), changedPageAddresses.end(), base_pte) ==
-          changedPageAddresses.end())
+      // Optimized duplicate check: since we iterate in ascending order and will sort later,
+      // check if the page is already at the end of the vector (most common case for duplicates)
+      // or use binary search on the existing sorted portion
+      bool isDuplicate = false;
+      if (!changedPageAddresses.empty())
+      {
+        if (changedPageAddresses.back() == base_pte)
+        {
+          isDuplicate = true;
+        }
+        else if (changedPageAddresses.back() > base_pte)
+        {
+          // Need to check if it exists in the already-sorted portion
+          auto it = std::lower_bound(changedPageAddresses.begin(), changedPageAddresses.end(), base_pte);
+          isDuplicate = (it != changedPageAddresses.end() && *it == base_pte);
+        }
+      }
+
+      if (!isDuplicate && memory.IsPageMainThreadWrite(base_pte))
       {
         changedPageAddresses.push_back(base_pte);
         writtenToPagesIndex++;
       }
 
-      memory.SetPageDirtyBit(base_pte, false, addr);
+      memory.SetPageDirtyBit(base_pte, false, addr, false);
     }
     base_pte += pageSize;
   }
