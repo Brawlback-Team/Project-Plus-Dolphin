@@ -28,7 +28,8 @@ enum EXICommand : u8
   CMD_GET_CALLBACK_CODES = 14,
   CMD_EXECUTE_SAVE = 15,
   CMD_EXECUTE_LOAD = 16,
-  CMD_EXECUTE_ADVANCE = 17
+  CMD_EXECUTE_ADVANCE = 17,
+  CMD_INCREMENT_FRAME = 18
 };
 
 struct AllocationRegionEntry
@@ -101,6 +102,7 @@ private:
   void handleGetPort();
   void handleGetInputs(bool local, u8* payload);
   void handleGetNetworkingMode();
+  void handleIncrementFrame();
   // Callback-code queue
   void handleGetCallbackCodes();
   void handleExecuteSave();

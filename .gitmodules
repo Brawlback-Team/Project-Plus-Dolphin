@@ -129,3 +129,7 @@
 	path = Externals/imgui/imgui
 	url = https://github.com/ocornut/imgui.git
 	shallow = true
+[submodule "gekkonet"]
+	path = Source/Core/Core/Brawlback/include/GekkoNet
+	url = https://github.com/Brawlback-Team/GekkoNet.git
+

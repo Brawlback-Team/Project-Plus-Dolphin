@@ -377,7 +377,6 @@ namespace IncrementalRB
     ExcludeMem(GetPointer(0x9134cc00), 0x0012c200);              // CopyFB
     ExcludeMem(GetPointer(0x805ca260), 0x00007c00);              // Thread
     ExcludeMem(GetPointer(0x90199800), 0x00cc7c00);              // Sound
-    ExcludeMem(GetPointer(0x804dd558), 0x4);                     // VI (Retrace Count)
     //ExcludeMem(GetPointer(0x80b8db60), 0x80c23a60 - 0x80b8db60); // Effect*/
 
     std::sort(ExcludeMemList.begin(), ExcludeMemList.end(), [](const ExcludeBuffer& a, const ExcludeBuffer& b){ return a.buffer.data < b.buffer.data; });
@@ -541,14 +540,27 @@ namespace IncrementalRB
   {
     // PROFILE_FUNCTION();
     if (currentFrame < MAX_SAVESTATES)
+    {
+#ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK,
+                   "Rollback rejected: currentFrame {} < MAX_SAVESTATES {}",
+                   currentFrame, MAX_SAVESTATES);
+#endif
       return false;
+    }
 
    // -1 because all savestates are taken after a frame's simulation
     // this means if you want to rollback to frame 5, you'd actually need to restore the data
     // captured on frame 4
     s32 savestateOffset = currentFrame - rollbackFrame - 1; 
-    if (rollbackFrame >= currentFrame || savestateOffset >= MAX_ROLLBACK_FRAMES)
+    if (rollbackFrame >= currentFrame || savestateOffset >= MAX_SAVESTATES)
     {
+#ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK,
+                   "Rollback rejected: invalid frame window (currentFrame={}, rollbackFrame={}, "
+                   "savestateOffset={}, MAX_SAVESTATES={})",
+                   currentFrame, rollbackFrame, savestateOffset, MAX_SAVESTATES);
+#endif
       return false;
     }
     // -1 because we want to start rolling back on the index before the current frame
@@ -573,8 +585,14 @@ namespace IncrementalRB
     // go from the current index, walking backward applying each savestate's "before" snapshots
     // one at a time
 
-    if (endingSavestateIdx >= MAX_SAVESTATES || endingSavestateIdx == currentSavestateIdx)
+    if (endingSavestateIdx >= MAX_SAVESTATES)
     {
+#ifdef ENABLE_LOGGING
+      INFO_LOG_FMT(BRAWLBACK,
+                   "Rollback rejected: invalid savestate index (endingSavestateIdx={}, "
+                   "MAX_SAVESTATES={})",
+                   endingSavestateIdx, MAX_SAVESTATES);
+#endif
       return false;
     }
     while (currentSavestateIdx != endingSavestateIdx)
@@ -682,17 +700,20 @@ namespace IncrementalRB
       EvictSavestate(savestate);
     }
     savestate.frame = frame;
+
+  #ifdef ENABLE_LOGGING
+    // Check if frame counter page is dirty BEFORE reset (observation only, no forcing)
+    bool frameCounterDirty = Memory::isFramePointerDirty();
+  #endif
+
     savestate.valid = GetAndResetWrittenPages(savestate.changedPages,
                                               MAX_NUM_CHANGED_PAGES);
-    
+
     assert(savestate.valid);
     assert(savestate.changedPages.size() <= MAX_NUM_CHANGED_PAGES);
     OnPagesWritten(savestate);
 
   #ifdef ENABLE_LOGGING
-    // Check if frame counter page is dirty when saving dirty pages (observation only, no forcing)
-    bool frameCounterDirty = Memory::isFramePointerDirty();
-
     u64 numChangedBytes = savestate.changedPages.size() * Common::PageSize();
     float changedMB = numChangedBytes / 1024.0 / 1024.0;
     INFO_LOG_FMT(BRAWLBACK, "Frame {}, head = {}\tNum changed pages = {}\tChanged MB = {}\tFrame counter page dirty = {}\n",

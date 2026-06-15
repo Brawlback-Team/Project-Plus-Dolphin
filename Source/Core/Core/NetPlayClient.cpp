@@ -1620,7 +1620,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
       std::string port = fmt::format("{}_{}", "player_port", player.first);
       inputs_output[port] = json::array();
     }
-    current_frame = 0;
+    current_frame = -1;
   }
   
   m_dialog->OnMsgStartGame();
@@ -2409,7 +2409,7 @@ bool NetPlayClient::ExecutePendingSave()
     m_pending_gekko_saves.erase(m_pending_gekko_saves.begin());
   }
   write_gekko_log("execute_save frame=" + std::to_string(save.frame));
-  if (!save_gekko_state(save))
+  if (save.frame < 0 || !save_gekko_state(save))
   {
     write_gekko_log("execute_save result=fail");
     return false;
@@ -2448,6 +2448,7 @@ bool NetPlayClient::ExecutePendingLoad()
     write_gekko_log("execute_load result=fail");
     return false;
   }
+  current_frame = load.frame - 1;
   // Update current_frame to match the loaded frame to prevent desync
   write_gekko_log("execute_load result=ok current_frame=" + std::to_string(current_frame));
   return true;
@@ -2467,7 +2468,6 @@ s32 NetPlayClient::ExecuteAdvanceFrame()
   {
     g_GekkoHasLatchedInput = false;
   }
-  current_frame = adv.frame;
   write_gekko_log("execute_advance frame=" + std::to_string(adv.frame)
                   + " rollback=" + std::to_string(adv.rolling_back)
                   + " runahead=" + std::to_string(adv.running_ahead));
@@ -3926,7 +3926,7 @@ bool NetPlayClient::StopGame()
     g_GekkoSpeedScale = 1.0;
     g_GekkoTimesyncTargetScale = 1.0;
     g_GekkoTimesyncSampleCounter = 0;
-    current_frame = 0;
+    current_frame = -1;
     advance_frames = 0;
     Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0);
   }
