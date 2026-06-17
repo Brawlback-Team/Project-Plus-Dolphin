@@ -297,7 +297,7 @@ public:
   const std::vector<DynamicSaveRegion>& GetDynamicSaveRegions(int frame) const;
 
   // Only for use in NetPlayClient.cpp >:(
-  s32 current_frame = 0;
+  s32 current_frame = -1;
   // Only for use in NetPlayClient.cpp >:(
   s32 frame_to_stop_at = 0;
   std::array<s32, 4> latest_confirmed_frame = {0, 0, 0, 0};  // Per-player tracking

@@ -118,7 +118,7 @@ public:
   std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
   std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
   u32 GetEmulatedAddress(u8* address);
-  bool is_in_main_thread;
+  bool is_in_main_thread = true;
 
   // Brawlback -- Dirty Page Handling
   bool IsAddressDirty(uintptr_t address);

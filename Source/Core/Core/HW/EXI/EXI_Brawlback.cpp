@@ -424,6 +424,14 @@ void CEXIBrawlback::handleGetNetworkingMode()
   }
 }
 
+void CEXIBrawlback::handleIncrementFrame()
+{
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    NetPlay::netplay_client->current_frame++;
+  }
+}
+
 CEXIBrawlback::CEXIBrawlback(Core::System& system) : IEXIDevice(system)
 {
 }
@@ -500,6 +508,9 @@ void CEXIBrawlback::DMAWrite(u32 address, u32 size)
     break;
   case CMD_EXECUTE_ADVANCE:
     handleExecuteAdvance();
+    break;
+  case CMD_INCREMENT_FRAME:
+    handleIncrementFrame();
     break;
   default:
     break;
