@@ -819,3 +819,25 @@ if(USE_RETRO_ACHIEVEMENTS)
     target_compile_definitions(core PUBLIC -DRC_CLIENT_SUPPORTS_RAINTEGRATION)
   endif()
 endif()
+
+# GekkoNet, brawlback include fixes
+if (WIN32 OR LINUX)
+  target_include_directories(core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include")
+
+  target_sources(core PRIVATE
+    Brawlback/TimeSync.cpp
+    HW/EXI/EXI_Brawlback.cpp
+    Brawlback/include/incremental-rollback/incremental_rb.cpp
+    Brawlback/include/incremental-rollback/job_system.cpp
+    Brawlback/include/incremental-rollback/mem.cpp
+    Brawlback/include/incremental-rollback/tiny_arena.cpp
+  )
+
+  add_subdirectory(Brawlback/include/GekkoNet/GekkoLib EXCLUDE_FROM_ALL)
+  
+  # I guess you need to force exceptions ON since some dependencies raise them
+  target_compile_options(GekkoNet PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-fexceptions>
+  )
+  target_link_libraries(core PUBLIC GekkoNet)
+endif()

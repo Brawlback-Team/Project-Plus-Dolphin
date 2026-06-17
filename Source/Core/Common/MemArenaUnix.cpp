@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Common/MemArena.h"
+#include "Common/MemoryUtil.h"
 
 #include <cerrno>
 #include <cstddef>
@@ -103,6 +104,42 @@ void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base)
   }
 }
 
+s32 MemArena::ResolveNativeMemoryProtectionMask(MemoryProtection prot) {
+  switch (prot) {
+    case MemoryProtection::RD_ONLY:
+      return PROT_READ;
+    case MemoryProtection::RD_WR:
+      return PROT_READ | PROT_WRITE;
+    case MemoryProtection::NONE:
+    default:
+      return PROT_NONE;
+  }
+}
+
+bool MemArena::VirtualProtectMemoryRegion(void* data, size_t size, MemoryProtection prot) {
+  // Note: mprotect requires page-aligned pointers, otherwise it will return EINVAL!
+  // This should mimic the behavior that Windows does (if you call m_address_VirtualProtect on a 
+  // non page-aligned address (especially if it crosses boundaries).
+
+  // size 0 causes mprotect to success (but without changing ANY perms)
+  if (!size) {
+    return true;
+  }
+
+  // Get the address of the first page (pointed to by start_address).
+  size_t page_size = Common::PageSize();
+  uintptr_t start_address = reinterpret_cast<uintptr_t>(data);
+  uintptr_t first_page = start_address & ~(page_size - 1);
+
+  // Get the ending page address (which may be ).
+  const uintptr_t end_address = start_address + size;
+  const uintptr_t end_page = (end_address + page_size - 1) & ~(page_size - 1);
+
+  // Now that we have two page-aligned addresses, we can call mprotect.
+  // The new size will be (end_address - start_address), because mprotect will protect all of the pages within this range.
+  return mprotect(reinterpret_cast<void *>(first_page), end_page - first_page, ResolveNativeMemoryProtectionMask(prot)) == 0;
+}
+
 void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
 {
   void* retval = mmap(view, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -162,5 +199,6 @@ void LazyMemoryRegion::Release()
     m_size = 0;
   }
 }
+
 
 }  // namespace Common

@@ -16,6 +16,15 @@
 
 namespace Common
 {
+
+// Brawlback
+// Wrapper around memory protection stuff
+enum class MemoryProtection {
+  NONE,
+  RD_ONLY,
+  RD_WR,
+};
+
 #ifdef _WIN32
 struct WindowsMemoryRegion;
 
@@ -117,6 +126,7 @@ public:
   void UnmapFromMemoryRegion(void* view, size_t size);
 
   // Brawlback
+
   ///
   /// Virtual protect a section from the memory region previously mapped by CreateView.
   ///
@@ -124,7 +134,14 @@ public:
   /// @param size Size of the protection.
   /// @param flag What new permission to protect with.
   ///
-  bool VirtualProtectMemoryRegion(void* data, size_t size, u32 flag);
+  bool VirtualProtectMemoryRegion(void* data, size_t size, MemoryProtection prot);
+
+  ///
+  /// Computes the (OS-dependent) mask for memory protections.
+  ///
+  /// @param prot Protection flag.
+  ///
+  s32 ResolveNativeMemoryProtectionMask(MemoryProtection prot);
 
 private:
 #ifdef _WIN32

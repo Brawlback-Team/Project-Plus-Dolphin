@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 class CPUCoreBase
 {
 public:
