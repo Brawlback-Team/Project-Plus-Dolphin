@@ -4,6 +4,8 @@
 #include <cassert>
 #include <set>
 #include <cmath>
+#include <immintrin.h>
+#include <cstdint>
 
 #include <Common/Logging/Log.h>
 #include <Common/MemoryUtil.h>
@@ -121,7 +123,7 @@ void PrintAddressArray(const TrackedBuffer& buf)
     {
         // offset from base buffer pointer that got changed
         u64 changedOffset = ((u8*)ChangedPages.Addresses[PageIndex] - BaseAddress) / pageSize;
-        printf("%llu : %llu\n", PageIndex, changedOffset);
+        printf("%lu : %lu\n", PageIndex, changedOffset);
     }
 }
 
@@ -216,7 +218,12 @@ bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 m
             ERROR_LOG_FMT(BRAWLBACK, "WRITTEN PAGE WRITE FAILED! RESULT CODE: {}\n", result);
             if (result == 2 || result == 3)
             {
+              #ifdef _WIN32
               DWORD dw = GetLastError();
+              #else
+              u32 dw = errno;
+              #endif
+
               ERROR_LOG_FMT(BRAWLBACK, "WRITTEN PAGE WRITE FAILED DUE TO A FAILURE ({}) TO WRITE PROTECT. THE REASON IS: {}\n", result, dw);
             }
             return false;
@@ -225,16 +232,13 @@ bool GetAndResetWrittenPages(std::vector<uintptr_t>& changedPageAddresses, u64 m
     return true;
 }
 
-
-
-#include <immintrin.h>
-#include <cstdint>
 // num bytes copied must be multiple of 32
 // dest and src buffers must be 32 byte aligned
 // since our code generally always works with actual system pages of memory,
 // nearly (if not all) of our memcpys are on power-of-two aligned blocks of 4096kb
 void fastMemcpy(void *pvDest, void *pvSrc, size_t nBytes) 
 {
+    #if defined(__AVX2__) || defined(_M_AVX2)
     assert(IS_ALIGNED(pvDest, 32));
     assert(IS_ALIGNED(pvSrc, 32));
     assert(nBytes % 32 == 0);
@@ -247,4 +251,8 @@ void fastMemcpy(void *pvDest, void *pvSrc, size_t nBytes)
         _mm256_stream_si256(pDest, loaded);
     }
     _mm_sfence();
+  #else
+    // TODO: Need to make GCC play nice with SSE/AVX stuff
+    std::memcpy(pvDest, pvSrc, nBytes);
+  #endif
 }

@@ -1,6 +1,8 @@
 #pragma once
+#include "Common/CommonTypes.h"
 #include "include/brawlback-common/BrawlbackConstants.h"
 #include <deque>
+#include <mutex>
 
 constexpr float MS_IN_FRAME = 1000 / 60;
 constexpr s32 USEC_IN_FRAME = MS_IN_FRAME * 1000;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Common/MemArena.h"
+#include "Common/MemoryUtil.h"
 
 #include <algorithm>
 #include <cstddef>

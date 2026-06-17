@@ -23,7 +23,6 @@
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/VersionInfo.h"
 #include "Core/System.h"
-#include <winnt.h>
 
 namespace IOS::HLE
 {
