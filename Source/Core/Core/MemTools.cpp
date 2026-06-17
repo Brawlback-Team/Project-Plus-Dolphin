@@ -279,6 +279,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
     // Huh? Return.
     return;
   }
+
   uintptr_t bad_address = (uintptr_t)info->si_addr;
 
 // Get all the information we can out of the context.
@@ -287,6 +288,13 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 #else
   mcontext_t* ctx = &context->uc_mcontext;
 #endif
+  // Brawlback
+  // We hijack faults first to see if they are expected
+  if (Core::System::GetInstance().GetMemory().HandleFault(bad_address)) {
+    // If so, we return (so it is handled)
+    return;
+  }
+
   // assume it's not a write
   if (!Core::System::GetInstance().GetJitInterface().HandleFault(bad_address,
 #ifdef __APPLE__

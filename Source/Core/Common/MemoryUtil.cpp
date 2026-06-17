@@ -16,6 +16,7 @@
 #include <windows.h>
 #include "Common/StringUtil.h"
 #else
+#include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/mman.h>

@@ -320,26 +320,21 @@ bool MemoryManager::InitFastmemArena()
 
 void MemoryManager::UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
 {
-  for (auto& entry : m_logical_mapped_entries)
-  {
+  for (auto& entry : m_logical_mapped_entries) {
     m_arena.UnmapFromMemoryRegion(entry.mapped_pointer, entry.mapped_size);
   }
   m_logical_mapped_entries.clear();
 
   m_logical_page_mappings.fill(nullptr);
 
-  for (u32 i = 0; i < dbat_table.size(); ++i)
-  {
-    if (dbat_table[i] & PowerPC::BAT_PHYSICAL_BIT)
-    {
+  for (u32 i = 0; i < dbat_table.size(); ++i) {
+    if (dbat_table[i] & PowerPC::BAT_PHYSICAL_BIT) {
       u32 logical_address = i << PowerPC::BAT_INDEX_SHIFT;
       u32 logical_size = PowerPC::BAT_PAGE_SIZE;
       u32 translated_address = dbat_table[i] & PowerPC::BAT_RESULT_MASK;
 
-      while (i + 1 < dbat_table.size())
-      {
-        if (!(dbat_table[i + 1] & PowerPC::BAT_PHYSICAL_BIT))
-        {
+      while (i + 1 < dbat_table.size()) {
+        if (!(dbat_table[i + 1] & PowerPC::BAT_PHYSICAL_BIT)) {
           ++i;
           break;
         }
@@ -351,8 +346,7 @@ void MemoryManager::UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
         logical_size += PowerPC::BAT_PAGE_SIZE;
       }
 
-      for (const auto& physical_region : m_physical_regions)
-      {
+      for (const auto& physical_region : m_physical_regions) {
         if (!physical_region.active)
           continue;
 
@@ -360,19 +354,16 @@ void MemoryManager::UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
         u32 mapping_end = mapping_address + physical_region.size;
         u32 intersection_start = std::max(mapping_address, translated_address);
         u32 intersection_end = std::min(mapping_end, translated_address + logical_size);
-        if (intersection_start < intersection_end)
-        {
+        if (intersection_start < intersection_end) {
           // Found an overlapping region; map it.
 
-          if (m_is_fastmem_arena_initialized)
-          {
+          if (m_is_fastmem_arena_initialized) {
             u32 position = physical_region.shm_position + intersection_start - mapping_address;
             u8* base = m_logical_base + logical_address + intersection_start - translated_address;
             u32 mapped_size = intersection_end - intersection_start;
 
             void* mapped_pointer = m_arena.MapInMemoryRegion(position, mapped_size, base);
-            if (!mapped_pointer)
-            {
+            if (!mapped_pointer) {
               PanicAlertFmt(
                   "Memory::UpdateLogicalMemory(): Failed to map memory region at 0x{:08X} "
                   "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
@@ -389,9 +380,10 @@ void MemoryManager::UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
     }
   }
   std::sort(m_logical_mapped_entries.begin(), m_logical_mapped_entries.end(),
-            [](const LogicalMemoryView& lhs, const LogicalMemoryView& rhs) {
+    [](const LogicalMemoryView& lhs, const LogicalMemoryView& rhs) {
               return lhs.logical_base < rhs.logical_base;
-            });
+    }
+  );
 }
 
 void MemoryManager::DoState(PointerWrap& p)
@@ -678,151 +670,130 @@ void MemoryManager::Write_U64_Swap(u64 value, u32 address)
 }
 
 // Brawlback
-#ifdef _WIN32
-bool MemoryManager::IsAddressDirty(uintptr_t address)
-{
+static bool IsAddressInRange(uintptr_t address, const void* base, size_t size) {
+  if (!base)
+    return false;
+
+  const auto start = reinterpret_cast<uintptr_t>(base);
+  return address >= start && address - start < size;
+}
+
+bool MemoryManager::IsAddressDirty(uintptr_t address) {
   return m_dirty_pages[GetDirtyPageIndexFromAddress(address)].dirty;
 }
 
-bool MemoryManager::IsPageDirty(uintptr_t page_address)
-{
+bool MemoryManager::IsPageDirty(uintptr_t page_address) {
   return m_dirty_pages[page_address].dirty;
 }
-void MemoryManager::SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address)
-{
-  if (m_dirty_pages.contains(page_address))
-  {
+
+void MemoryManager::SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address) {
+  if (m_dirty_pages.contains(page_address)) {
     m_dirty_pages[page_address].dirty = dirty;
     m_dirty_pages[page_address].address = dirty_address;
   }
 }
 
-void MemoryManager::SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty)
-{
-  for (size_t i = 0; i < size; i++)
-  {
+void MemoryManager::SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty) {
+  for (size_t i = 0; i < size; i++) {
     m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].dirty = dirty;
     m_dirty_pages[GetDirtyPageIndexFromAddress(address + i)].address = address;
   }
 }
-u64 MemoryManager::GetDirtyPageIndexFromAddress(u64 address)
-{
+
+u64 MemoryManager::GetDirtyPageIndexFromAddress(u64 address) {
   return reinterpret_cast<uintptr_t>(Common::GetPageAddress((void*)address, Common::PageSize()));
 }
 
-bool MemoryManager::HandleChangeProtection(void* address, size_t size, u32 flag)
-{
-  return m_arena.VirtualProtectMemoryRegion(address, size, flag);
+bool MemoryManager::ChangeProtection(void* address, size_t size, Common::MemoryProtection prot) {
+  return m_arena.VirtualProtectMemoryRegion(address, size, prot);
 }
 
-void MemoryManager::InitDirtyPages()
-{
+void MemoryManager::InitDirtyPages() {
   WriteProtectPhysicalMemoryRegions();
 }
 
-bool MemoryManager::IsAddressInEmulatedMemory(uintptr_t address)
-{
-  return m_ram && m_exram &&
-         ((address >= reinterpret_cast<uintptr_t>(m_ram) &&
-           address < reinterpret_cast<uintptr_t>(m_ram) + m_ram_size) ||
-          (address >= reinterpret_cast<uintptr_t>(m_exram) &&
-           address < reinterpret_cast<uintptr_t>(m_exram) + m_exram_size));
+bool MemoryManager::IsAddressInEmulatedMemory(uintptr_t address) {
+  return IsAddressInRange(address, m_ram, m_ram_size) || IsAddressInRange(address, m_exram, m_exram_size);
 }
 
-bool MemoryManager::IsAddressInFakeVMEML1Cache(uintptr_t address)
-{
-  return (m_fake_vmem && address >= reinterpret_cast<uintptr_t>(m_fake_vmem) &&
-          address < reinterpret_cast<uintptr_t>(m_fake_vmem) + m_fakevmem_size) ||
-         (m_l1_cache && address >= reinterpret_cast<uintptr_t>(m_l1_cache) &&
-          address < reinterpret_cast<uintptr_t>(m_l1_cache) + m_l1_cache_size);
+bool MemoryManager::IsAddressInFakeVMEML1Cache(uintptr_t address) {
+  return IsAddressInRange(address, m_fake_vmem, m_fakevmem_size) || IsAddressInRange(address, m_l1_cache, m_l1_cache_size);
 }
-std::optional<LogicalMemoryView> MemoryManager::IsAddressInLogicalMemory(const u8* address) const
-{
+
+std::optional<LogicalMemoryView> MemoryManager::IsAddressInLogicalMemory(const u8* address) const {
   uintptr_t address_ptr = reinterpret_cast<uintptr_t>(address);
   auto itr = std::find_if(m_logical_mapped_entries.begin(), m_logical_mapped_entries.end(),
-                          [&address_ptr](const Memory::LogicalMemoryView& m) {
-                            return address_ptr >= reinterpret_cast<uintptr_t>(m.mapped_pointer) &&
-                                   address_ptr < reinterpret_cast<uintptr_t>(m.mapped_pointer) +
-                                                     m.mapped_size;
-                          });
-  if (itr != m_logical_mapped_entries.end())
-  {
+    [&address_ptr](const Memory::LogicalMemoryView& m) {
+      return IsAddressInRange(address_ptr, m.mapped_pointer, m.mapped_size);
+    }
+  );
+  if (itr != m_logical_mapped_entries.end()) {
     return *itr;
   }
   return std::nullopt;
 }
 
-u32 MemoryManager::GetEmulatedAddress(u8* address)
-{
-  if (address >= m_ram && address < m_ram + GetRamSize())
-  {
+u32 MemoryManager::GetEmulatedAddress(u8* address) {
+  if (address >= m_ram && address < m_ram + GetRamSize()) {
     auto diff = reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(m_ram);
     return 0x80000000 + diff;
-  }
-  else if (address >= m_exram && address < m_exram + GetExRamSize())
-  {
+  } else if (address >= m_exram && address < m_exram + GetExRamSize()) {
     auto diff = reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(m_exram);
     return 0x90000000 + diff;
   }
   return 0x0;
 }
 
-u32 MemoryManager::FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view)
-{
+u32 MemoryManager::FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view) {
   return fault_address - reinterpret_cast<uintptr_t>(view.mapped_pointer) + view.logical_base;
 }
-bool MemoryManager::HandleFault(uintptr_t fault_address)
-{
+
+bool MemoryManager::HandleFault(uintptr_t fault_address) {
   bool fault_handled = false;
   uintptr_t logical_address = 0;
+
+  // Check if the address has an alias. If so, make the alias page writable (so the write can be performed safely again).
   auto addr = IsAddressInLogicalMemory(reinterpret_cast<u8*>(fault_address));
-  if (addr.has_value())
-  {
+  if (addr.has_value()) {
+
+    // Get the logical address.
     logical_address = GetDirtyPageIndexFromAddress(fault_address);
-    if (!HandleChangeProtection(reinterpret_cast<void*>(logical_address), 0x1, PAGE_READWRITE))
-    {
+
+    // Try to change the memory protection on the alias.
+    if (!ChangeProtection(reinterpret_cast<void*>(logical_address), 0x1, Common::MemoryProtection::RD_WR)) {
       return false;
     }
+    
+    // Get emulated address to update the fault address.
     u32 em_address = FastmemAddressToEmulatedAddress(fault_address, *addr);
     fault_address = reinterpret_cast<uintptr_t>(GetSpanForAddress(em_address).data());
     fault_handled = true;
   }
-  if (IsAddressInEmulatedMemory(fault_address))
-  {
+
+  // If the address exists in the emulated memory, then we try to fetch the page associated with it, make it writable, and mark it 
+  if (IsAddressInEmulatedMemory(fault_address)) {
     uintptr_t page = GetDirtyPageIndexFromAddress(fault_address);
-    if (!addr.has_value())
-    {
+    if (!addr.has_value()) {
       auto page_emulated_address = GetEmulatedAddress(reinterpret_cast<u8*>(page));
-      for (size_t i = 0; i < m_logical_mapped_entries.size() - 1; i++)
-      {
-        if (page_emulated_address >= m_logical_mapped_entries[i].logical_base &&
-            page_emulated_address < m_logical_mapped_entries[i + 1].logical_base)
-        {
-          logical_address =
-              page_emulated_address +
-              reinterpret_cast<uintptr_t>(m_logical_mapped_entries[i].mapped_pointer) -
-              m_logical_mapped_entries[i].logical_base;
-          if (!HandleChangeProtection(reinterpret_cast<void*>(logical_address), 0x1,
-                                      PAGE_READWRITE))
-          {
+      for (size_t i = 0; i < m_logical_mapped_entries.size() - 1; i++) {
+        if (page_emulated_address >= m_logical_mapped_entries[i].logical_base && page_emulated_address < m_logical_mapped_entries[i + 1].logical_base) {
+          logical_address = page_emulated_address + reinterpret_cast<uintptr_t>(m_logical_mapped_entries[i].mapped_pointer) - m_logical_mapped_entries[i].logical_base;
+          if (!ChangeProtection(reinterpret_cast<void*>(logical_address), 0x1, Common::MemoryProtection::RD_WR)) {
             return false;
           }
           break;
         }
       }
     }
-    if (!HandleChangeProtection(reinterpret_cast<void*>(page), 0x1, PAGE_READWRITE))
-    {
+    if (!ChangeProtection(reinterpret_cast<void*>(page), 0x1, Common::MemoryProtection::RD_WR)) {
       return false;
     }
     SetPageDirtyBit(page, true, logical_address);
     return true;
-  }
-  else if (IsAddressInFakeVMEML1Cache(fault_address))
-  {
+  } 
+  else if (IsAddressInFakeVMEML1Cache(fault_address)) {
     uintptr_t page = GetDirtyPageIndexFromAddress(fault_address);
-    if (!HandleChangeProtection(reinterpret_cast<void*>(page), 0x1, PAGE_READWRITE))
-    {
+    if (!ChangeProtection(reinterpret_cast<void*>(page), 0x1, Common::MemoryProtection::RD_WR)) {
       return false;
     }
     SetPageDirtyBit(page, true, page);
@@ -841,7 +812,7 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
     if (!entry.active)
       continue;
 
-    bool change_protection = HandleChangeProtection(*entry.out_pointer, entry.size, PAGE_READONLY);
+    bool change_protection = ChangeProtection(*entry.out_pointer, entry.size, Common::MemoryProtection::RD_ONLY);
 
     if (!change_protection)
     {
@@ -865,7 +836,7 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
   for (auto& entry : m_logical_mapped_entries)
   {
     bool change_protection =
-        HandleChangeProtection(entry.mapped_pointer, entry.mapped_size, PAGE_READONLY);
+        ChangeProtection(entry.mapped_pointer, entry.mapped_size, Common::MemoryProtection::RD_ONLY);
 
     if (!change_protection)
     {
@@ -875,5 +846,5 @@ void MemoryManager::WriteProtectPhysicalMemoryRegions()
     }
   }
 }
-#endif
+
 }  // namespace Memory

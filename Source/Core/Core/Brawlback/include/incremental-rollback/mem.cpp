@@ -152,13 +152,13 @@ int GetWrittenPages(char* base, u64 baseSize, std::vector<uintptr_t>& changedPag
         return 1;
       }
       u8* base_pte_bytes = reinterpret_cast<u8*>(base_pte);
-      if(!memory.HandleChangeProtection(base_pte_bytes, 0x1, PAGE_READONLY))
+      if(!memory.ChangeProtection(base_pte_bytes, 0x1, Common::MemoryProtection::RD_ONLY))
       {
         return 2;
       }
       auto addr = memory.GetDirtyPages()[base_pte].address;
       if (memory.IsAddressInLogicalMemory(reinterpret_cast<u8*>(addr)) != std::nullopt &&
-          !memory.HandleChangeProtection(reinterpret_cast<void*>(addr), 0x1, PAGE_READONLY))
+          !memory.ChangeProtection(reinterpret_cast<void*>(addr), 0x1, Common::MemoryProtection::RD_ONLY))
       {
         return 3;
       }

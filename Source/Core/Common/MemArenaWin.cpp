@@ -41,6 +41,7 @@ using PVirtualProtect = BOOL(WINAPI*)(LPVOID lpAddress, SIZE_T dwSize, DWORD flN
 
 namespace Common
 {
+
 struct WindowsMemoryRegion
 {
   u8* m_start;
@@ -444,11 +445,23 @@ void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
   UnmapViewOfFile(view);
 }
 
-bool MemArena::VirtualProtectMemoryRegion(void* data, size_t size, u32 flag)
+s32 MemArena::ResolveNativeMemoryProtectionMask(MemoryProtection prot) {
+  switch (prot) {
+    case MemoryProtection::RD_ONLY:
+      return PAGE_READONLY;
+    case MemoryProtection::RD_WR:
+      return PAGE_READWRITE;
+    case MemoryProtection::NONE:
+    default:
+      return PAGE_NOACCESS;
+  }
+}
+
+bool MemArena::VirtualProtectMemoryRegion(void* data, size_t size, MemoryProtection prot)
 {
   DWORD lpflOldProtect = 0;
-  return static_cast<PVirtualProtect>(m_memory_functions.m_address_VirtualProtect)(data, size, flag,
-                                                                                   &lpflOldProtect);
+  const DWORD flag = static_cast<DWORD>(ResolveNativeMemoryProtectionMask(prot));
+  return static_cast<PVirtualProtect>(m_memory_functions.m_address_VirtualProtect)(data, size, flag, &lpflOldProtect);
 }
 
 LazyMemoryRegion::LazyMemoryRegion()

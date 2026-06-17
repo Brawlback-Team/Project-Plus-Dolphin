@@ -121,13 +121,12 @@ public:
   bool is_in_main_thread;
 
   // Brawlback -- Dirty Page Handling
-  #ifdef _WIN32
   bool IsAddressDirty(uintptr_t address);
   bool IsPageDirty(uintptr_t page_address);
   bool IsPageMainThreadWrite(uintptr_t page_address);
   void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address, bool is_main_thread_write);
   void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty, bool is_main_thread_write);
-  bool HandleChangeProtection(void* address, size_t size, u32 flag);
+  bool ChangeProtection(void* address, size_t size, Common::MemoryProtection flag);
   bool HandleFault(uintptr_t fault_address);
   u64 GetDirtyPageIndexFromAddress(u64 address);
   void WriteProtectPhysicalMemoryRegions();
@@ -135,7 +134,6 @@ public:
   bool IsAddressInEmulatedMemory(uintptr_t address);
   bool IsAddressInFakeVMEML1Cache(uintptr_t address);
   u32 FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view);
-  #endif
 
   // Routines to access physically addressed memory, designed for use by
   // emulated hardware outside the CPU. Use "Device_" prefix.
@@ -287,7 +285,7 @@ private:
   std::array<void*, PowerPC::BAT_PAGE_COUNT> m_logical_page_mappings{};
 
   Core::System& m_system;
-
+  
   std::map<u64, DirtyPage> m_dirty_pages;
 
   void InitMMIO(bool is_wii);
