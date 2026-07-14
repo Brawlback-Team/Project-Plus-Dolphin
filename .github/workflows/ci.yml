@@ -52,9 +52,9 @@ jobs:
           HOMEBREW_NO_ANALYTICS: 1
         run: |
           brew install gnu-sed
-          if ! brew install ccache ninja; then
+          if ! brew install ccache ninja libspng; then
             brew update
-            brew install ccache ninja
+            brew install ccache ninja libspng
           fi
 
       - name: Cache Dependencies
