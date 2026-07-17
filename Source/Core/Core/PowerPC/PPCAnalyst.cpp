@@ -755,10 +755,8 @@ bool PPCAnalyzer::IsBusyWaitLoop(CodeBlock* block, CodeOp* code, size_t instruct
   {
     if (code[i].opinfo->type == OpType::Branch)
     {
-      if (code[i].branchUsesCtr)
-        return false;
       if (code[i].branchTo == block->m_address && i == instructions)
-        return true;
+        return !code[i].branchUsesCtr;
     }
     else if (code[i].opinfo->type != OpType::Integer && code[i].opinfo->type != OpType::Load)
     {

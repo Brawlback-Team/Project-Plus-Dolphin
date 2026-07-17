@@ -1233,6 +1233,9 @@ private:
 
 TCacheEntry* TextureCacheBase::Load(const TextureInfo& texture_info)
 {
+#ifdef HAVE_TRACY
+  ZoneScopedN("TextureCache::Load");
+#endif
   if (auto entry = LoadImpl(texture_info, false))
   {
     if (!DidLinkedAssetsChange(*entry))
@@ -2061,7 +2064,7 @@ void TextureCacheBase::StitchXFBCopy(RcTcacheEntry& stitched_entry)
       for (u32 layer = 0; layer < layers_to_copy; layer++)
       {
         stitched_entry->texture->CopyRectangleFromTexture(entry->texture.get(), srcrect, layer, 0,
-                                                          dstrect, layer, 0);
+                                                         dstrect, layer, 0);
       }
     }
 
@@ -2264,7 +2267,10 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       if (skip == true)
       {
         if (copy_to_ram)
+        {
           UninitializeEFBMemory(dst, dstStride, bytes_per_row, num_blocks_y);
+          memory.MarkRangeDirty(dstAddr, covered_range);
+        }
         return;
       }
     }
@@ -2377,6 +2383,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
         // Immediately flush it.
         WriteEFBCopyToRAM(dst, bytes_per_row / sizeof(u32), num_blocks_y, dstStride,
                           std::move(staging_texture));
+        memory.MarkRangeDirty(dstAddr, covered_range);
       }
       else
       {
@@ -2393,10 +2400,12 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     if (is_xfb_copy)
     {
       UninitializeXFBMemory(dst, dstStride, bytes_per_row, num_blocks_y);
+      memory.MarkRangeDirty(dstAddr, covered_range);
     }
     else
     {
       UninitializeEFBMemory(dst, dstStride, bytes_per_row, num_blocks_y);
+      memory.MarkRangeDirty(dstAddr, covered_range);
     }
   }
 
@@ -2442,8 +2451,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       // There are cases (Rogue Squadron 2 / Texas Holdem on Wiiware) where
       // for xfb copies the textures overlap which causes the hash of the first copy
       // to be different (from when it was originally created).  This has no implications
-      // for XFB2Tex because the underlying memory doesn't change (dummy values) but
-      // can affect XFB2Ram when we compare the texture cache copy hash with the
+      // for XFB2Tex because the underlying memory doesn't change (dummy values) but can
+      // affect XFB2Ram when we compare the texture cache copy hash with the
       // newly computed hash
       // By calculating the hash when we receive overlapping xfbs, we are able
       // to mitigate this
@@ -2484,7 +2493,6 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     m_textures_by_address.emplace(dstAddr, std::move(entry));
   }
 }
-
 void TextureCacheBase::FlushEFBCopies()
 {
   if (m_pending_efb_copies.empty())

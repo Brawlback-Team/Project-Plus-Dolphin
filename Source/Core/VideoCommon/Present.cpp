@@ -24,6 +24,7 @@
 #include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/Widescreen.h"
 #include <Core/NetPlayClient.h>
+#include "VideoState.h"
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
 
@@ -999,7 +1000,7 @@ void Presenter::DoState(PointerWrap& p)
   p.Do(m_last_xfb_height);
 
   // If we're loading and there is a last XFB, re-display it.
-  if (p.IsReadMode() && m_last_xfb_stride != 0)
+  if (p.IsReadMode() && m_last_xfb_stride != 0 && !VideoCommon_GetSkipGPUReadbackForRollback())
   {
     // This technically counts as the end of the frame
     GetVideoEvents().after_frame_event.Trigger(Core::System::GetInstance());

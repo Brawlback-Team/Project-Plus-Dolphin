@@ -27,6 +27,7 @@
 #include "Core/IOS/IOS.h"
 #include "Core/State.h"
 #include "Core/System.h"
+#include <Core/Rollback/RollbackManager.h>
 
 namespace HW
 {
@@ -111,7 +112,12 @@ void DoState(Core::System& system, PointerWrap& p)
   {
     system.GetWiiIPC().DoState(p);
     p.DoMarker("IOS");
-    system.GetIOS()->DoState(p);
+#ifdef _WIN32
+    if (!Rollback::RollbackManager::Get().m_skip_ios_in_dostate.load(std::memory_order_relaxed))
+#endif
+    {
+      system.GetIOS()->DoState(p);
+    }
     p.DoMarker("IOS::HLE");
   }
 

@@ -238,17 +238,22 @@ void Jit64::bcx(UGeckoInstruction inst)
     gpr.Flush();
     fpr.Flush();
 
-    if (IsDebuggingEnabled())
-    {
-      // ABI_PARAM1 is safe to use after a GPR flush for an optimization in this function.
-      WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, ABI_PARAM1, RSCRATCH, {});
-    }
     if (js.op->branchIsIdleLoop)
     {
+      if (IsDebuggingEnabled())
+      {
+        // ABI_PARAM1 is safe to use after a GPR flush for an optimization in this function.
+        WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, ABI_PARAM1, RSCRATCH, {});
+      }
       WriteIdleExit(js.op->branchTo);
     }
     else
     {
+      if (IsDebuggingEnabled())
+      {
+        // ABI_PARAM1 is safe to use after a GPR flush for an optimization in this function.
+        WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, ABI_PARAM1, RSCRATCH, {});
+      }
       WriteExit(js.op->branchTo, inst.LK, js.compilerPC + 4);
     }
   }

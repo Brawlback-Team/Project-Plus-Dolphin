@@ -65,6 +65,9 @@ IPC_HLE_PERIOD: For the Wii Remote this is the call schedule:
 #include "Core/System.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#ifdef _WIN32
+#include "Core/Rollback/RollbackManager.h"
+#endif
 
 namespace SystemTimers
 {
@@ -127,6 +130,11 @@ void SystemTimersManager::VICallback(Core::System& system, u64 userdata, s64 cyc
   vi.Update(core_timing.GetTicks() - cycles_late);
   core_timing.ScheduleEvent(vi.GetTicksPerHalfLine() - cycles_late,
                             system.GetSystemTimers().m_event_type_vi);
+#ifdef _WIN32
+  auto& rm = Rollback::RollbackManager::Get();
+  if (rm.m_frame_save_pending.exchange(false, std::memory_order_relaxed))
+    rm.SaveFrame(system);
+#endif
 }
 
 void SystemTimersManager::DecrementerCallback(Core::System& system, u64 userdata, s64 cycles_late)

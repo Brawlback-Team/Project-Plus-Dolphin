@@ -429,6 +429,14 @@ void CEXIBrawlback::handleIncrementFrame()
   if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
   {
     NetPlay::netplay_client->current_frame++;
+    s32 frame = NetPlay::netplay_client->current_frame;
+    s32 frame_be = swap_endian(frame);
+    {
+      std::lock_guard<std::mutex> lock(read_queue_mutex);
+      this->read_queue.clear();
+      auto dataPtr = reinterpret_cast<u8*>(&frame_be);
+      this->read_queue.insert(this->read_queue.end(), dataPtr, dataPtr + sizeof(s32));
+    }
   }
 }
 

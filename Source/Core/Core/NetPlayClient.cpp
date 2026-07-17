@@ -24,6 +24,7 @@
 #include <map>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
+#include <boost/icl/interval_set.hpp>
 
 #include "Common/Assert.h"
 #include "Common/CommonPaths.h"
@@ -82,6 +83,9 @@
 #include "Core/PowerPC/CPUCoreBase.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/State.h"
+#ifdef _WIN32
+#include "Core/Rollback/RollbackManager.h"
+#endif
 #include "DiscIO/Blob.h"
 
 #include "InputCommon/ControllerEmu/ControlGroup/Attachments.h"
@@ -98,6 +102,120 @@
 #include <Common/MemoryUtil.h>
 #include <incremental-rollback/incremental_rb.h>
 #include <immintrin.h>
+
+namespace FullMemoryRB
+{
+  // Custom deleter for aligned memory
+  struct AlignedMemoryDeleter
+  {
+    void operator()(u8* ptr) const
+    {
+      if (ptr != nullptr)
+        Common::FreeAlignedMemory(ptr);
+    }
+  };
+
+  struct MemorySegment
+  {
+    u32 address;    // Start address of this segment
+    u32 size;       // Size of this segment
+    std::unique_ptr<u8[], AlignedMemoryDeleter> data;  // The actual data (aligned memory)
+
+    MemorySegment() : address(0), size(0), data(nullptr) {}
+
+    MemorySegment(MemorySegment&&) noexcept = default;
+    MemorySegment& operator=(MemorySegment&&) noexcept = default;
+
+    void AllocateIfNeeded()
+    {
+      if (!data && size > 0)
+      {
+        data.reset(static_cast<u8*>(Common::AllocateAlignedMemory(size, 64)));
+      }
+    }
+
+    u8* GetData() { return data.get(); }
+    const u8* GetData() const { return data.get(); }
+  };
+
+  struct Savestate
+  {
+    std::vector<MemorySegment> mem1_segments = {};
+    std::vector<MemorySegment> mem2_segments = {};
+    Common::UniqueBuffer<u8> core_state;
+    Common::UniqueBuffer<u8> l1_cache;
+    u32 frame = 0;
+    bool valid = false;
+  };
+
+  struct SavestateInfo
+  {
+    Savestate savestates[MAX_SAVESTATES] = {};
+  };
+
+  SavestateInfo savestateInfo;
+
+  // Excluded regions list - matches incremental_rb.cpp
+  struct ExcludedRegion
+  {
+    u32 address;
+    u32 size;
+  };
+
+  static const std::vector<ExcludedRegion> excluded_regions = {
+    // Main Stack
+    {0x805a5154, 0x805b5158 - 0x805a5154},
+    // Heaps
+    {0x817ba5a0, 0x817ca5a0 - 0x817ba5a0}, // Syringe
+    {0x94000000, 0x3FBFFFF},                // SavestateHeap
+    {0x805d1e60, 0x00040100},              // RenderFifo
+    {0x9134cc00, 0x0012c200},              // CopyFB
+    {0x805ca260, 0x00007c00},              // Thread
+    {0x90199800, 0x00cc7c00},              // Sound
+  };
+}
+
+namespace
+{
+struct ScopedRollbackDoState
+{
+  ScopedRollbackDoState()
+  {
+#ifdef _WIN32
+    Rollback::RollbackManager::Get().BeginDoState();
+#endif
+  }
+
+  ~ScopedRollbackDoState()
+  {
+#ifdef _WIN32
+    Rollback::RollbackManager::Get().EndDoState();
+#endif
+  }
+};
+
+bool SaveRollbackSystemState(Core::System& system, FullMemoryRB::Savestate& savestate)
+{
+  auto& rm = Rollback::RollbackManager::Get();
+  if (rm.IsInitialized())
+  {
+    rm.ToggleFrameSave();
+    return true;
+  }
+  return false;
+}
+
+bool LoadRollbackSystemState(Core::System& system, FullMemoryRB::Savestate& savestate)
+{
+  auto& rm = Rollback::RollbackManager::Get();
+  if (rm.IsInitialized())
+  {
+    rm.LoadFrame(system, Rollback::NUM_SAVE_SLOTS);
+    return true;
+  }
+  return false;
+}
+}  // namespace
 
 namespace NetPlay
 {
@@ -1398,6 +1516,10 @@ void NetPlayClient::CloseSession()
   g_GekkoPlayerHandles.clear();
   g_GekkoLocalHandles.clear();
   g_GekkoInputRingSize = 0;
+  for (auto& inputs : g_Inputs)
+  {
+    inputs.clear();
+  }
   g_Inputs.clear();
   g_GekkoLatchedInput.clear();
   g_GekkoLastLatchedInput.clear();
@@ -2016,6 +2138,17 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
 {
   const auto beginTime = std::chrono::steady_clock::now();
   const int coreFrame = std::max(0, save.frame);
+
+  // Don't save on frame -1
+  if (save.frame == -1)
+  {
+    if (g_GekkoLogEnabled)
+    {
+      write_gekko_log("save_state skipped frame=-1");
+    }
+    return false;
+  }
+
   if (g_GekkoLogEnabled)
   {
     std::ostringstream stream;
@@ -2032,48 +2165,30 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
     return false;
   }
 
-  // Use IncrementalRB to save the current state
-  IncrementalRB::SaveWrittenPages(static_cast<u32>(coreFrame), NetPlay::netplay_client->IsRollingBack());
+  auto& system = Core::System::GetInstance();
 
-  // Get the savestate from IncrementalRB
   u32 savestateIdx = static_cast<u32>(coreFrame) % MAX_SAVESTATES;
-  IncrementalRB::Savestate& savestate = IncrementalRB::savestateInfo.savestates[savestateIdx];
+  FullMemoryRB::Savestate& savestate = FullMemoryRB::savestateInfo.savestates[savestateIdx];
 
-  if (!savestate.valid)
+  if (!SaveRollbackSystemState(system, savestate))
   {
-    g_GekkoLastSaveStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - beginTime)
-                                 .count();
-    std::ostringstream stream;
-    stream << "save_state result=fail reason=invalid_savestate elapsed_us=" << g_GekkoLastSaveStateUs;
-    write_gekko_log(stream.str());
+    savestate.valid = false;
+    write_gekko_log("save_state result=fail reason=rollback_state_save_failed");
     return false;
   }
 
-  // Copy the savestate data to the provided buffer
-  // The afterCopies vector contains pointers to the saved page data
+  savestate.frame = coreFrame;
+  savestate.valid = true;
+
   u32 totalSize = 0;
-  for (size_t i = 0; i < savestate.afterCopies.size(); ++i)
-  {
-    totalSize += static_cast<u32>(Common::PageSize());
-  }
+  for (const auto& seg : savestate.mem1_segments)
+    totalSize += seg.size;
+  for (const auto& seg : savestate.mem2_segments)
+    totalSize += seg.size;
+  totalSize += static_cast<u32>(savestate.core_state.size() + savestate.l1_cache.size());
 
-  if (totalSize > kGekkoStateCapacity)
-  {
-    std::ostringstream stream;
-    stream << "save_state result=fail reason=state_too_large len=" << totalSize
-           << " capacity=" << kGekkoStateCapacity;
-    write_gekko_log(stream.str());
-    return false;
-  }
-
-  // Set the state pointer to the arena's backing memory
-  // IncrementalRB stores the pages in the arena, so we can just point to it
   if (save.stateLen != nullptr)
-  {
     *save.stateLen = totalSize;
-  }
-
   *save.checksum = 0;
 
   g_GekkoLastSaveStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2085,20 +2200,18 @@ bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
   {
     std::ostringstream stream;
     stream << "save_state result=ok frame=" << save.frame << " len=" << totalSize
-           << " checksum=" << 0
-           << " elapsed_us=" << g_GekkoLastSaveStateUs;
+           << " checksum=" << 0 << " elapsed_us=" << g_GekkoLastSaveStateUs;
     write_gekko_log(stream.str());
   }
 
   return true;
 }
 
-// This function is no longer needed as IncrementalRB::SaveWrittenPages handles saving
-// Keep stub for backward compatibility
+// Deprecated - no longer used with full memory savestates
 bool NetPlayClient::RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
                                               int buffer_capacity, int frame)
 {
-  ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: deprecated function called, use IncrementalRB::SaveWrittenPages instead");
+  ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: deprecated function called");
   return false;
 }
 
@@ -2110,11 +2223,20 @@ bool NetPlayClient::RollbackLoadGameState(const CoreRollbackState& state)
     return false;
   }
 
-  bool success = IncrementalRB::Rollback(current_frame + 1, state.frame);
+  auto& system = Core::System::GetInstance();
 
-  if (!success)
+  u32 savestateIdx = static_cast<u32>(state.frame) % MAX_SAVESTATES;
+  FullMemoryRB::Savestate& savestate = FullMemoryRB::savestateInfo.savestates[savestateIdx];
+
+  if (!savestate.valid || savestate.frame != static_cast<u32>(state.frame))
   {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: IncrementalRB::Rollback failed for frame {}",
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: no valid savestate for frame {}", state.frame);
+    return false;
+  }
+
+  if (!LoadRollbackSystemState(system, savestate))
+  {
+    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: failed to restore rollback state for frame {}",
                   state.frame);
     return false;
   }
@@ -2147,6 +2269,7 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
 
   if (g_GekkoSession == nullptr)
   {
+    write_gekko_log("begin_frame result=no_session");
     return;
   }
   if (g_GekkoStopRequested.load(std::memory_order_relaxed))
@@ -2154,24 +2277,51 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
     write_gekko_log("begin_frame result=stop_requested");
     return;
   }
-  gekko_network_poll(g_GekkoSession);
 
-  // Store the local player's input into the inputs buffer so it can be sent to the remote player.
+  const auto networkPollTime = std::chrono::steady_clock::now();
+  gekko_network_poll(g_GekkoSession);
+  summaryNetworkPollUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - networkPollTime)
+                             .count();
+
+  // Store the local player's input for the CURRENT frame before calling update_session
+  // Use g_GekkoLocalPlayer consistently (which equals m_local_player->pid - 1)
+  if (g_GekkoLocalPlayer >= 0 && g_GekkoLocalPlayer < (int)g_GekkoPlayers &&
+      g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
   {
-    int local_player_port = m_local_player->pid - 1;
-    if (local_player_port >= 0 && local_player_port < (int)g_GekkoPlayers)
+    // Write the pad input to the current frame slot
+    const int slot = netplay_client->current_frame % g_GekkoInputRingSize;
+    g_Inputs[g_GekkoLocalPlayer][slot].game_pad = pad;
+
+    // Submit the local input for the CURRENT frame BEFORE update_session
+    Inputs* localInputPtr = &g_Inputs[g_GekkoLocalPlayer][slot];
+
+    if (g_GekkoLogEnabled && (current_frame % 60 == 0 || current_frame < 5))
     {
-      // Also write into the BrawlbackPad ring buffer for EXI reads
-      if (local_player_port < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-        g_Inputs[local_player_port][current_frame % g_GekkoInputRingSize].game_pad = pad;
+      std::ostringstream stream;
+      stream << "submitting_input g_GekkoLocalPlayer=" << g_GekkoLocalPlayer
+             << " current_frame=" << current_frame << " slot=" << slot << " buttons=0x" << std::hex
+             << std::setw(8) << std::setfill('0') << pad.buttons << " g_GekkoLocalHandles["
+             << g_GekkoLocalPlayer << "]="
+             << (g_GekkoLocalPlayer < (int)g_GekkoLocalHandles.size() ?
+                     g_GekkoLocalHandles[g_GekkoLocalPlayer] :
+                     -999);
+      write_gekko_log(stream.str());
+    }
+
+    bool submitted = submit_local_input(localInputPtr, g_GekkoLocalPlayer);
+
+    if (!submitted && g_GekkoLogEnabled)
+    {
+      std::ostringstream stream;
+      stream << "input_submit_failed g_GekkoLocalPlayer=" << g_GekkoLocalPlayer << " handle="
+             << (g_GekkoLocalPlayer < (int)g_GekkoLocalHandles.size() ?
+                     g_GekkoLocalHandles[g_GekkoLocalPlayer] :
+                     -999);
+      write_gekko_log(stream.str());
     }
   }
 
-  Inputs* localInputPtr =
-      (g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-          ? &g_Inputs[g_GekkoLocalPlayer][current_frame % g_GekkoInputRingSize]
-          : nullptr;
-  submit_local_input(localInputPtr, g_GekkoLocalPlayer);
   g_GekkoHasLatchedInput = false;
   g_GekkoPendingSaves.clear();
   advance_frames = 0;
@@ -2257,6 +2407,13 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
         {
         case GekkoSaveEvent:
         {
+          // Don't queue saves for frame -1
+          if (event->data.save.frame == -1)
+          {
+            write_gekko_log("skip_save frame=-1");
+            break;
+          }
+
           summarySaveCount++;
           PendingGekkoSave save;
           save.frame = event->data.save.frame;
@@ -2286,13 +2443,32 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
           // see the correct data when CMD_EXECUTE_ADVANCE is processed.
           const auto latchInputTime = std::chrono::steady_clock::now();
           advance_frames++;
+
+          if (g_GekkoLogEnabled && (current_frame % 60 == 0 || current_frame < 5))
+          {
+            std::ostringstream stream;
+            stream << "latching_remote_inputs advance_frame=" << event->data.adv.frame;
+            for (int port = 0; port < g_GekkoPlayers; port++)
+            {
+              const int handle =
+                  (port < (int)g_GekkoPlayerHandles.size()) ? g_GekkoPlayerHandles[port] : -1;
+              if (handle >= 0)
+              {
+                const Inputs* input = &((Inputs*)(event->data.adv.inputs))[handle];
+                stream << " port" << port << "_handle" << handle << "_buttons=0x" << std::hex
+                       << std::setw(8) << std::setfill('0') << input->game_pad.buttons;
+              }
+            }
+            write_gekko_log(stream.str());
+          }
+
           for (int playerPort = 0; playerPort < g_GekkoPlayers; playerPort++)
           {
-            const int handle = (playerPort < (int)g_GekkoPlayerHandles.size())
-                                   ? g_GekkoPlayerHandles[playerPort]
-                                   : -1;
-            if (handle >= 0 && handle < g_GekkoPlayers &&
-                playerPort < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
+            const int handle = (playerPort < (int)g_GekkoPlayerHandles.size()) ?
+                                   g_GekkoPlayerHandles[playerPort] :
+                                   -1;
+            if (handle >= 0 && handle < g_GekkoPlayers && playerPort < (int)g_Inputs.size() &&
+                g_GekkoInputRingSize > 0)
             {
               g_Inputs[playerPort][event->data.adv.frame % g_GekkoInputRingSize] =
                   ((Inputs*)(event->data.adv.inputs))[handle];
@@ -2325,11 +2501,10 @@ void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
             hasRealAdvance = true;
           }
           m_gekko_callback_codes.push_back(static_cast<u8>(code));
-          write_gekko_log("queue_callback type=advance frame=" + std::to_string(adv.frame)
-                          + " rollback=" + std::to_string(adv.rolling_back)
-                          + " runahead=" + std::to_string(adv.running_ahead));
+          write_gekko_log("queue_callback type=advance frame=" + std::to_string(adv.frame) +
+                          " rollback=" + std::to_string(adv.rolling_back) +
+                          " runahead=" + std::to_string(adv.running_ahead));
 
-          
           break;
         }
         default:
@@ -2378,7 +2553,6 @@ bool NetPlayClient::IsRollingBack()
   return is_rollingback.load();
 }
 
-// Dynamic save regions are no longer needed as IncrementalRB handles page tracking automatically
 void NetPlayClient::SetDynamicSaveRegions(int frame, std::vector<DynamicSaveRegion> regions)
 {
   // No-op: IncrementalRB handles this automatically
@@ -2727,7 +2901,7 @@ void NetPlayClient::OnSyncSaveDataWii(sf::Packet& packet)
   {
     INFO_LOG_FMT(NETPLAY, "Received redirected save.");
     if (!DecompressPacketIntoFolder(packet, redirect_path))
-    {
+{
       PanicAlertFmtT("Failed to write redirected save.");
       SyncSaveDataResponse(false);
       return;
@@ -2748,7 +2922,7 @@ void NetPlayClient::OnSyncSaveDataGBA(sf::Packet& packet)
   const std::string path =
       fmt::format("{}{}{}.sav", File::GetUserPath(D_GBAUSER_IDX), GBA_SAVE_NETPLAY, slot + 1);
   if (File::Exists(path) && !File::Delete(path))
-  {
+{
     PanicAlertFmtT("Failed to delete NetPlay GBA{0} save file. Verify your write permissions.",
                    slot + 1);
     SyncSaveDataResponse(false);
@@ -3072,7 +3246,7 @@ void NetPlayClient::Disconnect()
       return;
     default:
       break;
-    }
+}
   }
   // didn't disconnect gracefully force disconnect
   enet_peer_reset(m_server);
@@ -3081,6 +3255,7 @@ void NetPlayClient::Disconnect()
 
 void NetPlayClient::SendAsync(sf::Packet&& packet, const u8 channel_id, _ENetPacketFlag flag)
 {
+  if (netplay_client)
   {
     std::lock_guard lkq(m_crit.async_queue_write);
     m_async_queue.Push(AsyncQueueEntry{std::move(packet), channel_id, flag});
@@ -3103,11 +3278,11 @@ void NetPlayClient::ThreadFunc()
       m_dialog->AppendChat(
           Common::GetStringT("Quality of Service (QoS) was successfully enabled.\nBuffer should be set to your ping divided by 16, at a minimum of 2."));
     }
-    else
-    {
+  else
+  {
       m_dialog->AppendChat(Common::GetStringT("Quality of Service (QoS) couldn't be enabled."));
-    }
   }
+}
 
   while (m_do_loop.IsSet())
   {
@@ -3414,7 +3589,7 @@ void NetPlayClient::UpdateDevices()
         }
       }
       else
-      {
+{
         si.ChangeDevice(SerialInterface::SIDEVICE_GC_CONTROLLER, pad);
       }
       local_pad++;
@@ -4105,7 +4280,7 @@ void NetPlayClient::SendGameStatus()
     {
       result = SyncIdentifierComparison::DifferentGame;
     }
-  }
+}
 
   packet << static_cast<u32>(result);
   Send(packet);
@@ -4604,7 +4779,6 @@ void IncrementCurrentFrame()
 }
 
 }  // namespace NetPlay
-
 // stuff hacked into dolphin
 
 // called from ---CPU--- thread

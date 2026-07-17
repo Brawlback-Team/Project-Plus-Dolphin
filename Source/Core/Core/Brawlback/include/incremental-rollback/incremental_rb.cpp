@@ -379,6 +379,87 @@ namespace IncrementalRB
     ExcludeMem(GetPointer(0x90199800), 0x00cc7c00);              // Sound
     //ExcludeMem(GetPointer(0x80b8db60), 0x80c23a60 - 0x80b8db60); // Effect*/
 
+    // VI Related Addresses
+    ExcludeMem(GetPointer(0x805A084C), 0x4);
+    ExcludeMem(GetPointer(0x805A07BC), 0x4);
+    ExcludeMem(GetPointer(0x805A07C0), 0x4);
+    ExcludeMem(GetPointer(0x805A07B0), 0x4);
+    ExcludeMem(GetPointer(0x805A07B4), 0x4);
+    ExcludeMem(GetPointer(0x805A07B8), 0x4);
+
+    // OSAlarm Stuff
+    ExcludeMem(GetPointer(0x804DE240), 0x30);
+    ExcludeMem(GetPointer(0x804DE0A0), 0x30);
+    ExcludeMem(GetPointer(0x804E42C0), 0x30);
+    ExcludeMem(GetPointer(0x804E4290), 0x30);
+    ExcludeMem(GetPointer(0x804E4360), 0x30);
+    ExcludeMem(GetPointer(0x804F67E0), 0x30);
+    ExcludeMem(GetPointer(0x804FBBB0), 0x30);
+    ExcludeMem(GetPointer(0x805297A0), 0x30);
+    ExcludeMem(GetPointer(0x80495418), 0x30);
+    ExcludeMem(GetPointer(0x80495448), 0x30);
+    ExcludeMem(GetPointer(0x80495478), 0x30);
+    ExcludeMem(GetPointer(0x804954A8), 0x30);
+    ExcludeMem(GetPointer(0x80532188), 0x30);
+    ExcludeMem(GetPointer(0x805321B8), 0x30);
+    ExcludeMem(GetPointer(0x805321E8), 0x30);
+    ExcludeMem(GetPointer(0x80532218), 0x30);
+    ExcludeMem(GetPointer(0x80532248), 0x30);
+    ExcludeMem(GetPointer(0x80532278), 0x30);
+    ExcludeMem(GetPointer(0x805322A8), 0x30);
+    ExcludeMem(GetPointer(0x805322D8), 0x30);
+    ExcludeMem(GetPointer(0x804ECEE0), 0x30);
+    ExcludeMem(GetPointer(0x804ECFF8), 0x30);
+    ExcludeMem(GetPointer(0x804DE3F0), 0x30);
+    ExcludeMem(GetPointer(0x804DE420), 0x30);
+    ExcludeMem(GetPointer(0x804DE450), 0x30);
+    ExcludeMem(GetPointer(0x804DE480), 0x30);
+
+    // OSThread Stuff
+    ExcludeMem(GetPointer(0x804DD558), 0x318);
+    ExcludeMem(GetPointer((u32)0x805A01E0 + 0x8), 0x318);
+    ExcludeMem(GetPointer((u32)0x805A0200 + 0xB0), 0x318);
+    ExcludeMem(GetPointer((u32)0x805A0208 + 0x8), 0x318);
+    ExcludeMem(GetPointer((u32)0x805A0FE8 + 0x51C0), 0x318);
+
+    ExcludeMem(GetPointer(0x804976F0), 0x8);
+    ExcludeMem(GetPointer(0x80497718), 0x8);
+    ExcludeMem(GetPointer(0x80497740), 0x8);
+    ExcludeMem(GetPointer(0x80497768), 0x8);
+    ExcludeMem(GetPointer(0x8049EB50), 0x8);
+    ExcludeMem(GetPointer(0x8049EC30), 0x8);
+    ExcludeMem(GetPointer(0x8049EC48), 0x8);
+    ExcludeMem(GetPointer(0x8049EC60), 0x8);
+    ExcludeMem(GetPointer(0x8049EC78), 0x8);
+    ExcludeMem(GetPointer(0x804D8FD8), 0x8);
+    ExcludeMem(GetPointer(0x804D8FE0), 0x8);
+    ExcludeMem(GetPointer(0x804D8FE8), 0x8);
+    ExcludeMem(GetPointer(0x804DD080), 0x8);
+    ExcludeMem(GetPointer(0x804DD0D0), 0x8);
+    ExcludeMem(GetPointer(0x804DD0D8), 0x8);
+    ExcludeMem(GetPointer(0x804DD840), 0x8);
+    ExcludeMem(GetPointer(0x804ECE8C), 0x8);
+    ExcludeMem(GetPointer(0x804ECFA4), 0x8);
+    ExcludeMem(GetPointer(0x804ED380), 0x8);
+    ExcludeMem(GetPointer(0x804F65CC), 0x8);
+    ExcludeMem(GetPointer(0x804F8124), 0x8);
+    ExcludeMem(GetPointer(0x804F8AC4), 0x8);
+    ExcludeMem(GetPointer(0x804F9464), 0x8);
+    ExcludeMem(GetPointer(0x804F9E04), 0x8);
+    ExcludeMem(GetPointer(0x805344B0), 0x8);
+    ExcludeMem(GetPointer(0x805344D8), 0x8);
+    ExcludeMem(GetPointer(0x80534580), 0x8);
+    ExcludeMem(GetPointer(0x805365E4), 0x8);
+    ExcludeMem(GetPointer(0x805365FC), 0x8);
+    ExcludeMem(GetPointer(0x805A03C8), 0x8);
+    ExcludeMem(GetPointer(0x805A0498), 0x8);
+    ExcludeMem(GetPointer(0x805A0828), 0x8);
+    ExcludeMem(GetPointer(0x805A08B8), 0x8);
+    ExcludeMem(GetPointer(0x805A08D8), 0x8);
+    ExcludeMem(GetPointer(0x805A0AB0), 0x8);
+    ExcludeMem(GetPointer(0x804DD870), 0x100);
+
+
     std::sort(ExcludeMemList.begin(), ExcludeMemList.end(), [](const ExcludeBuffer& a, const ExcludeBuffer& b){ return a.buffer.data < b.buffer.data; });
 
     for (u32 i = 0; i < ExcludeMemList.size(); i++)

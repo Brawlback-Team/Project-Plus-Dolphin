@@ -31,6 +31,14 @@
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/System.h"
 
+static bool s_skip_dcache_flush_for_rollback = false;
+
+void PowerPC_SetSkipDCacheFlushForRollback(bool skip)
+{
+  s_skip_dcache_flush_for_rollback = skip;
+}
+
+
 namespace PowerPC
 {
 double PairedSingle::PS0AsDouble() const
@@ -107,7 +115,7 @@ void PowerPCManager::DoState(PointerWrap& p)
 
   if (p.IsReadMode())
   {
-    if (!m_ppc_state.m_enable_dcache)
+    if (!m_ppc_state.m_enable_dcache && !s_skip_dcache_flush_for_rollback)
     {
       INFO_LOG_FMT(POWERPC, "Flushing data cache");
       m_ppc_state.dCache.FlushAll(memory);

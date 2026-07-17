@@ -215,14 +215,25 @@ void LoadFromBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer)
     return;
   }
 
+  LoadFromBufferForRollback(system, buffer);
+}
+
+bool LoadFromBufferForRollback(Core::System& system, Common::UniqueBuffer<u8>& buffer)
+{
+  if (buffer.empty())
+    return false;
+
+  bool loaded_successfully = false;
   Core::RunOnCPUThread(
       system,
       [&] {
         u8* ptr = buffer.data();
         PointerWrap p(&ptr, buffer.size(), PointerWrap::Mode::Read);
         DoState(system, p);
+        loaded_successfully = p.IsReadMode();
       },
       true);
+  return loaded_successfully;
 }
 
 void SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer)

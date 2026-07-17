@@ -89,6 +89,10 @@
     <ClCompile Include="Core\Brawlback\include\incremental-rollback\tiny_arena.cpp" />
     <ClCompile Include="Core\Brawlback\TimeSync.cpp" />
     <ClCompile Include="Core\HW\EXI\EXI_Brawlback.cpp" />
+    <ClCompile Include="Core\Rollback\DeltaSaveSlot.cpp" />
+    <ClCompile Include="Core\Rollback\FullMemcpySaveSlot.cpp" />
+    <ClCompile Include="Core\Rollback\Perf.cpp" />
+    <ClCompile Include="Core\Rollback\RollbackManager.cpp" />
     <ClCompile Include="GP.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -1817,6 +1821,11 @@
     <ClInclude Include="Core\Brawlback\include\json.hpp" />
     <ClInclude Include="Core\Brawlback\TimeSync.h" />
     <ClInclude Include="Core\HW\EXI\EXI_Brawlback.h" />
+    <ClInclude Include="Core\Rollback\DeltaSaveSlot.h" />
+    <ClInclude Include="Core\Rollback\FullMemcpySaveSlot.h" />
+    <ClInclude Include="Core\Rollback\IRollbackSaveSlot.h" />
+    <ClInclude Include="Core\Rollback\Perf.h" />
+    <ClInclude Include="Core\Rollback\RollbackManager.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Core\Brawlback\include\brawlback-common\.git" />
