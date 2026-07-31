@@ -467,14 +467,14 @@ PRIVATE
 )
 
 if(ENABLE_SDL)
-  target_link_libraries(dolphin-emu
+  target_link_libraries(project-plus-dolphin
   PRIVATE
     SDL3::SDL3
   )
 endif()
 
 if (NEED_QT_GUI_PRIVATE_COMPONENT)
-  target_link_libraries(dolphin-emu
+  target_link_libraries(project-plus-dolphin
   PRIVATE
     Qt6::GuiPrivate
   )
@@ -510,7 +510,7 @@ endif()
 
 if (NOT APPLE AND NOT ANDROID)
   # Symlink Sys
-  add_custom_command(TARGET dolphin-emu POST_BUILD
+  add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
       -Dtarget="${CMAKE_SOURCE_DIR}/Data/Sys"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
@@ -518,7 +518,7 @@ if (NOT APPLE AND NOT ANDROID)
   )
 
   # Symlink COPYING
-  add_custom_command(TARGET dolphin-emu POST_BUILD
+  add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
       -Dtarget="${CMAKE_SOURCE_DIR}/COPYING"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/COPYING"
@@ -526,7 +526,7 @@ if (NOT APPLE AND NOT ANDROID)
   )
 
   # Symlink Licenses dir
-  add_custom_command(TARGET dolphin-emu POST_BUILD
+  add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
       -Dtarget="${CMAKE_SOURCE_DIR}/LICENSES"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Licenses"
@@ -535,7 +535,7 @@ if (NOT APPLE AND NOT ANDROID)
 endif()
 if (WIN32)
   # Symlink qt.conf
-  add_custom_command(TARGET dolphin-emu POST_BUILD
+  add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
       -Dtarget="${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/qt.conf"
@@ -544,7 +544,7 @@ if (WIN32)
 
   if (ENABLE_AUTOUPDATE)
     # Symlink build_info.txt
-    add_custom_command(TARGET dolphin-emu POST_BUILD
+    add_custom_command(TARGET project-plus-dolphin POST_BUILD
       COMMAND ${CMAKE_COMMAND}
         -Dtarget="${CMAKE_BINARY_DIR}/build_info.txt"
         -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
@@ -553,9 +553,9 @@ if (WIN32)
   endif()
 
 
-  target_sources(dolphin-emu PRIVATE DolphinQt.manifest DolphinQt.rc)
+  target_sources(project-plus-dolphin PRIVATE DolphinQt.manifest DolphinQt.rc)
 
-  set_target_properties(dolphin-emu PROPERTIES
+  set_target_properties(project-plus-dolphin PROPERTIES
     DEBUG_POSTFIX    D
     OUTPUT_NAME      Dolphin
     WIN32_EXECUTABLE TRUE
