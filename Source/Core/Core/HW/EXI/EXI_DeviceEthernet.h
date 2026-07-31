@@ -11,17 +11,16 @@
 #include "SFML/Network/IpAddress.hpp"
 
 #ifdef _WIN32
-#include <Windows.h>
+#include <windows.h>
 #endif
 
 #include <SFML/Network.hpp>
-#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#ifdef HAVE_CPPIPC
 #include <libipc/ipc.h>
 #endif
 
 #include "Common/Flag.h"
 #include "Common/Network.h"
-#include "Common/SocketContext.h"
 #include "Core/HW/EXI/BBA/BuiltIn.h"
 #include "Core/HW/EXI/BBA/TAPServerConnection.h"
 #include "Core/HW/EXI/EXI_Device.h"
@@ -464,7 +463,7 @@ private:
     Common::Flag m_read_thread_shutdown;
     static void ReadThreadHandler(BuiltInBBAInterface* self);
 #endif
-    void WriteToQueue(const std::vector<u8>& data);
+    void WriteToQueue(std::vector<u8> data);
     bool WillQueueOverrun() const;
     void PollData(std::size_t* datasize);
     std::optional<std::vector<u8>> TryGetDataFromSocket(StackRef* ref);
@@ -483,7 +482,7 @@ private:
   public:
     explicit IPCBBAInterface(CEXIETHERNET* const eth_ref) : NetworkInterface(eth_ref) {}
 
-#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+#ifdef HAVE_CPPIPC
 
     bool Activate() override;
     void Deactivate() override;

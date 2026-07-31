@@ -77,7 +77,7 @@ std::vector<InterfaceDescriptor> WiiSpeak::GetInterfaces(u8 config) const
   return m_interface_descriptor;
 }
 
-std::vector<EndpointDescriptor> WiiSpeak::GetEndpoints(u8 config, u8 interface, u8 alt) const
+std::vector<EndpointDescriptor> WiiSpeak::GetEndpoints(u8 config, u8 iface, u8 alt) const
 {
   return m_endpoint_descriptor;
 }
@@ -97,13 +97,13 @@ bool WiiSpeak::Attach()
   return true;
 }
 
-bool WiiSpeak::AttachAndChangeInterface(const u8 interface)
+bool WiiSpeak::AttachAndChangeInterface(const u8 iface)
 {
   if (!Attach())
     return false;
 
-  if (interface != m_active_interface)
-    return ChangeInterface(interface) == 0;
+  if (iface != m_active_interface)
+    return ChangeInterface(iface) == 0;
 
   return true;
 }
@@ -116,15 +116,15 @@ int WiiSpeak::CancelTransfer(const u8 endpoint)
   return IPC_SUCCESS;
 }
 
-int WiiSpeak::ChangeInterface(const u8 interface)
+int WiiSpeak::ChangeInterface(const u8 iface)
 {
   DEBUG_LOG_FMT(IOS_USB, "[{:04x}:{:04x} {}] Changing interface to {}", m_vid, m_pid,
-                m_active_interface, interface);
-  m_active_interface = interface;
+                m_active_interface, iface);
+  m_active_interface = iface;
   return 0;
 }
 
-int WiiSpeak::GetNumberOfAltSettings(u8 interface)
+int WiiSpeak::GetNumberOfAltSettings(u8 iface)
 {
   return 0;
 }
@@ -241,10 +241,10 @@ int WiiSpeak::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
     u16 size = 0;
     if (m_microphone && m_microphone->HasData(cmd->length / sizeof(s16)))
       size = m_microphone->ReadIntoBuffer(packets, cmd->length);
-    for (std::size_t i = 0; i < cmd->num_packets; i++)
+    if (const u16 remainder = cmd->SetPacketsReturnValueFromSize(size); remainder != 0)
     {
-      cmd->SetPacketReturnValue(i, std::min(size, cmd->packet_sizes[i]));
-      size = (size > cmd->packet_sizes[i]) ? (size - cmd->packet_sizes[i]) : 0;
+      WARN_LOG_FMT(IOS_USB, "Wii Speak data truncated, {} byte(s) lost in isochronous message",
+                   remainder);
     }
     break;
   }

@@ -4,7 +4,6 @@
 #include <cstring>
 #include <disasm.h>  // From Bochs, fallback included in Externals.
 #include <gtest/gtest.h>
-#include <map>
 #include <memory>
 #include <vector>
 
@@ -192,7 +191,7 @@ protected:
     ResetCodeBuffer();
   }
 
-  void ExpectBytes(const std::vector<u8> expected_bytes)
+  void ExpectBytes(const std::vector<u8>& expected_bytes)
   {
     const std::vector code_bytes(code_buffer, emitter->GetWritableCodePtr());
 

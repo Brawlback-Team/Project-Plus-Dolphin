@@ -4,7 +4,7 @@
 // IMPORTANT: UI etc should modify g_Config. Graphics code should read g_ActiveConfig.
 // The reason for this is to get rid of race conditions etc when the configuration
 // changes in the middle of a frame. This is done by copying g_Config to g_ActiveConfig
-// at the start of every frame. Noone should ever change members of g_ActiveConfig
+// at the start of every frame. No one should ever change members of g_ActiveConfig
 // directly.
 
 #pragma once
@@ -35,8 +35,8 @@ enum class AspectMode : int
 enum class StereoMode : int
 {
   Off,
-  SBS,
-  TAB,
+  SideBySide,
+  TopAndBottom,
   Anaglyph,
   QuadBuffer,
   Passive
@@ -208,7 +208,12 @@ struct VideoConfig final
   float widescreen_heuristic_aspect_ratio_slop = 0.f;
   float widescreen_heuristic_standard_ratio = 0.f;
   float widescreen_heuristic_widescreen_ratio = 0.f;
-  bool bCrop = false;  // Aspect ratio controls.
+  bool bCropToAspectRatio = false;
+  bool bCropCustom = false;
+  int iCropCustomLeft = 0;
+  int iCropCustomTop = 0;
+  int iCropCustomRight = 0;
+  int iCropCustomBottom = 0;
   bool bShaderCache = false;
 
   // Enhancements
@@ -257,6 +262,7 @@ struct VideoConfig final
   bool bOverlayStats = false;
   bool bOverlayProjStats = false;
   bool bOverlayScissorStats = false;
+  bool bShowInternalResolution = false;
   bool bTexFmtOverlayEnable = false;
   bool bTexFmtOverlayCenter = false;
   bool bLogRenderTimeToFile = false;
@@ -366,7 +372,8 @@ struct VideoConfig final
   }
   bool UseGPUTextureDecoding() const
   {
-    return g_backend_info.bSupportsGPUTextureDecoding && bEnableGPUTextureDecoding;
+    return g_backend_info.bSupportsGPUTextureDecoding && bEnableGPUTextureDecoding &&
+           !bArbitraryMipmapDetection;
   }
   bool UseVertexRounding() const { return bVertexRounding && iEFBScale != 1; }
   bool ManualTextureSamplingWithCustomTextureSizes() const

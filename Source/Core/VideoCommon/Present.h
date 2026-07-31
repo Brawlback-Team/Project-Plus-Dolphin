@@ -61,6 +61,15 @@ public:
 
   void UpdateDrawRectangle();
 
+  // Get the amount of pixels the given rect should be cropped on all sides from custom cropping.
+  MathUtil::Rectangle<int> GetCustomCrop(const MathUtil::Rectangle<int>& rect) const;
+
+  // Crop the given rectangle by the custom cropping.
+  MathUtil::Rectangle<int> AdjustForCustomCrop(const MathUtil::Rectangle<int>& rect) const;
+
+  // Modify an aspect ratio by the aspect ratio change that custom cropping will apply.
+  float AdjustAspectRatioForCustomCrop(float input_aspect_ratio) const;
+
   // Returns the target aspect ratio the XFB output should be drawn with.
   float CalculateDrawAspectRatio(bool allow_stretch = true) const;
 
@@ -169,6 +178,7 @@ private:
   u32 m_last_xfb_height = MAX_XFB_HEIGHT;
 
   Common::EventHook m_config_changed;
+  Common::EventHook m_end_field_hook;
 
   // Updates state for the SmoothEarlyPresentation setting if enabled.
   // Returns the desired presentation time regardless.
@@ -181,6 +191,8 @@ private:
   // Can be used for presentation of ImmediateXFB swaps which don't have timing information.
   u64 m_next_swap_estimated_ticks = 0;
   TimePoint m_next_swap_estimated_time{Clock::now()};
+
+  std::atomic_bool m_immediate_swap_happened_this_field{};
 };
 
 }  // namespace VideoCommon

@@ -98,7 +98,7 @@ public:
   void AbortGameDigest() override;
 
   void ShowChunkedProgressDialog(const std::string& title, u64 data_size,
-                                 const std::vector<int>& players) override;
+                                 std::span<const int> players) override;
   void HideChunkedProgressDialog() override;
   void SetChunkedProgress(int pid, u64 progress) override;
 

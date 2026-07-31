@@ -103,10 +103,22 @@ public:
   /// from.
   /// @param size Size of the region to map.
   /// @param base Address within the memory region from ReserveMemoryRegion() where to map it.
+  /// @param writeable Whether the region should be both readable and writeable, or just readable.
   ///
   /// @return The address we actually ended up mapping, which should be the given 'base'.
   ///
-  void* MapInMemoryRegion(s64 offset, size_t size, void* base);
+  void* MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable);
+
+  ///
+  /// Changes whether a section mapped by MapInMemoryRegion is writeable.
+  ///
+  /// @param view The address returned by MapInMemoryRegion.
+  /// @param size The size passed to MapInMemoryRegion.
+  /// @param writeable Whether the region should be both readable and writeable, or just readable.
+  ///
+  /// @return Whether the operation succeeded.
+  ///
+  bool ChangeMappingProtection(void* view, size_t size, bool writeable);
 
   ///
   /// Unmap a memory region previously mapped with MapInMemoryRegion().
@@ -116,15 +128,10 @@ public:
   ///
   void UnmapFromMemoryRegion(void* view, size_t size);
 
-  // Brawlback
   ///
-  /// Virtual protect a section from the memory region previously mapped by CreateView.
+  /// Return the system's page size or required page alignment, whichever is larger.
   ///
-  /// @param data Pointer to data to protect.
-  /// @param size Size of the protection.
-  /// @param flag What new permission to protect with.
-  ///
-  bool VirtualProtectMemoryRegion(void* data, size_t size, u32 flag);
+  size_t GetPageSize() const;
 
 private:
 #ifdef _WIN32
@@ -195,6 +202,14 @@ public:
     const size_t block_index = offset / BLOCK_SIZE;
     if (m_writable_block_handles[block_index] == nullptr)
       MakeMemoryBlockWritable(block_index);
+#endif
+  }
+
+  void EnsureMemoryPagesWritable(size_t offset, size_t size)
+  {
+#ifdef _WIN32
+    for (const auto end_offset = offset + size; offset < end_offset; offset += BLOCK_SIZE)
+      EnsureMemoryPageWritable(offset);
 #endif
   }
 

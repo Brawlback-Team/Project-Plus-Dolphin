@@ -16,7 +16,6 @@ class GCPadWiiUConfigDialog final : public QDialog
   Q_OBJECT
 public:
   explicit GCPadWiiUConfigDialog(int port, QWidget* parent = nullptr);
-  ~GCPadWiiUConfigDialog() override;
 
 private:
   void LoadSettings();
@@ -34,7 +33,6 @@ private:
   QVBoxLayout* m_layout;
   QLabel* m_status_label;
   QLabel* m_poll_rate_label;
-  QTimer* m_poll_rate_timer;
   QDialogButtonBox* m_button_box;
 
   // Checkboxes

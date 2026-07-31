@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <expected>
 #include <memory>
 #include <string>
 #include <utility>
@@ -25,7 +26,6 @@
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "DiscIO/Blob.h"
-#include "DiscIO/DiscScrubber.h"
 #include "DiscIO/MultithreadedCompressor.h"
 #include "DiscIO/Volume.h"
 
@@ -33,8 +33,8 @@ namespace DiscIO
 {
 bool IsGCZBlob(File::DirectIOFile& file);
 
-CompressedBlobReader::CompressedBlobReader(File::DirectIOFile file, const std::string& filename)
-    : m_file(std::move(file)), m_file_name(filename)
+CompressedBlobReader::CompressedBlobReader(File::DirectIOFile file, std::string filename)
+    : m_file(std::move(file)), m_file_name(std::move(filename))
 {
   m_file_size = m_file.GetSize();
   m_file.Seek(0, File::SeekOrigin::Begin);
@@ -210,7 +210,7 @@ static ConversionResult<OutputParameters> Compress(CompressThreadState* state,
   if (retval != Z_OK)
   {
     ERROR_LOG_FMT(DISCIO, "Deflate failed");
-    return ConversionResultCode::InternalError;
+    return std::unexpected{ConversionResultCode::InternalError};
   }
 
   const int status = deflate(&state->z, Z_FINISH);

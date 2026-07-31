@@ -6,11 +6,8 @@
 #include <SFML/Network/Packet.hpp>
 
 #include <map>
-#include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
-#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,7 +21,6 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/SyncIdentifier.h"
-#include "InputCommon/GCPadStatus.h"
 #include "UICommon/NetPlayIndex.h"
 
 namespace NetPlay

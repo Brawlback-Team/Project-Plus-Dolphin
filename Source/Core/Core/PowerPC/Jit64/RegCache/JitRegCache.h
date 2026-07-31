@@ -11,7 +11,6 @@
 
 #include "Common/x64Emitter.h"
 #include "Core/PowerPC/Jit64/RegCache/CachedReg.h"
-#include "Core/PowerPC/PPCAnalyst.h"
 
 class Jit64;
 enum class RCMode;
@@ -49,9 +48,9 @@ public:
 
   void Unlock();
 
-  bool IsImm() const;
-  s32 SImm32() const;
-  u32 Imm32() const;
+  bool IsImm() const { return Location().IsImm(); }
+  s32 SImm32() const { return Location().SImm32(); }
+  u32 Imm32() const { return Location().Imm32(); }
   bool IsZero() const { return IsImm() && Imm32() == 0; }
 
 private:
@@ -122,8 +121,11 @@ class RegCache
 public:
   enum class FlushMode
   {
+    // All dirty registers get written back, and all registers get removed from the cache.
     Full,
-    MaintainState,
+    // All dirty registers get written back and get set as no longer dirty.
+    // No registers are removed from the cache.
+    Undirty,
   };
 
   enum class IgnoreDiscardedRegisters
@@ -176,7 +178,7 @@ public:
 
   RCForkGuard Fork();
   void Discard(BitSet32 pregs);
-  void Flush(BitSet32 pregs = BitSet32::AllTrue(32),
+  void Flush(BitSet32 pregs = BitSet32::AllTrue(32), FlushMode mode = FlushMode::Full,
              IgnoreDiscardedRegisters ignore_discarded_registers = IgnoreDiscardedRegisters::No);
   void Reset(BitSet32 pregs);
   void Revert();

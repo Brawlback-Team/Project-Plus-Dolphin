@@ -4,7 +4,6 @@
 #include "DiscIO/RiivolutionPatcher.h"
 
 #include <algorithm>
-#include <locale>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,7 +17,6 @@
 #include "Core/Core.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HW/Memmap.h"
-#include "Core/IOS/FS/FileSystem.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/System.h"
 #include "DiscIO/DirectoryBlob.h"
@@ -62,7 +60,7 @@ FileDataLoaderHostFS::MakeAbsoluteFromRelative(std::string_view external_relativ
 #ifdef _WIN32
   // Riivolution treats a backslash as just a standard filename character, but we can't replicate
   // this properly on Windows. So if a file contains a backslash, immediately error out.
-  if (external_relative_path.find("\\") != std::string_view::npos)
+  if (external_relative_path.contains("\\"))
     return std::nullopt;
 #endif
 

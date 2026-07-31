@@ -36,6 +36,7 @@ void OnScreenDisplayPane::CreateLayout()
   general_layout->addWidget(m_enable_osd, 0, 0);
   general_layout->addWidget(m_checkbox_adapter_warning, 0, 1);
   general_layout->addWidget(new QLabel(tr("Font Size:")), 1, 0);
+  m_font_size->SetTitle(tr("Font Size"));
   general_layout->addWidget(m_font_size, 1, 1);
 
   // Performance
@@ -50,9 +51,7 @@ void OnScreenDisplayPane::CreateLayout()
   m_show_speed = new ConfigBool(tr("Show % Speed"), Config::GFX_SHOW_SPEED);
   m_show_graph = new ConfigBool(tr("Show Performance Graphs"), Config::GFX_SHOW_GRAPHS);
   m_speed_colors = new ConfigBool(tr("Show Speed Colors"), Config::GFX_SHOW_SPEED_COLORS);
-  auto* const perf_sample_window_label = new QLabel(tr("Performance Sample Window (ms)"));
   m_perf_sample_window = new ConfigInteger(0, 10000, Config::GFX_PERF_SAMP_WINDOW, 100);
-  m_perf_sample_window->SetTitle(perf_sample_window_label->text());
 
   performance_layout->addWidget(m_show_fps, 0, 0);
   performance_layout->addWidget(m_show_ftimes, 0, 1);
@@ -61,7 +60,8 @@ void OnScreenDisplayPane::CreateLayout()
   performance_layout->addWidget(m_show_speed, 2, 0);
   performance_layout->addWidget(m_show_graph, 2, 1);
   performance_layout->addWidget(m_speed_colors, 3, 0);
-  performance_layout->addWidget(perf_sample_window_label, 4, 0);
+  performance_layout->addWidget(new QLabel(tr("Performance Sample Window (ms):")), 4, 0);
+  m_perf_sample_window->SetTitle(tr("Performance Sample Window (ms)"));
   performance_layout->addWidget(m_perf_sample_window, 4, 1);
 
   // Movie
@@ -103,9 +103,12 @@ void OnScreenDisplayPane::CreateLayout()
   m_show_statistics = new ConfigBool(tr("Show Statistics"), Config::GFX_OVERLAY_STATS);
   m_show_proj_statistics =
       new ConfigBool(tr("Show Projection Statistics"), Config::GFX_OVERLAY_PROJ_STATS);
+  m_show_internal_resolution =
+      new ConfigBool(tr("Show XFB Resolution"), Config::GFX_SHOW_INTERNAL_RESOLUTION);
 
   debug_layout->addWidget(m_show_statistics, 0, 0);
   debug_layout->addWidget(m_show_proj_statistics, 0, 1);
+  debug_layout->addWidget(m_show_internal_resolution, 1, 0);
 
   // Stack GroupBoxes
   auto* main_layout = new QVBoxLayout;
@@ -226,6 +229,10 @@ void OnScreenDisplayPane::AddDescriptions()
   static const char TR_SHOW_PROJ_STATS_DESCRIPTION[] =
       QT_TR_NOOP("Shows various projection statistics.<br><br><dolphin_emphasis>If unsure, "
                  "leave this unchecked.</dolphin_emphasis>");
+  static const char TR_SHOW_INTERNAL_RESOLUTION_DESCRIPTION[] =
+      QT_TR_NOOP("Shows the size of the emulated external frame buffer (XFB) in pixels, as a "
+                 "product of width and height.<br><br><dolphin_emphasis>If unsure, leave this "
+                 "unchecked.</dolphin_emphasis>");
 
   m_enable_osd->SetDescription(tr(TR_ENABLE_OSD_DESCRIPTION));
   m_checkbox_adapter_warning->SetDescription(tr(TR_ADAPTER_WARNING_DESCRIPTION));
@@ -252,4 +259,5 @@ void OnScreenDisplayPane::AddDescriptions()
 
   m_show_statistics->SetDescription(tr(TR_SHOW_STATS_DESCRIPTION));
   m_show_proj_statistics->SetDescription(tr(TR_SHOW_PROJ_STATS_DESCRIPTION));
+  m_show_internal_resolution->SetDescription(tr(TR_SHOW_INTERNAL_RESOLUTION_DESCRIPTION));
 }

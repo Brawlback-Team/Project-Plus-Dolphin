@@ -3,8 +3,6 @@
 
 #include "DolphinQt/Settings/GeneralPane.h"
 
-#include <map>
-
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
@@ -18,10 +16,8 @@
 #include "Core/AchievementManager.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/UISettings.h"
-#include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
-#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
@@ -38,11 +34,14 @@
 #endif
 
 constexpr int AUTO_UPDATE_DISABLE_INDEX = 0;
-constexpr int AUTO_UPDATE_BETA_INDEX = 1;
+constexpr int AUTO_UPDATE_RELEASE_INDEX = 1;
 constexpr int AUTO_UPDATE_DEV_INDEX = 2;
 
 constexpr const char* AUTO_UPDATE_DISABLE_STRING = "";
-constexpr const char* AUTO_UPDATE_BETA_STRING = "beta";
+// Before the official switch to the rolling release cycle in 2407, de facto releases were called
+// beta builds. To maintain backward compatibility and let users update from those builds to current
+// releases the value of this string remains "beta".
+constexpr const char* AUTO_UPDATE_RELEASE_STRING = "beta";
 constexpr const char* AUTO_UPDATE_DEV_STRING = "dev";
 
 constexpr int FALLBACK_REGION_NTSCJ_INDEX = 0;
@@ -90,6 +89,7 @@ void GeneralPane::OnEmulationStateChanged(Core::State state)
 
   m_checkbox_dualcore->setEnabled(!running);
   m_checkbox_cheats->setEnabled(!running);
+  m_checkbox_load_games_into_memory->setEnabled(!running);
   m_checkbox_override_region_settings->setEnabled(!running);
 #ifdef USE_DISCORD_PRESENCE
   m_checkbox_discord_presence->setEnabled(!running);
@@ -119,7 +119,6 @@ void GeneralPane::ConnectLayout()
   connect(m_combobox_speedlimit, &QComboBox::currentIndexChanged, [this] {
     Config::SetBaseOrCurrent(Config::MAIN_EMULATION_SPEED,
                              m_combobox_speedlimit->currentIndex() * 0.1f);
-    Config::Save();
   });
 
   connect(m_combobox_fallback_region, &QComboBox::currentIndexChanged, this,
@@ -146,6 +145,16 @@ void GeneralPane::CreateBasic()
 
   m_checkbox_cheats = new ConfigBool(tr("Enable Cheats"), Config::MAIN_ENABLE_CHEATS);
   basic_group_layout->addWidget(m_checkbox_cheats);
+
+  m_checkbox_load_games_into_memory =
+      new ConfigBool(tr("Load Whole Game Into Memory"), Config::MAIN_LOAD_GAME_INTO_MEMORY);
+  basic_group_layout->addWidget(m_checkbox_load_games_into_memory);
+  m_checkbox_load_games_into_memory->SetDescription(
+      tr("Loads the running game into memory in the background."
+         "<br><br>This may improve performance with slow or high-latency storage."
+         "<br>System memory requirements will be much higher with this setting enabled."
+         "<br><br><dolphin_emphasis>If unsure, leave this unchecked.</dolphin_emphasis>"));
+
   m_checkbox_override_region_settings =
       new ConfigBool(tr("Allow Mismatched Region Settings"), Config::MAIN_OVERRIDE_REGION_SETTINGS);
   basic_group_layout->addWidget(m_checkbox_override_region_settings);
@@ -253,8 +262,8 @@ void GeneralPane::LoadConfig()
     else if (track == AUTO_UPDATE_DEV_STRING)
       SignalBlocking(m_combobox_update_track)->setCurrentIndex(AUTO_UPDATE_DEV_INDEX);
     else
-      SignalBlocking(m_combobox_update_track)->setCurrentIndex(AUTO_UPDATE_BETA_INDEX);
-  } */ // disabled for P+ updater
+      SignalBlocking(m_combobox_update_track)->setCurrentIndex(AUTO_UPDATE_RELEASE_INDEX);
+  }
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
   SignalBlocking(m_checkbox_enable_analytics)
@@ -291,8 +300,8 @@ static QString UpdateTrackFromIndex(int index)
   case AUTO_UPDATE_DISABLE_INDEX:
     value = QString::fromStdString(AUTO_UPDATE_DISABLE_STRING);
     break;
-  case AUTO_UPDATE_BETA_INDEX:
-    value = QString::fromStdString(AUTO_UPDATE_BETA_STRING);
+  case AUTO_UPDATE_RELEASE_INDEX:
+    value = QString::fromStdString(AUTO_UPDATE_RELEASE_STRING);
     break;
   case AUTO_UPDATE_DEV_INDEX:
     value = QString::fromStdString(AUTO_UPDATE_DEV_STRING);
@@ -331,8 +340,7 @@ void GeneralPane::OnSaveConfig()
 {
   Config::ConfigChangeCallbackGuard config_guard;
 
-  auto& settings = SConfig::GetInstance();
-  /* if (AutoUpdateChecker::SystemSupportsAutoUpdates())
+  if (AutoUpdateChecker::SystemSupportsAutoUpdates())
   {
     Settings::Instance().SetAutoUpdateTrack(
         UpdateTrackFromIndex(m_combobox_update_track->currentIndex()));
@@ -348,8 +356,6 @@ void GeneralPane::OnSaveConfig()
 #endif
   Settings::Instance().SetFallbackRegion(
       UpdateFallbackRegionFromIndex(m_combobox_fallback_region->currentIndex()));
-
-  settings.SaveSettings();
 }
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
