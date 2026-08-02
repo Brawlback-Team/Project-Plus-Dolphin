@@ -522,11 +522,11 @@ void RollbackManager::SaveFrame(Core::System& system)
 #endif
 }
 
-void RollbackManager::LoadFrame(Core::System& system, int frames_back)
+bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
 {
   ROLLBACK_ZONE();
   if (!m_initialized)
-    return;
+    return false;
 
   ASSERT(frames_back >= 1 && m_ring_count >= 2 && frames_back < m_ring_count &&
          frames_back <= Rollback::NUM_SAVE_SLOTS - 1);
@@ -760,6 +760,7 @@ void RollbackManager::LoadFrame(Core::System& system, int frames_back)
     ERROR_LOG_FMT(BRAWLBACK, "Rollback failed");
     OSD::AddMessage("Rollback state load failed", 3000, OSD::Color::RED);
   }
+  return ok;
 }
 
 }  // namespace Rollback

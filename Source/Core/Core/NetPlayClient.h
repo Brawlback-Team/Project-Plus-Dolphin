@@ -66,7 +66,6 @@ public:
   virtual void OnPlayerPadBufferChanged(u32 buffer) = 0;
   virtual void OnRollbackModeChanged(bool enabled) = 0;
   virtual bool IsSpectator() = 0;
-  virtual void OnPadBufferChanged(u32 buffer) = 0;
   virtual void OnHostInputAuthorityChanged(bool enabled) = 0;
   virtual void OnDesync(u32 frame, const std::string& player) = 0;
   virtual void OnConnectionLost() = 0;

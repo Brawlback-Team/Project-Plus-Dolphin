@@ -8,6 +8,7 @@
 #include "Core/GeckoCode.h"
 #include "Core/HW/CPU.h"
 #include "Core/Host.h"
+#include "Core/NetPlayClient.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -78,5 +79,10 @@ void GeckoReturnTrampoline(const Core::CPUThreadGuard& guard)
         PowerPC::MMU::HostRead<u64>(guard, SP + 24 + 2 * i * sizeof(u64)),
         PowerPC::MMU::HostRead<u64>(guard, SP + 24 + (2 * i + 1) * sizeof(u64)));
   }
+}
+
+void BrawlbackHandler(const Core::CPUThreadGuard& guard)
+{
+  NetPlay::OnFrameEnd();
 }
 }  // namespace HLE_Misc

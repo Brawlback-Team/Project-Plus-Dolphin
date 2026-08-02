@@ -14,7 +14,7 @@
 #include "job.h"
 
 // Set to 1 to enable full-RAM shadow snapshots for rollback validation
-#define ROLLBACK_VALIDATE DEV_DESYNC_MODE
+#define ROLLBACK_VALIDATE 1
 
 namespace Core
 {
@@ -43,7 +43,7 @@ public:
   void Shutdown();
 
   void SaveFrame(Core::System& system);
-  void LoadFrame(Core::System& system, int frames_back = 1);
+  bool LoadFrame(Core::System& system, int frames_back = 1);
 
   void AddExcludeRegion(uint32_t virt_addr, uint32_t size_bytes);
 
