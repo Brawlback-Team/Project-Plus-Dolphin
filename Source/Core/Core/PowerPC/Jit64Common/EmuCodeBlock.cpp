@@ -148,7 +148,6 @@ static void FailedDirtyBitmapBoundsCheck()
 
 void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset)
 {
-#ifdef _WIN32
   // dirty_bitmap[(effective_addr + offset) & 0x1FFFFFFF >> 12] = 1
 
   PUSH(RSCRATCH);   // RAX
@@ -183,7 +182,6 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset)
 
   POP(RSCRATCH2);
   POP(RSCRATCH);
-#endif
 }
 void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int accessSize, s32 offset,
                                        bool swap, MovInfo* info)

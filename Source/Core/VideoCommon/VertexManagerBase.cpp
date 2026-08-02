@@ -44,6 +44,7 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 #include "Core/NetPlayClient.h"
+#include "VideoState.h"
 
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 
@@ -681,7 +682,7 @@ void VertexManagerBase::Flush()
 
 void VertexManagerBase::DoState(PointerWrap& p)
 {
-  if (p.IsReadMode())
+  if (p.IsReadMode() && !VideoCommon_GetSkipVertexFlushForRollback())
   {
     // Flush old vertex data before loading state.
     Flush();

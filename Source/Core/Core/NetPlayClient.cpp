@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <functional>
-#include <iomanip>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -17,14 +17,9 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <latch>
-#include <optional>
-#include <ranges>
-#include <chrono>
-#include <map>
+
 #include <fmt/format.h>
 #include <fmt/ranges.h>
-#include <boost/icl/interval_set.hpp>
 
 #include "Common/Assert.h"
 #include "Common/CommonPaths.h"
@@ -42,7 +37,6 @@
 
 #include "Core/ActionReplay.h"
 #include "Core/Boot/Boot.h"
-#include "Core/Core.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/NetplaySettings.h"
@@ -52,14 +46,12 @@
 #include "Core/GeckoCode.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
-
 #ifdef HAS_LIBMGBA
 #include "Core/HW/GBACore.h"
 #endif
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GCMemcard/GCMemcard.h"
 #include "Core/HW/GCPad.h"
-#include "Core/HW/Memmap.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/HW/SI/SI_DeviceAMBaseboard.h"
@@ -76,443 +68,27 @@
 #include "Core/NetPlayCommon.h"
 #include "Core/SyncIdentifier.h"
 #include "Core/System.h"
-#include "Core/PowerPC/CPUCoreBase.h"
-#include "Core/PowerPC/JitInterface.h"
-#include "Core/State.h"
-#ifdef _WIN32
-#include "Core/Rollback/RollbackManager.h"
-#endif
 #include "DiscIO/Blob.h"
 
 #include "InputCommon/GCAdapter.h"
 #include "UICommon/GameFile.h"
 #include "VideoCommon/OnScreenDisplay.h"
+#include "VideoCommon/VideoEvents.h"
 
-namespace FullMemoryRB
-{
-  // Custom deleter for aligned memory
-  struct AlignedMemoryDeleter
-  {
-    void operator()(u8* ptr) const
-    {
-      if (ptr != nullptr)
-        Common::FreeAlignedMemory(ptr);
-    }
-  };
-
-  struct MemorySegment
-  {
-    u32 address;    // Start address of this segment
-    u32 size;       // Size of this segment
-    std::unique_ptr<u8[], AlignedMemoryDeleter> data;  // The actual data (aligned memory)
-
-    MemorySegment() : address(0), size(0), data(nullptr) {}
-
-    MemorySegment(MemorySegment&&) noexcept = default;
-    MemorySegment& operator=(MemorySegment&&) noexcept = default;
-
-    void AllocateIfNeeded()
-    {
-      if (!data && size > 0)
-      {
-        data.reset(static_cast<u8*>(Common::AllocateAlignedMemory(size, 64)));
-      }
-    }
-
-    u8* GetData() { return data.get(); }
-    const u8* GetData() const { return data.get(); }
-  };
-
-  struct Savestate
-  {
-    std::vector<MemorySegment> mem1_segments = {};
-    std::vector<MemorySegment> mem2_segments = {};
-    Common::UniqueBuffer<u8> core_state;
-    Common::UniqueBuffer<u8> l1_cache;
-    u32 frame = 0;
-    bool valid = false;
-  };
-
-  struct SavestateInfo
-  {
-    Savestate savestates[MAX_SAVESTATES] = {};
-  };
-
-  SavestateInfo savestateInfo;
-
-  // Excluded regions list - matches incremental_rb.cpp
-  struct ExcludedRegion
-  {
-    u32 address;
-    u32 size;
-  };
-
-  static const std::vector<ExcludedRegion> excluded_regions = {
-    // Main Stack
-    {0x805a5154, 0x805b5158 - 0x805a5154},
-    // Heaps
-    {0x817ba5a0, 0x817ca5a0 - 0x817ba5a0}, // Syringe
-    {0x94000000, 0x3FBFFFF},                // SavestateHeap
-    {0x805d1e60, 0x00040100},              // RenderFifo
-    {0x9134cc00, 0x0012c200},              // CopyFB
-    {0x805ca260, 0x00007c00},              // Thread
-    {0x90199800, 0x00cc7c00},              // Sound
-  };
-}
-
-namespace
-{
-struct ScopedRollbackDoState
-{
-  ScopedRollbackDoState()
-  {
-#ifdef _WIN32
-    Rollback::RollbackManager::Get().BeginDoState();
-#endif
-  }
-
-  ~ScopedRollbackDoState()
-  {
-#ifdef _WIN32
-    Rollback::RollbackManager::Get().EndDoState();
-#endif
-  }
-};
-
-bool SaveRollbackSystemState(Core::System& system, FullMemoryRB::Savestate& savestate)
-{
-  auto& rm = Rollback::RollbackManager::Get();
-  if (rm.IsInitialized())
-  {
-    rm.ToggleFrameSave();
-    return true;
-  }
-  return false;
-}
-
-bool LoadRollbackSystemState(Core::System& system, FullMemoryRB::Savestate& savestate)
-{
-  auto& rm = Rollback::RollbackManager::Get();
-  if (rm.IsInitialized())
-  {
-    rm.LoadFrame(system, Rollback::NUM_SAVE_SLOTS);
-    return true;
-  }
-  return false;
-}
-}  // namespace
+#include "Rollback/RollbackManager.h"
 
 namespace NetPlay
 {
 using namespace WiimoteCommon;
 
-// Forward declarations for GekkoNet integration
-void QueueGekkoPacket(const u8* data, size_t length, PlayerId from_player);
-
-struct CoreRollbackRunFrameStats
-{
-  long long totalUs = 0;
-  long long r4300Us = 0;
-  long long viUs = 0;
-  long long newFrameUs = 0;
-  long long cheatsUs = 0;
-  long long pacingUs = 0;
-  long long inputUs = 0;
-  long long pauseUs = 0;
-  long long netplayUs = 0;
-  int dynarecRecompileCount = 0;
-  long long dynarecRecompileUs = 0;
-  long long dynarecInvalidateUs = 0;
-  int dynarecFullInvalidateCount = 0;
-  int dynarecRangeInvalidateCount = 0;
-  int dynarecBlockInvalidateCount = 0;
-  int dynarecVerifyDirtyCount = 0;
-  long long dynarecVerifyDirtyUs = 0;
-  int dynarecGetAddrCount = 0;
-  long long dynarecGetAddrUs = 0;
-  int dynarecGetAddrHtCount = 0;
-  int dynarecGetAddr32Count = 0;
-  int dynarecDynamicLinkerCount = 0;
-  long long dynarecDynamicLinkerUs = 0;
-  int dynarecDynamicLinkerDsCount = 0;
-  long long dynarecDynamicLinkerDsUs = 0;
-  int cachedCodeFullInvalidateCount = 0;
-  int cachedCodeRangeInvalidateCount = 0;
-  int interruptCount = 0;
-  long long interruptUs = 0;
-  long long interruptMaxUs = 0;
-  int interruptMaxType = 0;
-  int interruptViCount = 0;
-  long long interruptViUs = 0;
-  int interruptCompareCount = 0;
-  long long interruptCompareUs = 0;
-  int interruptCheckCount = 0;
-  long long interruptCheckUs = 0;
-  int interruptSiCount = 0;
-  long long interruptSiUs = 0;
-  int interruptPiCount = 0;
-  long long interruptPiUs = 0;
-  int interruptAiCount = 0;
-  long long interruptAiUs = 0;
-  int interruptSpCount = 0;
-  long long interruptSpUs = 0;
-  int interruptDpCount = 0;
-  long long interruptDpUs = 0;
-  int interruptRspDmaCount = 0;
-  long long interruptRspDmaUs = 0;
-  int interruptRspTaskCount = 0;
-  long long interruptRspTaskUs = 0;
-  int aiSetFrequencyCount = 0;
-  long long aiSetFrequencyUs = 0;
-  int aiPushSamplesCount = 0;
-  long long aiPushSamplesUs = 0;
-  int aiFifoPopCount = 0;
-  long long aiFifoPopUs = 0;
-  int aiRaiseInterruptCount = 0;
-  long long aiRaiseInterruptUs = 0;
-  int emumode = 0;
-  u32 cp0CountBefore = 0;
-  u32 cp0CountAfter = 0;
-  u32 nextInterruptBefore = 0;
-  u32 nextInterruptAfter = 0;
-  u32 pcBefore = 0;
-  u32 pcAfter = 0;
-  u32 dynarecPcaddrBefore = 0;
-  u32 dynarecPcaddrAfter = 0;
-  u32 cp0LastAddrBefore = 0;
-  u32 cp0LastAddrAfter = 0;
-  int dynarecCycleCountBefore = 0;
-  int dynarecCycleCountAfter = 0;
-  int dynarecPendingExceptionBefore = 0;
-  int dynarecPendingExceptionAfter = 0;
-  int dynarecStopBefore = 0;
-  int dynarecStopAfter = 0;
-  int delaySlotBefore = 0;
-  int delaySlotAfter = 0;
-  int currentFrameBefore = 0;
-  int currentFrameAfter = 0;
-  int outputFlags = 0;
-};
-
-
 static std::mutex crit_netplay_client;
-NetPlayClient* netplay_client = nullptr;
-constexpr unsigned int kGekkoStateCapacity = 80 * 1024u * 1024u;
-constexpr int kGekkoMaxLoggedFrames = 600;
-constexpr int kGekkoWaitSleepUs = 100;
-constexpr float kGekkoTimesyncDeadzone = 0.5f;
-constexpr double kGekkoTimesyncStrength = 0.002;
-constexpr double kGekkoTimesyncMinScale = 0.99;
-constexpr double kGekkoTimesyncMaxScale = 1.01;
-constexpr double kGekkoTimesyncLerp = 0.15;
-// Sample gekko_frames_ahead() this often when recomputing the target
-// emulation speed. Mirrors Slippi's SLIPPI_ONLINE_LOCKSTEP_INTERVAL (30
-// frames @ 60Hz = once per ~500ms) — single-frame jitter spikes no
-// longer kick the speed scale around; the lerp keeps speed_scale
-// converging toward the cached target on every frame in between.
-constexpr int kGekkoTimesyncIntervalFrames = 30;
-constexpr size_t kGekkoClientReplayFrames = 600;
-GekkoSession* g_GekkoSession = nullptr;
-GekkoNetAdapter* g_GekkoNetAdapter = nullptr;
-std::vector<GekkoNetResult*> g_GekkoNetResults;
-int g_GekkoPlayers = 0;
-int g_GekkoInputSize = 0;
-int g_GekkoLocalPlayer = 0;
-int g_GekkoLocalHandle = -1;
-int g_GekkoRemoteHandle = -1;
-std::vector<int> g_GekkoPlayerHandles;
-std::vector<int> g_GekkoLocalHandles;
-std::vector<unsigned char> g_GekkoLatchedInput;
-bool g_GekkoHasLatchedInput = false;
-// Per-frame input buffer for rollback-aware krec recording. Buffered until
-// each frame ages past the rollback window so that rolling-back re-sims can
-// overwrite the initial speculative entry with the corrected input before
-// it gets committed to the .krec file.
-std::map<int, std::vector<unsigned char>> g_GekkoFrameInputBuffer;
-int g_GekkoMaxObservedFrame = -1;
-constexpr int kGekkoRecordingRollbackHorizon = 32;
-std::atomic_bool g_GekkoExecuting{false};
-std::atomic_bool g_GekkoStopRequested{false};
-std::vector<PendingGekkoSave> g_GekkoPendingSaves;
-std::mutex g_GekkoLogMutex;
-std::filesystem::path g_GekkoLogDirectory;
-std::string g_GekkoLogPrefix;
-int g_GekkoLogFrames = 0;
-Inputs g_GekkoLastSubmittedInput = Inputs{};
-long long g_GekkoLastLoadStateUs = 0;
-long long g_GekkoLastSaveStateUs = 0;
-long long g_GekkoLastRunFrameUs = 0;
-long long g_GekkoLastPendingSaveUs = 0;
-void* g_GekkoDebugUserData = nullptr;
-int g_GekkoDebugFrameOutput = -1;
-std::vector<unsigned char> g_GekkoLastLatchedInput;
-int g_GekkoWaitingLoops = 0;
-int g_GekkoLocalInputLogRepeats = 0;
-int g_GekkoPacingLogFrames = 0;
-double g_GekkoSpeedScale = 1.0;
-// Ring buffer: g_Inputs[player_port][frame % g_GekkoInputRingSize] = GCPadStatus
-// g_BrawlbackInputs[player_port][frame % g_GekkoInputRingSize] = BrawlbackPad
-// Size is set to (input_prediction_window + 1) at session start.
-std::vector<std::vector<Inputs>> g_Inputs;
-int g_GekkoInputRingSize = 0;
-// Timesync sample state. Counter wraps every kGekkoTimesyncIntervalFrames
-// to trigger a fresh frames_ahead sample. TargetScale is what g_GekkoSpeedScale
-// lerps toward between samples.
-int g_GekkoTimesyncSampleCounter = 0;
-double g_GekkoTimesyncTargetScale = 1.0;
-bool g_GekkoLogEnabled = true;
-bool g_GekkoPreserveLogOnNextReset = false;
-std::mutex g_GekkoClientReplayMutex;
-std::vector<uint32_t> g_GekkoClientReplayInputs;
-size_t g_GekkoClientReplayIndex = 0;
-
-// Custom GekkoNetAdapter implementation that integrates with ENet
-struct ENetPacketData
-{
-  GekkoNetAddress addr;
-  std::vector<u8> data;
-};
-
-static std::mutex g_GekkoPacketMutex;
-static std::vector<ENetPacketData> g_GekkoIncomingPackets;
-static std::vector<GekkoNetResult*> g_GekkoPacketResults;
-
-// GekkoNetAdapter callbacks
-static void gekko_enet_send_data(GekkoNetAddress* addr, const char* data, int length)
-{
-  if (!netplay_client)
-    return;
-
-  sf::Packet packet;
-  packet << MessageID::GekkoNetData;
-
-  // Append the raw gekko data
-  packet.append(data, length);
-
-  // Send via ENet on the game channel
-  netplay_client->SendAsync(std::move(packet), DEFAULT_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED);
-}
-
-static GekkoNetResult** gekko_enet_receive_data(int* length)
-{
-  std::lock_guard<std::mutex> lock(g_GekkoPacketMutex);
-
-  // Clear previous results
-  for (auto* result : g_GekkoNetResults)
-  {
-    if (result)
-    {
-      // Free the address data if it was allocated
-      if (result->addr.data)
-      {
-        delete static_cast<PlayerId*>(result->addr.data);
-        result->addr.data = nullptr;
-      }
-      // Free the packet data if it was allocated
-      if (result->data)
-      {
-        delete[] result->data;
-        result->data = nullptr;
-      }
-      // Free the result structure itself
-      delete result;
-    }
-  }
-  g_GekkoPacketResults.clear();
-
-  // Convert incoming packets to GekkoNetResult array
-  for (const auto& packet_data : g_GekkoIncomingPackets)
-  {
-    auto* result = new GekkoNetResult();
-
-    // Deep copy the addr.data to avoid sharing pointers
-    if (packet_data.addr.data && packet_data.addr.size == sizeof(PlayerId))
-    {
-      auto* player_id_copy = new PlayerId(*static_cast<PlayerId*>(packet_data.addr.data));
-      result->addr.data = player_id_copy;
-      result->addr.size = sizeof(PlayerId);
-    }
-    else
-    {
-      result->addr.data = nullptr;
-      result->addr.size = 0;
-    }
-
-    result->data_len = static_cast<unsigned int>(packet_data.data.size());
-
-    // Allocate and copy data
-    auto* data_copy = new u8[packet_data.data.size()];
-    std::memcpy(data_copy, packet_data.data.data(), packet_data.data.size());
-    result->data = data_copy;
-
-    g_GekkoPacketResults.push_back(result);
-  }
-
-  g_GekkoIncomingPackets.clear();
-
-  *length = static_cast<int>(g_GekkoPacketResults.size());
-  return g_GekkoPacketResults.empty() ? nullptr : g_GekkoPacketResults.data();
-}
-
-static void gekko_enet_free_data(void* data_ptr)
-{
-  if (data_ptr)
-    delete[] static_cast<u8*>(data_ptr);
-}
-
-// Function to queue incoming gekko packets from ENet
-void QueueGekkoPacket(const u8* data, size_t length, PlayerId from_player)
-{
-  std::lock_guard<std::mutex> lock(g_GekkoPacketMutex);
-
-  ENetPacketData packet_data;
-
-  // Create address from player ID - allocate persistent memory for the address
-  auto* player_id_ptr = new PlayerId(from_player);
-  packet_data.addr.data = player_id_ptr;
-  packet_data.addr.size = sizeof(PlayerId);
-
-  // Copy packet data
-  packet_data.data.assign(data, data + length);
-
-  g_GekkoIncomingPackets.push_back(std::move(packet_data));
-}
-
-// Initialize the custom ENet adapter
-static GekkoNetAdapter g_ENetGekkoAdapter = {
-  .send_data = gekko_enet_send_data,
-  .receive_data = gekko_enet_receive_data,
-  .free_data = gekko_enet_free_data
-};
-
+static NetPlayClient* netplay_client = nullptr;
 static bool s_si_poll_batching = false;
 static std::atomic<bool> is_rollingback;
-static std::atomic<bool> is_stalled;
-static std::atomic<bool> game_started;
-static std::atomic<bool> is_predicting;
-static json inputs_output = json{};
-
-//static Common::EventHook s_after_frame_event = AfterFrameEvent::Register(
-//    [](const Core::System& system) { OnFrameEnd(); }, "Netplay::OnFrameEnd");
-
-/*
-static Common::EventHook s_before_frame_event = BeforeFrameEvent::Register(
-    [] { OnFrameStart(); }, "Netplay::OnFrameStart");
-    */
-
-// Helper function to format input as hexadecimal string
-static std::string hex_input(uint32_t value)
-{
-  std::ostringstream stream;
-  stream << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
-  return stream.str();
-}
 
 // called from ---GUI--- thread
 NetPlayClient::~NetPlayClient()
 {
-  netplay_client = nullptr;  // Clear global pointer
-
   // not perfect
   if (m_is_running.IsSet())
     StopGame();
@@ -556,7 +132,6 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
                              std::string name, const NetTraversalConfig& traversal_config)
     : m_dialog(dialog), m_player_name(std::move(name))
 {
-  netplay_client = this;  // Set global pointer for GekkoNet adapter
   ClearBuffers();
 
   if (!traversal_config.use_traversal)
@@ -668,39 +243,6 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
   }
 }
 
-bool NetPlayClient::load_gekko_state(GekkoGameEvent* event)
-{
-  const auto beginTime = std::chrono::steady_clock::now();
-  CoreRollbackState state;
-  state.buffer = event->data.load.state;
-  state.len = static_cast<int>(event->data.load.state_len);
-  state.frame = event->data.load.frame;
-  state.checksum = 0;  // Checksum will be computed during load for verification
-
-  if (!RollbackLoadGameState(state))
-  {
-    g_GekkoLastLoadStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - beginTime)
-                                 .count();
-    std::ostringstream stream;
-    stream << "load_state result=fail elapsed_us=" << g_GekkoLastLoadStateUs;
-    write_gekko_log(stream.str());
-    return false;
-  }
-  g_GekkoLastLoadStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - beginTime)
-                               .count();
-
-  if (g_GekkoLogEnabled &&
-      (g_GekkoLogFrames < kGekkoMaxLoggedFrames || g_GekkoLastLoadStateUs >= 2000))
-  {
-    std::ostringstream stream;
-    stream << "load_state result=ok frame=" << event->data.load.frame
-           << " len=" << event->data.load.state_len << " elapsed_us=" << g_GekkoLastLoadStateUs;
-    write_gekko_log(stream.str());
-  }
-  return true;
-}
 bool NetPlayClient::Connect()
 {
   INFO_LOG_FMT(NETPLAY, "Connecting to server.");
@@ -768,7 +310,7 @@ bool NetPlayClient::Connect()
     player.name = m_player_name;
     player.pid = m_pid;
     player.revision = Common::GetNetplayDolphinVer();
-    player.buffer = 0 /* will be raised once we get the packet */;
+    player.buffer = 0;
 
     // add self to player list
     m_players[m_pid] = player;
@@ -780,36 +322,6 @@ bool NetPlayClient::Connect()
 
     return true;
   }
-}
-
-// called from ---GUI--- and ---NETPLAY--- thread
-void NetPlayClient::AdjustPlayerPadBufferSize(u32 buffer)
-{
-  std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
-
-  m_local_player->buffer = buffer;
-  if (m_local_player->buffer < m_minimum_buffer_size)
-    m_local_player->buffer = m_minimum_buffer_size;
-
-
-	 // not needed on clients with host input authority
-  if (!m_host_input_authority)
-  {
-    // tell clients to change buffer size
-    sf::Packet spac;
-    spac << MessageID::PadBufferPlayer;
-    spac << m_local_player->buffer;
-
-    SendAsync(std::move(spac));
-  }
-  
-  m_dialog->OnPlayerPadBufferChanged(m_local_player->buffer);
-}
-
-void NetPlayClient::AdjustMinimumPadBufferSize(const unsigned int size)
-{
-  m_minimum_buffer_size = size;
-  m_dialog->OnMinimumPadBufferChanged(size);
 }
 
 static void ReceiveSyncIdentifier(sf::Packet& spac, SyncIdentifier& sync_identifier)
@@ -890,10 +402,14 @@ void NetPlayClient::OnData(sf::Packet& packet)
     OnWiimoteData(packet);
     break;
 
+  case MessageID::PadBuffer:
+    OnPadBuffer(packet);
+    break;
+
   case MessageID::PadBufferMinimum:
     OnPadBufferMinimum(packet);
     break;
-    
+
   case MessageID::PadBufferPlayer:
     OnPadBufferPlayer(packet);
     break;
@@ -901,9 +417,7 @@ void NetPlayClient::OnData(sf::Packet& packet)
   case MessageID::HostInputAuthority:
     OnHostInputAuthority(packet);
     break;
-  case MessageID::RollbackMode:
-    OnRollbackMode(packet);
-    break;  
+
   case MessageID::GolfSwitch:
     OnGolfSwitch(packet);
     break;
@@ -972,12 +486,7 @@ void NetPlayClient::OnData(sf::Packet& packet)
   case MessageID::GameDigestAbort:
     OnGameDigestAbort();
     break;
-  case MessageID::AckInputs:
-    OnFrameAck(packet);
-    break;
-  case MessageID::GekkoNetData:
-    OnGekkoNetData(packet);
-    break;
+
   default:
     PanicAlertFmtT("Unknown message received with id : {0}", static_cast<u8>(mid));
     break;
@@ -1173,58 +682,37 @@ void NetPlayClient::OnGBAConfig(sf::Packet& packet)
   m_dialog->Update();
 }
 
-void NetPlayClient::OnGekkoNetData(sf::Packet& packet)
-{
-  // Extract raw GekkoNet data from packet
-  const void* packet_data = static_cast<const u8*>(packet.getData()) + sizeof(MessageID);
-  size_t packet_size = packet.getDataSize() - sizeof(MessageID);
-
-  if (packet_data && packet_size > 0)
-  {
-    // Identify the remote sender: in a 2-player session it is the only player
-    // whose PID differs from ours. Fall back to 1 if we can't determine it.
-    PlayerId sender_pid = 1;
-    {
-      std::lock_guard lkp(m_crit.players);
-      for (const auto& [pid, player] : m_players)
-      {
-        if (pid != m_local_player->pid)
-        {
-          sender_pid = pid;
-          break;
-        }
-      }
-    }
-    QueueGekkoPacket(static_cast<const u8*>(packet_data), packet_size, sender_pid);
-  }
-}
-
 void NetPlayClient::OnPadData(sf::Packet& packet)
 {
   while (!packet.endOfPacket())
   {
     PadIndex map;
     packet >> map;
-    if (!m_net_settings.m_RollbackMode)
-    {
-        GCPadStatus pad;
-        packet >> pad.button;
-        if (static_cast<size_t>(map) < m_net_settings.gba_config.size() &&
-            !m_net_settings.gba_config.at(map).enabled)
-        {
-            packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
-                pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
-        }
 
-        if (static_cast<size_t>(map) < m_pad_buffer.size())
-        {
-            m_pad_buffer.at(map).Push(pad);
-            m_gc_pad_event.Set();
-        }
+    GCPadStatus pad;
+    packet >> pad.button;
+    if (static_cast<size_t>(map) < m_net_settings.gba_config.size() &&
+        !m_net_settings.gba_config.at(map).enabled)
+    {
+      packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
+          pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
+    }
+    if (m_net_settings.m_RollbackMode)
+    {
+      {
+        std::lock_guard lock(crit_netplay_client);
+        inputs.at(map).push_back(pad);
+      }
+
+      wait_for_inputs.notify_all();
+    }
+    else if (static_cast<size_t>(map) < m_pad_buffer.size())
+    {
+      m_pad_buffer.at(map).Push(pad);
+      m_gc_pad_event.Set();
     }
   }
 }
-
 
 void NetPlayClient::OnPadHostData(sf::Packet& packet)
 {
@@ -1284,40 +772,19 @@ void NetPlayClient::OnWiimoteData(sf::Packet& packet)
   }
 }
 
-void NetPlayClient::OnPadBufferMinimum(sf::Packet& packet)
+void NetPlayClient::OnPadBuffer(sf::Packet& packet)
 {
   u32 size = 0;
   packet >> size;
-  
-  m_minimum_buffer_size = size;
-    m_dialog->OnMinimumPadBufferChanged(size);
 
-    if (m_local_player->buffer < m_minimum_buffer_size)
-      AdjustPlayerPadBufferSize(m_minimum_buffer_size);
-}
-
-
-void NetPlayClient::OnPadBufferPlayer(sf::Packet& packet)
-{
-    PlayerId pid;
-    packet >> pid;
-
-    {
-      std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
-      packet >> m_players[pid].buffer;
-    }
+  m_target_buffer_size = size;
+  m_dialog->OnPadBufferChanged(size);
 }
 
 void NetPlayClient::OnHostInputAuthority(sf::Packet& packet)
 {
   packet >> m_host_input_authority;
   m_dialog->OnHostInputAuthorityChanged(m_host_input_authority);
-}
-
-void NetPlayClient::OnRollbackMode(sf::Packet& packet)
-{
-  packet >> m_rollback_mode;
-  m_dialog->OnRollbackModeChanged(m_rollback_mode);
 }
 
 void NetPlayClient::OnGolfSwitch(sf::Packet& packet)
@@ -1389,146 +856,6 @@ void NetPlayClient::OnGameStatus(sf::Packet& packet)
   }
 
   m_dialog->Update();
-}
-
-void NetPlayClient::ToJson(json& j, const BrawlbackPad& i)
-{
-  j["game_pad"] = json{{"_buttons", i._buttons},
-           {"buttons", i.buttons},
-           {"holdButtons", i.holdButtons},
-           {"rapidFireButtons", i.rapidFireButtons},
-           {"releasedButtons", i.releasedButtons},
-           {"newPressedButtons", i.newPressedButtons},
-           {"LAnalogue", i.LAnalogue},
-           {"RAnalogue", i.RAnalogue},
-           {"LTrigger", i.LTrigger},
-           {"RTrigger", i.RTrigger},
-           {"stickX", i.stickX},
-           {"stickY", i.stickY},
-           {"cStickX", i.cStickX},
-           {"cStickY", i.cStickY}};
-}
-void NetPlayClient::ToJson(json& j, const GCPadStatus& i)
-{
-  j["emu_pad"] = {{"button", i.button},
-           {"stickX", i.stickX},
-           {"stickY", i.stickY},
-           {"substickX", i.substickX},
-           {"substickY", i.substickY},
-           {"triggerLeft", i.triggerLeft},
-           {"triggerRight", i.triggerRight},
-           {"analogA", i.analogA},
-           {"analogB", i.analogB}};
-}
-void NetPlayClient::ToJson(json& j, const Inputs& i)
-{
-  ToJson(j, i.game_pad);
-  ToJson(j, i.emu_pad);
-}
-void NetPlayClient::FromJson(const json& j, BrawlbackPad& i)
-{
-  j.at("frame").get_to(i._buttons);
-  j.at("buttons").get_to(i.buttons);
-  j.at("holdButtons").get_to(i.holdButtons);
-  j.at("rapidFireButtons").get_to(i.rapidFireButtons);
-  j.at("releasedButtons").get_to(i.releasedButtons);
-  j.at("newPressedButtons").get_to(i.newPressedButtons);
-  j.at("LAnalogue").get_to(i.LAnalogue);
-  j.at("RAnalogue").get_to(i.RAnalogue);
-  j.at("stickX").get_to(i.stickX);
-  j.at("stickY").get_to(i.stickY);
-  j.at("cStickX").get_to(i.cStickX);
-  j.at("cStickY").get_to(i.cStickY);
-}
-void NetPlayClient::FromJson(const json& j, GCPadStatus& i)
-{
-  j.at("button").get_to(i.button);
-  j.at("stickX").get_to(i.stickX);
-  j.at("stickY").get_to(i.stickY);
-  j.at("substickX").get_to(i.substickX);
-  j.at("substickY").get_to(i.substickY);
-  j.at("triggerLeft").get_to(i.triggerLeft);
-  j.at("triggerRight").get_to(i.triggerRight);
-  j.at("analogA").get_to(i.analogA);
-  j.at("analogB").get_to(i.analogB);
-}
-void NetPlayClient::FromJson(const json& j, Inputs& i)
-{
-  FromJson(j, i.game_pad);
-  FromJson(j, i.emu_pad);
-}
-void NetPlayClient::CloseSession()
-{
-  g_GekkoStopRequested.store(false, std::memory_order_relaxed);
-  g_GekkoExecuting.store(false, std::memory_order_relaxed);
-
-  if (g_GekkoSession != nullptr)
-  {
-    gekko_destroy(&g_GekkoSession);
-    gekko_default_adapter_destroy();
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(g_GekkoPacketMutex);
-    // Free g_GekkoPacketResults (allocated in gekko_enet_receive_data)
-    for (auto* result : g_GekkoPacketResults)
-    {
-      if (result)
-      {
-        if (result->addr.data)
-          delete static_cast<PlayerId*>(result->addr.data);
-        if (result->data)
-          delete[] result->data;
-        delete result;
-      }
-    }
-    g_GekkoPacketResults.clear();
-    g_GekkoNetResults.clear();
-    // Free address data still held in pending incoming packets
-    for (auto& pkt : g_GekkoIncomingPackets)
-    {
-      if (pkt.addr.data)
-        delete static_cast<PlayerId*>(pkt.addr.data);
-    }
-    g_GekkoIncomingPackets.clear();
-  }
-
-  g_GekkoSession = nullptr;
-  g_GekkoNetAdapter = nullptr;
-  g_GekkoPlayers = 0;
-  g_GekkoInputSize = 0;
-  g_GekkoLocalPlayer = 0;
-  g_GekkoLocalHandle = -1;
-  g_GekkoRemoteHandle = -1;
-  g_GekkoPlayerHandles.clear();
-  g_GekkoLocalHandles.clear();
-  g_GekkoInputRingSize = 0;
-  for (auto& inputs : g_Inputs)
-  {
-    inputs.clear();
-  }
-  g_Inputs.clear();
-  g_GekkoLatchedInput.clear();
-  g_GekkoLastLatchedInput.clear();
-  g_GekkoHasLatchedInput = false;
-  g_GekkoPendingSaves.clear();
-  g_GekkoFrameInputBuffer.clear();
-  g_GekkoMaxObservedFrame = -1;
-  g_GekkoLastSubmittedInput = Inputs{};
-  g_GekkoWaitingLoops = 0;
-  g_GekkoLocalInputLogRepeats = 0;
-  g_GekkoPacingLogFrames = 0;
-  g_GekkoLogFrames = 0;
-  g_GekkoSpeedScale = 1.0;
-  g_GekkoTimesyncTargetScale = 1.0;
-  g_GekkoTimesyncSampleCounter = 0;
-  g_GekkoClientReplayInputs.clear();
-  g_GekkoClientReplayIndex = 0;
-  g_GekkoLastLoadStateUs = 0;
-  g_GekkoLastSaveStateUs = 0;
-  g_GekkoLastRunFrameUs = 0;
-  g_GekkoLastPendingSaveUs = 0;
-  // m_dynamic_save_regions is no longer used
 }
 
 void NetPlayClient::OnStartGame(sf::Packet& packet)
@@ -1623,6 +950,7 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
 
     packet >> m_net_settings.save_data_region;
     packet >> m_net_settings.sync_codes;
+
     packet >> m_net_settings.m_RollbackMode;
     packet >> m_net_settings.golf_mode;
     packet >> m_net_settings.use_fma;
@@ -1634,104 +962,11 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     m_net_settings.is_hosting = m_local_player->IsHost();
   }
 
-  if (IsInRollbackMode())
-  {
-    // Ensure any previous session is fully torn down before creating a new one.
-    if (g_GekkoSession != nullptr)
-      CloseSession();
+  inputs.clear();
+  for (int i = 0; i < m_players.size(); i++)
+    inputs.push_back(std::vector<GCPadStatus>{GCPadStatus{}});
+  current_frame = 0;
 
-    gekko_create(&g_GekkoSession, GekkoGameSession);
-    GekkoConfig config = {};
-    const int clampedLocalDelay = std::clamp(delay, 0, 10);
-    g_GekkoLocalPlayer = static_cast<int>(m_local_player->pid) - 1;
-    config.num_players = static_cast<unsigned char>(2);
-    config.max_spectators = 0;
-    config.input_prediction_window = MAX_ROLLBACK_FRAMES - 1;
-    config.input_size = static_cast<unsigned int>(sizeof(Inputs));
-    config.state_size = kGekkoStateCapacity;
-    config.limited_saving = false;
-    config.desync_detection = true;
-    config.check_distance = MAX_ROLLBACK_FRAMES - 1;
-    gekko_start(g_GekkoSession, &config);
-
-    // Use our custom ENet-based adapter
-    g_GekkoNetAdapter = &g_ENetGekkoAdapter;
-    gekko_net_adapter_set(g_GekkoSession, g_GekkoNetAdapter);
-
-    gekko_set_runahead(g_GekkoSession, 0);
-    g_GekkoPlayers = 2;
-    g_GekkoInputSize = sizeof(Inputs);
-    g_GekkoLocalHandle = -1;
-    g_GekkoRemoteHandle = -1;
-    g_GekkoPlayerHandles.assign(static_cast<size_t>(2), -1);
-    g_GekkoLocalHandles.assign(static_cast<size_t>(2), -1);
-    g_GekkoInputRingSize = MAX_ROLLBACK_FRAMES + 1;
-    g_Inputs.assign(static_cast<size_t>(2),
-                    std::vector<Inputs>(static_cast<size_t>(g_GekkoInputRingSize)));
-    g_GekkoHasLatchedInput = false;
-    g_GekkoFrameInputBuffer.clear();
-    g_GekkoMaxObservedFrame = -1;
-    g_GekkoPendingSaves.clear();
-    pad_config.clear();
-
-    for (auto player : m_players)
-    {
-      if (player.first == m_local_player->pid)
-      {
-        const int handle = gekko_add_actor(g_GekkoSession, GekkoLocalPlayer, nullptr);
-        if (handle < 0)
-        {
-          write_gekko_log("gekko_add_actor result=fail type=local");
-          return;
-        }
-        g_GekkoLocalHandle = handle;
-        g_GekkoPlayerHandles[static_cast<size_t>(player.first - 1)] = handle;
-        g_GekkoLocalHandles[static_cast<size_t>(player.first - 1)] = handle;
-        gekko_set_local_delay(g_GekkoSession, handle,
-                              static_cast<unsigned char>(clampedLocalDelay));
-        if (g_GekkoLogEnabled)
-        {
-          std::ostringstream stream;
-          stream << "gekko_add_actor result=ok player=" << player.first
-                 << " type=local handle=" << handle;
-          write_gekko_log(stream.str());
-        }
-      }
-      else
-      {
-        pad_config.push_back(12);
-
-        auto* remote_player_id = new PlayerId(player.first);
-        GekkoNetAddress remote_address = {};
-        remote_address.data = remote_player_id;
-        remote_address.size = sizeof(PlayerId);
-
-        const int handle = gekko_add_actor(g_GekkoSession, GekkoRemotePlayer, &remote_address);
-        if (handle < 0)
-        {
-          delete remote_player_id;
-          write_gekko_log("gekko_add_actor result=fail type=remote");
-          return;
-        }
-        if (g_GekkoRemoteHandle < 0)
-        {
-          g_GekkoRemoteHandle = handle;
-        }
-        g_GekkoPlayerHandles[static_cast<size_t>(player.first - 1)] = handle;
-        if (g_GekkoLogEnabled)
-        {
-          std::ostringstream stream;
-          stream << "gekko_add_actor result=ok player=" << player.first
-                 << " type=remote handle=" << handle << " player_id=" << player.first;
-          write_gekko_log(stream.str());
-        }
-      }
-      std::string port = fmt::format("{}_{}", "player_port", player.first);
-      inputs_output[port] = json::array();
-    }
-    current_frame = -1;
-  }
-  
   m_dialog->OnMsgStartGame();
 }
 
@@ -1778,35 +1013,24 @@ void NetPlayClient::OnPlayerPingData(sf::Packet& packet)
 
 void NetPlayClient::OnDesyncDetected(sf::Packet& packet)
 {
-  int player_index;
-  s32 frame;
-  packet >> player_index;
-  packet >> frame;
-
-  std::string player_name = GetPlayerName(player_index);
-
-  INFO_LOG_FMT(NETPLAY, "Server reported desync: Player {} at frame {}", player_name, frame);
-
-  if (m_net_settings.m_RollbackMode)
+  int pid_to_blame;
+  u32 frame;
+  if (!m_net_settings.m_RollbackMode)
   {
+    packet >> pid_to_blame;
+    packet >> frame;
 
-    // In rollback mode, show warning but continue playing
-    std::string message =
-        fmt::format("Network desync detected with {}!\nAttempting to recover...", player_name);
+    std::string player = "??";
+    std::lock_guard lkp(m_crit.players);
+    {
+      const auto it = m_players.find(pid_to_blame);
+      if (it != m_players.end())
+        player = it->second.name;
+    }
 
-    m_dialog->AppendChat(message);
+    INFO_LOG_FMT(NETPLAY, "Player {} ({}) desynced!", player, pid_to_blame);
 
-    OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer, message, OSD::Duration::VERY_LONG,
-                         OSD::Color::YELLOW);
-  }
-  else
-  {
-    // In delay-based mode, this is critical
-    m_dialog->OnDesync(frame, player_name);
-
-    OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer,
-                         fmt::format("Critical desync with {}!", player_name),
-                         OSD::Duration::VERY_LONG, OSD::Color::RED);
+    m_dialog->OnDesync(frame, player);
   }
 }
 
@@ -1847,817 +1071,108 @@ void NetPlayClient::OnSyncSaveData(sf::Packet& packet)
     break;
   }
 }
-void NetPlayClient::PrintInputs(BrawlbackPad& pad)
+
+bool NetPlayClient::LoadFromFrame(u64 frame)
 {
-  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
-  INFO_LOG_FMT(BRAWLBACK, "STICK X: {}\n", pad.stickX);
-  INFO_LOG_FMT(BRAWLBACK, "STICK Y: {}\n", pad.stickY);
-  INFO_LOG_FMT(BRAWLBACK, "C STICK X: {}\n", pad.cStickX);
-  INFO_LOG_FMT(BRAWLBACK, "C STICK Y: {}\n", pad.cStickY);
-  INFO_LOG_FMT(BRAWLBACK, "BUTTONS: {}\n", pad.buttons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad._buttons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.holdButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.rapidFireButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.releasedButtons);
-  INFO_LOG_FMT(BRAWLBACK, "_BUTTONS: {}\n", pad.newPressedButtons);
-  INFO_LOG_FMT(BRAWLBACK, "LEFT TRIGGER: {}\n", pad.LTrigger);
-  INFO_LOG_FMT(BRAWLBACK, "RIGHT TRIGGER: {}\n", pad.RTrigger);
-  INFO_LOG_FMT(BRAWLBACK, "ANALOG A: {}\n", pad.LAnalogue);
-  INFO_LOG_FMT(BRAWLBACK, "ANALOG B: {}\n", pad.RAnalogue);
-  INFO_LOG_FMT(BRAWLBACK, "-----------------\n");
-}
-void NetPlayClient::apply_gekko_frame_pacing()
-{
-  // Read frames_ahead every call (cheap, just a member access in
-  // GekkoSession) but only recompute the target scale once per
-  // sampling interval. The per-frame lerp below carries the speed scale
-  // toward the cached target between samples.
-  const float framesAhead = gekko_frames_ahead(g_GekkoSession);
-  const bool isSampleFrame = (g_GekkoTimesyncSampleCounter % kGekkoTimesyncIntervalFrames) == 0;
-  if (isSampleFrame)
-  {
-    double newTarget = 1.0;
-    if (framesAhead >= kGekkoTimesyncDeadzone || framesAhead <= -kGekkoTimesyncDeadzone)
-    {
-      newTarget = 1.0 - (static_cast<double>(framesAhead) * kGekkoTimesyncStrength);
-      newTarget = std::clamp(newTarget, kGekkoTimesyncMinScale, kGekkoTimesyncMaxScale);
-    }
-    g_GekkoTimesyncTargetScale = newTarget;
-  }
-  g_GekkoTimesyncSampleCounter++;
-
-  g_GekkoSpeedScale += (g_GekkoTimesyncTargetScale - g_GekkoSpeedScale) * kGekkoTimesyncLerp;
-  Config::SetCurrent(Config::MAIN_EMULATION_SPEED, g_GekkoSpeedScale);
-
-  g_GekkoPacingLogFrames++;
-  if (g_GekkoLogEnabled && (g_GekkoTimesyncTargetScale != 1.0 || g_GekkoPacingLogFrames <= 10 ||
-                            (g_GekkoPacingLogFrames % 60) == 0))
-  {
-    std::ostringstream stream;
-    stream << "pacing frames_ahead=" << std::fixed << std::setprecision(2) << framesAhead
-           << " sample=" << (isSampleFrame ? 1 : 0) << " target_scale=" << std::setprecision(4)
-           << g_GekkoTimesyncTargetScale << " speed_scale=" << g_GekkoSpeedScale;
-
-    if (g_GekkoRemoteHandle >= 0)
-    {
-      GekkoNetworkStats stats = {};
-      gekko_network_stats(g_GekkoSession, g_GekkoRemoteHandle, &stats);
-      stream << " remote_handle=" << g_GekkoRemoteHandle << " ping_ms=" << stats.last_ping
-             << " avg_ping_ms=" << std::setprecision(1) << stats.avg_ping
-             << " jitter_ms=" << stats.jitter << " kb_sent=" << stats.kb_sent
-             << " kb_recv=" << stats.kb_received;
-    }
-
-    INFO_LOG_FMT(BRAWLBACK, "{}", stream.str());
-  }
+  return true;
 }
 
-bool NetPlayClient::submit_local_input(Inputs* input, size_t playerIndex)
+void NetPlayClient::RollbackToFrame(u64 frame)
 {
-  bool submitted = false;
-  const int handle =
-      playerIndex < g_GekkoLocalHandles.size() ? g_GekkoLocalHandles[playerIndex] : -1;
-  if (handle < 0)
+  is_rollingback = true;
+  if (LoadFromFrame(frame))
   {
-    return false;
-  }
-
-  if (input == nullptr)
-  {
-    return false;
-  }
-
-  gekko_add_local_input(g_GekkoSession, handle, std::move((void*)input));
-  submitted = true;
-
-  const bool changed =
-      nullptr && memcmp(input, &g_GekkoLastSubmittedInput, g_GekkoInputSize) != 0;
-  if (changed)
-  {
-    g_GekkoLocalInputLogRepeats = 0;
+    frame_to_stop_at = current_frame;
+    current_frame = frame;
+    Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 0.0);
   }
   else
   {
-    g_GekkoLocalInputLogRepeats++;
-  }
-
-  if (g_GekkoLogEnabled &&
-      (changed || g_GekkoLocalInputLogRepeats <= 20 || (g_GekkoLocalInputLogRepeats % 60) == 0))
-  {
-    std::ostringstream stream;
-    stream << "add_local_input local_player=" << playerIndex << " handle=" << handle << " physical_p"
-            << 1 << "=" << hex_input(1)
-            << " repeat=" << g_GekkoLocalInputLogRepeats;
-    INFO_LOG_FMT(BRAWLBACK, "{}", stream.str());
-  }
-  g_GekkoLastSubmittedInput = *input;
-  return submitted;
-}
-void NetPlayClient::set_environment_value(const char* name, const std::string& value)
-{
-#ifdef _WIN32
-  _putenv_s(name, value.c_str());
-#else
-  setenv(name, value.c_str(), 1);
-#endif
-}
-std::string NetPlayClient::make_rollback_log_prefix()
-{
-  static unsigned int sessionCounter = 0;
-
-  const auto now = std::chrono::system_clock::now();
-  const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
-  const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) %
-                     std::chrono::seconds(1);
-  std::tm localTime = {};
-
-#ifdef _WIN32
-  localtime_s(&localTime, &nowTime);
-#else
-  localtime_r(&nowTime, &localTime);
-#endif
-
-  std::ostringstream stream;
-  stream << "rollback_" << std::put_time(&localTime, "%Y%m%d_%H%M%S") << "_" << std::setw(3)
-         << std::setfill('0') << nowMs.count() << "_" << ++sessionCounter;
-  return stream.str();
-}
-std::filesystem::path NetPlayClient::create_rollback_log_directory()
-{
-  std::error_code errorCode;
-  std::filesystem::path directory = File::GetUserPath(D_DUMP_IDX) + "Rollback" + DIR_SEP;
-
-  if (std::filesystem::is_directory(directory, errorCode) ||
-      std::filesystem::create_directories(directory, errorCode))
-  {
-    return directory.make_preferred();
-  }
-
-  errorCode.clear();
-  directory = "Logs";
-  if (std::filesystem::is_directory(directory, errorCode) ||
-      std::filesystem::create_directories(directory, errorCode))
-  {
-    return directory.make_preferred();
-  }
-
-  return std::filesystem::path();
-}
-void NetPlayClient::reset_rollback_log_session()
-{
-  g_GekkoLogDirectory = create_rollback_log_directory();
-  g_GekkoLogPrefix = make_rollback_log_prefix();
-
-  set_environment_value("RMGK_ROLLBACK_LOG_DIR", g_GekkoLogDirectory.string());
-  set_environment_value("RMGK_ROLLBACK_LOG_PREFIX", g_GekkoLogPrefix);
-}
-std::filesystem::path NetPlayClient::get_gekko_log_path()
-{
-  if (g_GekkoLogPrefix.empty())
-  {
-    reset_rollback_log_session();
-  }
-
-  std::string filename = g_GekkoLogPrefix;
-  filename += g_GekkoLocalPlayer == 2 ? "_gekko_client.log" : "_gekko_host.log";
-
-  if (!g_GekkoLogDirectory.empty())
-  {
-    return g_GekkoLogDirectory / filename;
-  }
-
-  return std::filesystem::path(filename);
-}
-void NetPlayClient::write_gekko_log(const std::string& message)
-{
-  if (!g_GekkoLogEnabled)
-  {
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(g_GekkoLogMutex);
-  const std::filesystem::path path = get_gekko_log_path();
-  std::ofstream file(path, std::ios::out | std::ios::app);
-  file << "core_frame=" << current_frame << " " << message << "\n";
-  INFO_LOG_FMT(BRAWLBACK, "{} -- {}\n", current_frame, message);
-}
-const char* NetPlayClient::gekko_session_event_name(GekkoSessionEventType type)
-{
-  switch (type)
-  {
-  case GekkoPlayerSyncing:
-    return "player_syncing";
-  case GekkoPlayerConnected:
-    return "player_connected";
-  case GekkoPlayerDisconnected:
-    return "player_disconnected";
-  case GekkoSessionStarted:
-    return "session_started";
-  case GekkoSpectatorPaused:
-    return "spectator_paused";
-  case GekkoSpectatorUnpaused:
-    return "spectator_unpaused";
-  case GekkoDesyncDetected:
-    return "desync_detected";
-  default:
-    return "unknown";
+    is_rollingback = false;
+    DEBUG_LOG_FMT(NETPLAY, "Failed to roll back to frame {}!", frame);
   }
 }
-void NetPlayClient::log_session_events()
+
+void NetPlayClient::OnFrameEnd(std::unique_lock<std::mutex>& lock)
 {
-  if (!g_GekkoLogEnabled)
+  // this function is only called in rollback mode, but the logic to skip it is in
+  // OnFrameEnd() (the one not in NetPlayClient::)
+  sf::Packet packet;
+  packet << MessageID::PadData;
+
+  bool send_packet = false;
+  const int num_local_pads = NumLocalPads();
+  for (int local_pad = 0; local_pad < num_local_pads; local_pad++)
   {
-    return;
+    // inputs for local players are acquired here
+    send_packet = PollLocalPad(local_pad, packet) || send_packet;
   }
 
-  int count = 0;
-  GekkoSessionEvent** events = gekko_session_events(g_GekkoSession, &count);
-  for (int i = 0; i < count; i++)
+  if (send_packet)
+    SendAsync(std::move(packet));
+
+  Rollback::RollbackManager::Get().SaveFrame(Core::System::GetInstance());
+
+  // Wait for inputs if others are behind us, continue if we're behind them
+  int local_player_port = -1;
+  for (int i = 0; i < GetPadMapping().size(); i++)
   {
-    GekkoSessionEvent* event = events[i];
-    if (event == nullptr)
+    if (GetPadMapping().at(i) == m_local_player->pid)
+      local_player_port = i;
+  }
+
+  bool needs_to_rollback = false;
+  u64 farthest_rollback_frame = 0;
+
+  for (int remote_players = 0; remote_players < inputs.size(); remote_players++)
+  {
+    auto frame_difference = static_cast<long long>(inputs.at(local_player_port).size()) -
+                            static_cast<long long>(inputs.at(remote_players).size());
+    if (remote_players == local_player_port)
+      continue;
+
+    if (frame_difference <= delay)
     {
       continue;
     }
-
-    std::ostringstream stream;
-    stream << "event name=" << gekko_session_event_name(event->type);
-    switch (event->type)
-    {
-    case GekkoPlayerSyncing:
-      stream << " handle=" << event->data.syncing.handle
-             << " count=" << static_cast<int>(event->data.syncing.current)
-             << " total=" << static_cast<int>(event->data.syncing.max);
-      break;
-    case GekkoPlayerConnected:
-      stream << " handle=" << event->data.connected.handle;
-      break;
-    case GekkoPlayerDisconnected:
-      stream << " handle=" << event->data.disconnected.handle;
-      break;
-    case GekkoDesyncDetected:
-      stream << " frame=" << event->data.desynced.frame
-             << " remote_handle=" << event->data.desynced.remote_handle
-             << " local_checksum=" << event->data.desynced.local_checksum
-             << " remote_checksum=" << event->data.desynced.remote_checksum;
-      break;
-    default:
-      break;
-    }
-    write_gekko_log(stream.str());
-  }
-}
-const char* NetPlayClient::gekko_game_event_name(GekkoGameEventType type)
-{
-  switch (type)
-  {
-  case GekkoAdvanceEvent:
-    return "advance";
-  case GekkoSaveEvent:
-    return "save";
-  case GekkoLoadEvent:
-    return "load";
-  default:
-    return "unknown";
-  }
-}
-bool NetPlayClient::save_gekko_state(const PendingGekkoSave& save)
-{
-  const auto beginTime = std::chrono::steady_clock::now();
-  const int coreFrame = std::max(0, save.frame);
-
-  // Don't save on frame -1
-  if (save.frame == -1)
-  {
-    if (g_GekkoLogEnabled)
-    {
-      write_gekko_log("save_state skipped frame=-1");
-    }
-    return false;
-  }
-
-  if (g_GekkoLogEnabled)
-  {
-    std::ostringstream stream;
-    stream << "save_state begin frame=" << save.frame << " core_frame=" << coreFrame
-           << " state_ptr=" << static_cast<void*>(save.state)
-           << " state_len_ptr=" << static_cast<void*>(save.stateLen)
-           << " checksum_ptr=" << static_cast<void*>(save.checksum);
-    write_gekko_log(stream.str());
-  }
-
-  if (save.state == nullptr || save.stateLen == nullptr)
-  {
-    write_gekko_log("save_state result=fail reason=null_event_buffer");
-    return false;
-  }
-
-  auto& system = Core::System::GetInstance();
-
-  u32 savestateIdx = static_cast<u32>(coreFrame) % MAX_SAVESTATES;
-  FullMemoryRB::Savestate& savestate = FullMemoryRB::savestateInfo.savestates[savestateIdx];
-
-  if (!SaveRollbackSystemState(system, savestate))
-  {
-    savestate.valid = false;
-    write_gekko_log("save_state result=fail reason=rollback_state_save_failed");
-    return false;
-  }
-
-  savestate.frame = coreFrame;
-  savestate.valid = true;
-
-  u32 totalSize = 0;
-  for (const auto& seg : savestate.mem1_segments)
-    totalSize += seg.size;
-  for (const auto& seg : savestate.mem2_segments)
-    totalSize += seg.size;
-  totalSize += static_cast<u32>(savestate.core_state.size() + savestate.l1_cache.size());
-
-  if (save.stateLen != nullptr)
-    *save.stateLen = totalSize;
-  *save.checksum = 0;
-
-  g_GekkoLastSaveStateUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - beginTime)
-                               .count();
-
-  if (g_GekkoLogEnabled &&
-      (g_GekkoLogFrames < kGekkoMaxLoggedFrames || g_GekkoLastSaveStateUs >= 2000))
-  {
-    std::ostringstream stream;
-    stream << "save_state result=ok frame=" << save.frame << " len=" << totalSize
-           << " checksum=" << 0 << " elapsed_us=" << g_GekkoLastSaveStateUs;
-    write_gekko_log(stream.str());
-  }
-
-  return true;
-}
-
-// Deprecated - no longer used with full memory savestates
-bool NetPlayClient::RollbackSaveGameStateInto(CoreRollbackState& state, unsigned char* buffer,
-                                              int buffer_capacity, int frame)
-{
-  ERROR_LOG_FMT(BRAWLBACK, "RollbackSaveGameStateInto: deprecated function called");
-  return false;
-}
-
-bool NetPlayClient::RollbackLoadGameState(const CoreRollbackState& state)
-{
-  if (state.frame < 0)
-  {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: invalid frame {}", state.frame);
-    return false;
-  }
-
-  auto& system = Core::System::GetInstance();
-
-  u32 savestateIdx = static_cast<u32>(state.frame) % MAX_SAVESTATES;
-  FullMemoryRB::Savestate& savestate = FullMemoryRB::savestateInfo.savestates[savestateIdx];
-
-  if (!savestate.valid || savestate.frame != static_cast<u32>(state.frame))
-  {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: no valid savestate for frame {}", state.frame);
-    return false;
-  }
-
-  if (!LoadRollbackSystemState(system, savestate))
-  {
-    ERROR_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: failed to restore rollback state for frame {}",
-                  state.frame);
-    return false;
-  }
-
-  INFO_LOG_FMT(BRAWLBACK, "RollbackLoadGameState: successfully loaded state for frame {}",
-               state.frame);
-
-  return true;
-}
-
-void NetPlayClient::OnFrameStart(BrawlbackPad& pad)
-{
-  const auto beginTime = std::chrono::steady_clock::now();
-  int summaryEventCount = 0;
-  int summarySaveCount = 0;
-  int summaryLoadCount = 0;
-  int summaryRollbackAdvanceCount = 0;
-  int summaryRunaheadAdvanceCount = 0;
-  int summaryWaitLoops = 0;
-  long long summaryNetworkPollUs = 0;
-  long long summaryPacingUs = 0;
-  long long summarySubmitInputUs = 0;
-  long long summaryUpdateSessionUs = 0;
-  long long summaryLatchInputUs = 0;
-  long long summarySaveUs = 0;
-  long long summaryLoadUs = 0;
-  long long summaryResimUs = 0;
-  long long summaryMaxResimUs = 0;
-  long long summaryDebugBeginUs = 0;
-
-  if (g_GekkoSession == nullptr)
-  {
-    write_gekko_log("begin_frame result=no_session");
-    return;
-  }
-  if (g_GekkoStopRequested.load(std::memory_order_relaxed))
-  {
-    write_gekko_log("begin_frame result=stop_requested");
-    return;
-  }
-
-  const auto networkPollTime = std::chrono::steady_clock::now();
-  gekko_network_poll(g_GekkoSession);
-  summaryNetworkPollUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                             std::chrono::steady_clock::now() - networkPollTime)
-                             .count();
-
-  // Store the local player's input for the CURRENT frame before calling update_session
-  // Use g_GekkoLocalPlayer consistently (which equals m_local_player->pid - 1)
-  if (g_GekkoLocalPlayer >= 0 && g_GekkoLocalPlayer < (int)g_GekkoPlayers &&
-      g_GekkoLocalPlayer < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-  {
-    // Write the pad input to the current frame slot
-    const int slot = netplay_client->current_frame % g_GekkoInputRingSize;
-    g_Inputs[g_GekkoLocalPlayer][slot].game_pad = pad;
-
-    // Submit the local input for the CURRENT frame BEFORE update_session
-    Inputs* localInputPtr = &g_Inputs[g_GekkoLocalPlayer][slot];
-
-    if (g_GekkoLogEnabled && (current_frame % 60 == 0 || current_frame < 5))
-    {
-      std::ostringstream stream;
-      stream << "submitting_input g_GekkoLocalPlayer=" << g_GekkoLocalPlayer
-             << " current_frame=" << current_frame << " slot=" << slot << " buttons=0x" << std::hex
-             << std::setw(8) << std::setfill('0') << pad.buttons << " g_GekkoLocalHandles["
-             << g_GekkoLocalPlayer << "]="
-             << (g_GekkoLocalPlayer < (int)g_GekkoLocalHandles.size() ?
-                     g_GekkoLocalHandles[g_GekkoLocalPlayer] :
-                     -999);
-      write_gekko_log(stream.str());
-    }
-
-    bool submitted = submit_local_input(localInputPtr, g_GekkoLocalPlayer);
-
-    if (!submitted && g_GekkoLogEnabled)
-    {
-      std::ostringstream stream;
-      stream << "input_submit_failed g_GekkoLocalPlayer=" << g_GekkoLocalPlayer << " handle="
-             << (g_GekkoLocalPlayer < (int)g_GekkoLocalHandles.size() ?
-                     g_GekkoLocalHandles[g_GekkoLocalPlayer] :
-                     -999);
-      write_gekko_log(stream.str());
-    }
-  }
-
-  g_GekkoHasLatchedInput = false;
-  g_GekkoPendingSaves.clear();
-  advance_frames = 0;
-  {
-    if (g_GekkoStopRequested.load(std::memory_order_relaxed))
-    {
-      write_gekko_log("begin_frame result=stop_requested");
-      return;
-    }
-
-    int count = 0;
-    const auto updateSessionTime = std::chrono::steady_clock::now();
-    GekkoGameEvent** events = gekko_update_session(g_GekkoSession, &count);
-    summaryUpdateSessionUs += std::chrono::duration_cast<std::chrono::microseconds>(
-                                  std::chrono::steady_clock::now() - updateSessionTime)
-                                  .count();
-    log_session_events();
-
-    if (count == 0)
-    {
-      g_GekkoWaitingLoops++;
-      summaryWaitLoops++;
-      if (g_GekkoLogEnabled && (g_GekkoWaitingLoops <= 20 || (g_GekkoWaitingLoops % 60) == 0))
-      {
-        std::ostringstream stream;
-        stream << "update_session result=waiting loop=" << g_GekkoWaitingLoops << " events=0";
-        write_gekko_log(stream.str());
-      }
-    }
-    else if (g_GekkoLogEnabled)
-    {
-      std::ostringstream stream;
-      stream << "update_session result=events count=" << count;
-      for (int i = 0; i < count; i++)
-      {
-        if (events[i] != nullptr)
-        {
-          stream << " event" << i << "=" << gekko_game_event_name(events[i]->type);
-          if (events[i]->type == GekkoAdvanceEvent)
-          {
-            stream << "(frame=" << events[i]->data.adv.frame
-                   << ",rollback=" << (events[i]->data.adv.rolling_back ? "true" : "false")
-                   << ",runahead=" << (events[i]->data.adv.running_ahead ? "true" : "false") << ")";
-          }
-          else if (events[i]->type == GekkoSaveEvent)
-          {
-            stream << "(frame=" << events[i]->data.save.frame << ")";
-          }
-          else if (events[i]->type == GekkoLoadEvent)
-          {
-            stream << "(frame=" << events[i]->data.load.frame
-                   << ",len=" << events[i]->data.load.state_len << ")";
-          }
-        }
-      }
-      write_gekko_log(stream.str());
-      g_GekkoWaitingLoops = 0;
-    }
     else
     {
-      g_GekkoWaitingLoops = 0;
-    }
-
-    bool hasRealAdvance = false;
-    summaryEventCount += count;
-
-    // Collect all events into the callback queue; the actual save/load/advance
-    // work is deferred and performed by EXI execute commands triggered by the game.
-    {
-      std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-      m_gekko_callback_codes.clear();
-      m_pending_gekko_saves.clear();
-      m_pending_gekko_loads.clear();
-      m_pending_gekko_advances.clear();
-
-      for (int i = 0; i < count; i++)
+      if (frame_difference <= Rollback::NUM_SAVE_SLOTS + delay)
       {
-        GekkoGameEvent* event = events[i];
-        if (event == nullptr)
-          continue;
-
-        switch (event->type)
-        {
-        case GekkoSaveEvent:
-        {
-          // Don't queue saves for frame -1
-          if (event->data.save.frame == -1)
-          {
-            write_gekko_log("skip_save frame=-1");
-            break;
-          }
-
-          summarySaveCount++;
-          PendingGekkoSave save;
-          save.frame = event->data.save.frame;
-          save.checksum = event->data.save.checksum;
-          save.stateLen = event->data.save.state_len;
-          save.state = event->data.save.state;
-          m_pending_gekko_saves.push_back(save);
-          m_gekko_callback_codes.push_back(static_cast<u8>(CALLBACK_SAVE));
-          write_gekko_log("queue_callback type=save frame=" + std::to_string(save.frame));
-          break;
-        }
-        case GekkoLoadEvent:
-        {
-          summaryLoadCount++;
-          PendingGekkoLoad load;
-          load.frame = event->data.load.frame;
-          load.state_len = event->data.load.state_len;
-          load.state = event->data.load.state;
-          m_pending_gekko_loads.push_back(load);
-          m_gekko_callback_codes.push_back(static_cast<u8>(CALLBACK_LOAD));
-          write_gekko_log("queue_callback type=load frame=" + std::to_string(load.frame));
-          break;
-        }
-        case GekkoAdvanceEvent:
-        {
-          // Latch inputs for this advance event immediately so EXI reads
-          // see the correct data when CMD_EXECUTE_ADVANCE is processed.
-          const auto latchInputTime = std::chrono::steady_clock::now();
-          advance_frames++;
-
-          if (g_GekkoLogEnabled && (current_frame % 60 == 0 || current_frame < 5))
-          {
-            std::ostringstream stream;
-            stream << "latching_remote_inputs advance_frame=" << event->data.adv.frame;
-            for (int port = 0; port < g_GekkoPlayers; port++)
-            {
-              const int handle =
-                  (port < (int)g_GekkoPlayerHandles.size()) ? g_GekkoPlayerHandles[port] : -1;
-              if (handle >= 0)
-              {
-                const Inputs* input = &((Inputs*)(event->data.adv.inputs))[handle];
-                stream << " port" << port << "_handle" << handle << "_buttons=0x" << std::hex
-                       << std::setw(8) << std::setfill('0') << input->game_pad.buttons;
-              }
-            }
-            write_gekko_log(stream.str());
-          }
-
-          for (int playerPort = 0; playerPort < g_GekkoPlayers; playerPort++)
-          {
-            const int handle = (playerPort < (int)g_GekkoPlayerHandles.size()) ?
-                                   g_GekkoPlayerHandles[playerPort] :
-                                   -1;
-            if (handle >= 0 && handle < g_GekkoPlayers && playerPort < (int)g_Inputs.size() &&
-                g_GekkoInputRingSize > 0)
-            {
-              g_Inputs[playerPort][event->data.adv.frame % g_GekkoInputRingSize] =
-                  ((Inputs*)(event->data.adv.inputs))[handle];
-            }
-          }
-          summaryLatchInputUs += std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - latchInputTime)
-                                     .count();
-
-          PendingGekkoAdvance adv;
-          adv.frame = event->data.adv.frame;
-          adv.rolling_back = event->data.adv.rolling_back;
-          adv.running_ahead = event->data.adv.running_ahead;
-          m_pending_gekko_advances.push_back(adv);
-
-          GekkoCallbackCode code;
-          if (event->data.adv.rolling_back)
-          {
-            code = CALLBACK_ADVANCE_ROLLBACK;
-            summaryRollbackAdvanceCount++;
-          }
-          else if (event->data.adv.running_ahead)
-          {
-            code = CALLBACK_ADVANCE_RUNAHEAD;
-            summaryRunaheadAdvanceCount++;
-          }
-          else
-          {
-            code = CALLBACK_ADVANCE;
-            hasRealAdvance = true;
-          }
-          m_gekko_callback_codes.push_back(static_cast<u8>(code));
-          write_gekko_log("queue_callback type=advance frame=" + std::to_string(adv.frame) +
-                          " rollback=" + std::to_string(adv.rolling_back) +
-                          " runahead=" + std::to_string(adv.running_ahead));
-
-          break;
-        }
-        default:
-          break;
-        }
+        needs_to_rollback = true;
+        farthest_rollback_frame = std::max(inputs.at(local_player_port).size() - frame_difference,
+                                           farthest_rollback_frame);
       }
-    }
-
-    if (hasRealAdvance)
-    {
-      if (g_GekkoLogEnabled)
+      else
       {
-        const auto endTime = std::chrono::steady_clock::now();
-        const auto elapsedUs =
-            std::chrono::duration_cast<std::chrono::microseconds>(endTime - beginTime).count();
-        if (elapsedUs >= 2000 || summaryRollbackAdvanceCount > 0 || summaryLoadCount > 0 ||
-            summaryWaitLoops > 0)
+        while (frame_difference > Rollback::NUM_SAVE_SLOTS + delay)
         {
-          std::ostringstream stream;
-          stream << "frame_summary elapsed_us=" << elapsedUs << " events=" << summaryEventCount
-                 << " saves=" << summarySaveCount << " loads=" << summaryLoadCount
-                 << " rollback_advances=" << summaryRollbackAdvanceCount
-                 << " runahead_advances=" << summaryRunaheadAdvanceCount
-                 << " wait_loops=" << summaryWaitLoops << " debug_begin_us=" << summaryDebugBeginUs
-                 << " network_poll_us=" << summaryNetworkPollUs << " pacing_us=" << summaryPacingUs
-                 << " submit_input_us=" << summarySubmitInputUs
-                 << " update_session_us=" << summaryUpdateSessionUs
-                 << " latch_input_us=" << summaryLatchInputUs << " save_total_us=" << summarySaveUs
-                 << " load_total_us=" << summaryLoadUs << " resim_total_us=" << summaryResimUs
-                 << " resim_max_us=" << summaryMaxResimUs
-                 << " last_load_us=" << g_GekkoLastLoadStateUs
-                 << " last_save_us=" << g_GekkoLastSaveStateUs
-                 << " last_run_frame_us=" << g_GekkoLastRunFrameUs
-                 << " pending_save_us=" << g_GekkoLastPendingSaveUs
-                 << " frames_ahead=" << std::fixed << std::setprecision(2)
-                 << gekko_frames_ahead(g_GekkoSession);
-          write_gekko_log(stream.str());
+          frame_difference = static_cast<long long>(inputs.at(local_player_port).size()) -
+                             static_cast<long long>(inputs.at(remote_players).size());
+          wait_for_inputs.wait_for(lock, 1ms);
         }
+
+        needs_to_rollback = true;
+        farthest_rollback_frame = Rollback::NUM_SAVE_SLOTS + delay;
+        remote_players = 0;
       }
-      write_gekko_log("begin_frame result=real_frame");
     }
   }
+
+  if (needs_to_rollback)
+    RollbackToFrame(farthest_rollback_frame);
 }
+
 bool NetPlayClient::IsRollingBack()
 {
   return is_rollingback.load();
-}
-
-void NetPlayClient::SetDynamicSaveRegions(int frame, std::vector<DynamicSaveRegion> regions)
-{
-  // No-op: IncrementalRB handles this automatically
-}
-
-const std::vector<DynamicSaveRegion>& NetPlayClient::GetDynamicSaveRegions(int frame) const
-{
-  static const std::vector<NetPlay::DynamicSaveRegion> empty;
-  return empty;
-}
-
-std::vector<u8> NetPlayClient::PopCallbackCodes()
-{
-  std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-  std::vector<u8> codes = std::move(m_gekko_callback_codes);
-  m_gekko_callback_codes.clear();
-  return codes;
-}
-
-bool NetPlayClient::ExecutePendingSave()
-{
-  PendingGekkoSave save;
-  {
-    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-    if (m_pending_gekko_saves.empty())
-      return false;
-    save = m_pending_gekko_saves.front();
-    m_pending_gekko_saves.erase(m_pending_gekko_saves.begin());
-  }
-  write_gekko_log("execute_save frame=" + std::to_string(save.frame));
-  if (save.frame < 0 || !save_gekko_state(save))
-  {
-    write_gekko_log("execute_save result=fail");
-    return false;
-  }
-  write_gekko_log("execute_save result=ok");
-  return true;
-}
-
-int NetPlayClient::GetPendingLoadFrame() const
-{
-  std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-  if (m_pending_gekko_loads.empty())
-    return -1;
-  return m_pending_gekko_loads.front().frame;
-}
-
-bool NetPlayClient::ExecutePendingLoad()
-{
-  PendingGekkoLoad load;
-  {
-    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-    if (m_pending_gekko_loads.empty())
-      return false;
-    load = m_pending_gekko_loads.front();
-    m_pending_gekko_loads.erase(m_pending_gekko_loads.begin());
-  }
-  write_gekko_log("execute_load frame=" + std::to_string(load.frame));
-  // Build a synthetic GekkoGameEvent on the stack so we can reuse load_gekko_state
-  GekkoGameEvent event = {};
-  event.type = GekkoLoadEvent;
-  event.data.load.frame = load.frame;
-  event.data.load.state_len = load.state_len;
-  event.data.load.state = load.state;
-  if (!load_gekko_state(&event))
-  {
-    write_gekko_log("execute_load result=fail");
-    return false;
-  }
-  current_frame = load.frame - 1;
-  // Update current_frame to match the loaded frame to prevent desync
-  write_gekko_log("execute_load result=ok current_frame=" + std::to_string(current_frame));
-  return true;
-}
-
-s32 NetPlayClient::ExecuteAdvanceFrame()
-{
-  PendingGekkoAdvance adv;
-  {
-    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-    if (m_pending_gekko_advances.empty())
-      return -1;
-    adv = m_pending_gekko_advances.front();
-    m_pending_gekko_advances.erase(m_pending_gekko_advances.begin());
-  }
-  if (adv.rolling_back || adv.running_ahead)
-  {
-    g_GekkoHasLatchedInput = false;
-  }
-  write_gekko_log("execute_advance frame=" + std::to_string(adv.frame)
-                  + " rollback=" + std::to_string(adv.rolling_back)
-                  + " runahead=" + std::to_string(adv.running_ahead));
-  return static_cast<s32>(adv.frame);
-}
-
-GCPadStatus NetPlayClient::GetInputForFrame(int player_port, s32 frame) const
-{
-  if (player_port < 0 || player_port >= (int)g_Inputs.size() || g_GekkoInputRingSize <= 0)
-    return GCPadStatus{};
-  return g_Inputs[player_port][frame % g_GekkoInputRingSize].emu_pad;
-}
-
-BrawlbackPad NetPlayClient::GetBrawlbackInputForFrame(int player_port, s32 frame) const
-{
-  if (player_port < 0 || player_port >= (int)g_Inputs.size() || g_GekkoInputRingSize <= 0)
-    return BrawlbackPad{};
-  return g_Inputs[player_port][frame % g_GekkoInputRingSize].game_pad;
-}
-
-bool NetPlayClient::IsStarted()
-{
-  return game_started.load();
 }
 
 bool NetPlayClient::IsInRollbackMode()
 {
   return m_net_settings.m_RollbackMode;
 }
+
 void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
 {
   packet >> m_sync_save_data_count;
@@ -2888,7 +1403,7 @@ void NetPlayClient::OnSyncSaveDataWii(sf::Packet& packet)
   {
     INFO_LOG_FMT(NETPLAY, "Received redirected save.");
     if (!DecompressPacketIntoFolder(packet, redirect_path))
-{
+    {
       PanicAlertFmtT("Failed to write redirected save.");
       SyncSaveDataResponse(false);
       return;
@@ -2909,7 +1424,7 @@ void NetPlayClient::OnSyncSaveDataGBA(sf::Packet& packet)
   const std::string path =
       fmt::format("{}{}{}.sav", File::GetUserPath(D_GBAUSER_IDX), GBA_SAVE_NETPLAY, slot + 1);
   if (File::Exists(path) && !File::Delete(path))
-{
+  {
     PanicAlertFmtT("Failed to delete NetPlay GBA{0} save file. Verify your write permissions.",
                    slot + 1);
     SyncSaveDataResponse(false);
@@ -3141,34 +1656,9 @@ void NetPlayClient::OnGameDigestAbort()
   m_dialog->AbortGameDigest();
 }
 
-void NetPlayClient::OnFrameAck(sf::Packet& packet)
+void NetPlayClient::Send(const sf::Packet& packet, const u8 channel_id)
 {
-  int frame;
-  u8 playerIdx;
-
-  packet >> frame;
-  packet >> playerIdx;
-
-  Brawlback::FrameAck frameAck;
-  frameAck.frame = frame;
-  frameAck.playerIdx = playerIdx;
-
-  int local_player_port = -1;
-  for (int i = 0; i < m_pad_map.size(); i++)
-  {
-    if (m_pad_map.at(i) == m_local_player->pid)
-      local_player_port = i;
-  }
-
-  if (playerIdx != local_player_port)  // should be local player
-    ERROR_LOG_FMT(BRAWLBACK, "FrameAck playeridx is not local player idx! (This is wrong...)\n");
-  else
-    time_sync->ProcessFrameAck(&frameAck);
-}
-
-void NetPlayClient::Send(const sf::Packet& packet, const u8 channel_id, _ENetPacketFlag flag)
-{
-  Common::ENet::SendPacket(m_server, packet, channel_id, flag);
+  Common::ENet::SendPacket(m_server, packet, channel_id);
 }
 
 void NetPlayClient::DisplayPlayersPing()
@@ -3184,31 +1674,6 @@ u32 NetPlayClient::GetPlayersMaxPing() const
 {
   return std::ranges::max_element(m_players, {}, [](const auto& kv) { return kv.second.ping; })
       ->second.ping;
-}
-
-u32 NetPlayClient::CalculatePingVariance()
-{
-  std::lock_guard lkp(m_crit.players);
-
-  std::vector<u32> pings;
-  for (const auto& [pid, player] : m_players)
-  {
-    if (pid != m_local_player->pid)
-      pings.push_back(player.ping);
-  }
-
-  if (pings.empty())
-    return 0;
-
-  u32 mean = std::accumulate(pings.begin(), pings.end(), 0u) / (u32)pings.size();
-  u32 variance = 0;
-
-  for (u32 ping : pings)
-  {
-    variance += (ping > mean) ? (ping - mean) : (mean - ping);
-  }
-
-  return variance / (u32)pings.size();
 }
 
 void NetPlayClient::Disconnect()
@@ -3233,19 +1698,18 @@ void NetPlayClient::Disconnect()
       return;
     default:
       break;
-}
+    }
   }
   // didn't disconnect gracefully force disconnect
   enet_peer_reset(m_server);
   m_server = nullptr;
 }
 
-void NetPlayClient::SendAsync(sf::Packet&& packet, const u8 channel_id, _ENetPacketFlag flag)
+void NetPlayClient::SendAsync(sf::Packet&& packet, const u8 channel_id)
 {
-  if (netplay_client)
   {
     std::lock_guard lkq(m_crit.async_queue_write);
-    m_async_queue.Push(AsyncQueueEntry{std::move(packet), channel_id, flag});
+    m_async_queue.Push(AsyncQueueEntry{std::move(packet), channel_id});
   }
   Common::ENet::WakeupThread(m_client);
 }
@@ -3263,13 +1727,13 @@ void NetPlayClient::ThreadFunc()
     if (qos_session.Successful())
     {
       m_dialog->AppendChat(
-          Common::GetStringT("Quality of Service (QoS) was successfully enabled.\nBuffer should be set to your ping divided by 16, at a minimum of 2."));
+          Common::GetStringT("Quality of Service (QoS) was successfully enabled."));
     }
-  else
-  {
+    else
+    {
       m_dialog->AppendChat(Common::GetStringT("Quality of Service (QoS) couldn't be enabled."));
+    }
   }
-}
 
   while (m_do_loop.IsSet())
   {
@@ -3283,7 +1747,7 @@ void NetPlayClient::ThreadFunc()
       INFO_LOG_FMT(NETPLAY, "Processing async queue event.");
       {
         auto& e = m_async_queue.Front();
-        Send(e.packet, e.channel_id, e.flag);
+        Send(e.packet, e.channel_id);
       }
       INFO_LOG_FMT(NETPLAY, "Processing async queue event done.");
       m_async_queue.Pop();
@@ -3318,7 +1782,8 @@ void NetPlayClient::ThreadFunc()
         if (static_cast<int>(netEvent.type) == Common::ENet::SKIPPABLE_EVENT)
           INFO_LOG_FMT(NETPLAY, "enet_host_service: skippable packet event");
         else
-          ERROR_LOG_FMT(NETPLAY, "enet_host_service: unknown event type: {}", int(netEvent.type));
+          ERROR_LOG_FMT(NETPLAY, "enet_host_service: unknown event type: {}",
+                        static_cast<int>(netEvent.type));
         break;
       }
     }
@@ -3608,11 +2073,152 @@ void NetPlayClient::OnConnectFailed(Common::TraversalConnectFailedReason reason)
   }
 }
 
+// called from ---CPU--- thread
+bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatus* pad_status)
+{
+  // The interface for this is extremely silly.
+  //
+  // Imagine a physical device that links three GameCubes together
+  // and emulates NetPlay that way. Which GameCube controls which
+  // in-game controllers can be configured on the device (m_pad_map)
+  // but which sockets on each individual GameCube should be used
+  // to control which players? The solution that Dolphin uses is
+  // that we hardcode the knowledge that they go in order, so if
+  // you have a 3P game with three GameCubes, then every single
+  // controller should be plugged into slot 1.
+  //
+  // If you have a 4P game, then one of the GameCubes will have
+  // a controller plugged into slot 1, and another in slot 2.
+  //
+  // The slot number is the "local" pad number, and what player
+  // it actually means is the "in-game" pad number.
+
+  // When the 1st in-game pad is polled and batching is set, the
+  // others will be polled as well. To reduce latency, we poll all
+  // local controllers at once and then send the status to the other
+  // clients.
+  //
+  // Batching is enabled when polled from VI. If batching is not
+  // enabled, the poll is probably from MMIO, which can poll any
+  // specific pad arbitrarily. In this case, we poll just that pad
+  // and send it.
+
+  // When here when told to so we don't deadlock in certain situations
+  while (m_wait_on_input)
+  {
+    if (!m_is_running.IsSet())
+    {
+      return false;
+    }
+
+    if (m_wait_on_input_received)
+    {
+      // Tell the server we've acknowledged the message
+      sf::Packet spac;
+      spac << MessageID::GolfPrepare;
+      Send(spac);
+
+      m_wait_on_input_received = false;
+    }
+
+    m_wait_on_input_event.Wait();
+  }
+
+  if (IsFirstInGamePad(pad_nb) && batching)
+  {
+    sf::Packet packet;
+    packet << MessageID::PadData;
+
+    bool send_packet = false;
+    const int num_local_pads = NumLocalPads();
+    for (int local_pad = 0; local_pad < num_local_pads; local_pad++)
+    {
+      send_packet = PollLocalPad(local_pad, packet) || send_packet;
+    }
+
+    if (send_packet)
+      SendAsync(std::move(packet));
+
+    if (m_host_input_authority)
+      SendPadHostPoll(-1);
+  }
+
+  if (!batching)
+  {
+    const int local_pad = InGamePadToLocalPad(pad_nb);
+    if (local_pad < 4)
+    {
+      sf::Packet packet;
+      packet << MessageID::PadData;
+      if (PollLocalPad(local_pad, packet))
+        SendAsync(std::move(packet));
+    }
+
+    if (m_host_input_authority)
+      SendPadHostPoll(pad_nb);
+  }
+
+  if (m_host_input_authority)
+  {
+    if (m_local_player->pid != m_current_golfer)
+    {
+      // CoreTiming acts funny and causes what looks like frame skip if
+      // we toggle the emulation speed too quickly, so to prevent this
+      // we wait until the buffer has been over for at least 1 second.
+
+      const bool buffer_over_target = m_pad_buffer[pad_nb].Size() > m_target_buffer_size + 1;
+      if (!buffer_over_target)
+        m_buffer_under_target_last = std::chrono::steady_clock::now();
+
+      std::chrono::duration<double> time_diff =
+          std::chrono::steady_clock::now() - m_buffer_under_target_last;
+      if (time_diff.count() >= 1.0 || !buffer_over_target)
+      {
+        // run fast if the buffer is overfilled, otherwise run normal speed
+        Config::SetCurrent(Config::MAIN_EMULATION_SPEED, buffer_over_target ? 0.0f : 1.0f);
+      }
+    }
+    else
+    {
+      // Set normal speed when we're the host, otherwise it can get stuck at unlimited
+      Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
+    }
+  }
+
+  // Now, we either use the data pushed earlier, or wait for the
+  // other clients to send it to us
+  while (m_pad_buffer[pad_nb].Size() == 0)
+  {
+    if (!m_is_running.IsSet())
+    {
+      return false;
+    }
+
+    m_gc_pad_event.Wait();
+  }
+
+  m_pad_buffer[pad_nb].Pop(*pad_status);
+
+  auto& movie = Core::System::GetInstance().GetMovie();
+  if (movie.IsRecordingInput())
+  {
+    movie.RecordInput(pad_status, pad_nb);
+    movie.InputUpdate();
+  }
+  else
+  {
+    movie.CheckPadStatus(pad_status, pad_nb);
+  }
+
+  return true;
+}
+
 u64 NetPlayClient::GetInitialRTCValue() const
 {
   return m_initial_rtc;
 }
 
+// called from ---CPU--- thread
 bool NetPlayClient::WiimoteUpdate(const std::span<WiimoteDataBatchEntry>& entries)
 {
   for (const WiimoteDataBatchEntry& entry : entries)
@@ -3651,231 +2257,6 @@ bool NetPlayClient::WiimoteUpdate(const std::span<WiimoteDataBatchEntry>& entrie
   return true;
 }
 
-GCPadStatus NetPlayClient::GetDefaultPad(int config)
-{
-  GCPadStatus pad = GCPadStatus{};
-
-  pad.stickX = pad.MAIN_STICK_CENTER_X;
-  pad.stickY = pad.MAIN_STICK_CENTER_Y;
-  pad.substickX = pad.C_STICK_CENTER_X;
-  pad.substickY = pad.C_STICK_CENTER_Y;
-
-  return pad;
-}
-    // called from ---CPU--- thread
-// called from ---CPU--- thread
-bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatus* pad_status)
-{
-  if (m_net_settings.m_RollbackMode)
-  {
-    *pad_status = GetDefaultPad(12);
-    if (IsFirstInGamePad(pad_nb) && batching)
-    {
-      const int num_local_pads = NumLocalPads();
-      for (int local_pad = 0; local_pad < num_local_pads; local_pad++)
-      {
-        GCPadStatus local_pad_status;
-        if (Config::Get(Config::GetInfoForSIDevice(local_pad)) ==
-            SerialInterface::SIDEVICE_WIIU_ADAPTER)
-        {
-          local_pad_status = GCAdapter::Input(local_pad);
-        }
-        else
-        {
-          local_pad_status = Pad::GetStatus(local_pad);
-        }
-        const int ingame_pad = LocalPadToInGamePad(local_pad);
-        if (ingame_pad < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-          g_Inputs[ingame_pad][current_frame % g_GekkoInputRingSize].emu_pad = local_pad_status;
-      }
-    }
-
-    if (batching)
-    {
-      if (pad_nb < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-        *pad_status = g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize].emu_pad;
-    }
-
-    if (!batching)
-    {
-      const int local_pad = InGamePadToLocalPad(pad_nb);
-      if (local_pad < 4)
-      {
-        if (Config::Get(Config::GetInfoForSIDevice(local_pad)) ==
-            SerialInterface::SIDEVICE_WIIU_ADAPTER)
-        {
-          *pad_status = GCAdapter::Input(local_pad);
-        }
-        else
-        {
-          *pad_status = Pad::GetStatus(local_pad);
-        }
-      }
-      if (pad_nb < (int)g_Inputs.size() && g_GekkoInputRingSize > 0)
-        g_Inputs[pad_nb][current_frame % g_GekkoInputRingSize].emu_pad = *pad_status;
-    }
-  }
-  else
-  {
-    // The interface for this is extremely silly.
-    //
-    // Imagine a physical device that links three GameCubes together
-    // and emulates NetPlay that way. Which GameCube controls which
-    // in-game controllers can be configured on the device (m_pad_map)
-    // but which sockets on each individual GameCube should be used
-    // to control which players? The solution that Dolphin uses is
-    // that we hardcode the knowledge that they go in order, so if
-    // you have a 3P game with three GameCubes, then every single
-    // controller should be plugged into slot 1.
-    //
-    // If you have a 4P game, then one of the GameCubes will have
-    // a controller plugged into slot 1, and another in slot 2.
-    //
-    // The slot number is the "local" pad number, and what player
-    // it actually means is the "in-game" pad number.
-
-    // When the 1st in-game pad is polled and batching is set, the
-    // others will be polled as well. To reduce latency, we poll all
-    // local controllers at once and then send the status to the other
-    // clients.
-    //
-    // Batching is enabled when polled from VI. If batching is not
-    // enabled, the poll is probably from MMIO, which can poll any
-    // specific pad arbitrarily. In this case, we poll just that pad
-    // and send it.
-
-    // When here when told to so we don't deadlock in certain situations
-    while (m_wait_on_input)
-    {
-      if (!m_is_running.IsSet())
-      {
-        return false;
-      }
-
-      if (m_wait_on_input_received)
-      {
-        // Tell the server we've acknowledged the message
-        sf::Packet spac;
-        spac << MessageID::GolfPrepare;
-        Send(spac);
-
-        m_wait_on_input_received = false;
-      }
-
-      m_wait_on_input_event.Wait();
-    }
-
-    if (IsFirstInGamePad(pad_nb) && batching)
-    {
-      sf::Packet packet;
-      packet << MessageID::PadData;
-
-      bool send_packet = false;
-      const int num_local_pads = NumLocalPads();
-      for (int local_pad = 0; local_pad < num_local_pads; local_pad++)
-      {
-        send_packet = PollLocalPad(local_pad, packet) || send_packet;
-      }
-
-      if (send_packet)
-        SendAsync(std::move(packet));
-
-      if (m_host_input_authority)
-        SendPadHostPoll(-1);
-    }
-
-    if (!batching)
-    {
-      const int local_pad = InGamePadToLocalPad(pad_nb);
-      if (local_pad < 4)
-      {
-        sf::Packet packet;
-        packet << MessageID::PadData;
-        if (PollLocalPad(local_pad, packet))
-          SendAsync(std::move(packet));
-      }
-
-      if (m_host_input_authority)
-        SendPadHostPoll(pad_nb);
-    }
-
-    if (m_host_input_authority)
-    {
-      if (m_local_player->pid != m_current_golfer)
-      {
-        // CoreTiming acts funny and causes what looks like frame skip if
-        // we toggle the emulation speed too quickly, so to prevent this
-        // we wait until the buffer has been over for at least 1 second.
-
-        const bool buffer_over_target = m_pad_buffer[pad_nb].Size() > m_minimum_buffer_size + 1;
-        if (!buffer_over_target)
-          m_buffer_under_target_last = std::chrono::steady_clock::now();
-
-        std::chrono::duration<double> time_diff =
-            std::chrono::steady_clock::now() - m_buffer_under_target_last;
-        if (time_diff.count() >= 1.0 || !buffer_over_target)
-        {
-          // run fast if the buffer is overfilled, otherwise run normal speed
-          Config::SetCurrent(Config::MAIN_EMULATION_SPEED, buffer_over_target ? 0.0f : 1.0f);
-        }
-      }
-      else
-      {
-        // Set normal speed when we're the host, otherwise it can get stuck at unlimited
-        Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
-      }
-    }
-
-    // Now, we either use the data pushed earlier, or wait for the
-    // other clients to send it to us
-    while (m_pad_buffer[pad_nb].Size() == 0)
-    {
-      if (!m_is_running.IsSet())
-      {
-        return false;
-      }
-
-      m_gc_pad_event.Wait();
-    }
-
-    m_pad_buffer[pad_nb].Pop(*pad_status);
-  }
-  auto& movie = Core::System::GetInstance().GetMovie();
-  if (movie.IsRecordingInput())
-  {
-    movie.RecordInput(pad_status, pad_nb);
-    movie.InputUpdate();
-  }
-  else
-  {
-    movie.CheckPadStatus(pad_status, pad_nb);
-  }
-
-  return true;
-}
-
-bool NetPlayClient::AddLocalWiimoteToBuffer(const int local_wiimote,
-                                            const WiimoteEmu::SerializedWiimoteState& state,
-                                            sf::Packet& packet)
-{
-  const int ingame_pad = LocalWiimoteToInGameWiimote(local_wiimote);
-  bool data_added = false;
-
-  // adjust the buffer either up or down
-  // inserting multiple padstates or dropping states
-  while (m_wiimote_buffer[ingame_pad].Size() <= m_minimum_buffer_size)
-  {
-    // add to buffer
-    m_wiimote_buffer[ingame_pad].Push(state);
-
-    // add to packet
-    AddWiimoteStateToPacket(ingame_pad, state, packet);
-    data_added = true;
-  }
-
-  return data_added;
-}
-
 bool NetPlayClient::PollLocalPad(const int local_pad, sf::Packet& packet)
 {
   const int ingame_pad = LocalPadToInGamePad(local_pad);
@@ -3896,37 +2277,56 @@ bool NetPlayClient::PollLocalPad(const int local_pad, sf::Packet& packet)
     pad_status = Pad::GetStatus(local_pad);
   }
 
-  if (!m_net_settings.m_RollbackMode)
+  if (m_host_input_authority)
   {
-    if (m_host_input_authority)
+    if (m_local_player->pid != m_current_golfer)
     {
-      if (m_local_player->pid != m_current_golfer)
-      {
-        // add to packet
-        AddPadStateToPacket(ingame_pad, pad_status, packet);
-        data_added = true;
-      }
-      else
-      {
-        // set locally
-        m_last_pad_status[ingame_pad] = pad_status;
-        m_first_pad_status_received[ingame_pad] = true;
-      }
+      // add to packet
+      AddPadStateToPacket(ingame_pad, pad_status, packet);
+      data_added = true;
     }
     else
     {
-      // adjust the buffer either up or down
-      // inserting multiple padstates or dropping states
-      while (m_pad_buffer[ingame_pad].Size() <= m_minimum_buffer_size)
-      {
-        // add to buffer
-        m_pad_buffer[ingame_pad].Push(pad_status);
-
-        // add to packet
-        AddPadStateToPacket(ingame_pad, pad_status, packet);
-        data_added = true;
-      }
+      // set locally
+      m_last_pad_status[ingame_pad] = pad_status;
+      m_first_pad_status_received[ingame_pad] = true;
     }
+  }
+  else
+  {
+    // adjust the buffer either up or down
+    // inserting multiple padstates or dropping states
+    while (m_pad_buffer[ingame_pad].Size() <= m_target_buffer_size)
+    {
+      // add to buffer
+      m_pad_buffer[ingame_pad].Push(pad_status);
+
+      // add to packet
+      AddPadStateToPacket(ingame_pad, pad_status, packet);
+      data_added = true;
+    }
+  }
+
+  return data_added;
+}
+
+bool NetPlayClient::AddLocalWiimoteToBuffer(const int local_wiimote,
+                                            const WiimoteEmu::SerializedWiimoteState& state,
+                                            sf::Packet& packet)
+{
+  const int ingame_pad = LocalWiimoteToInGameWiimote(local_wiimote);
+  bool data_added = false;
+
+  // adjust the buffer either up or down
+  // inserting multiple padstates or dropping states
+  while (m_wiimote_buffer[ingame_pad].Size() <= m_target_buffer_size)
+  {
+    // add to buffer
+    m_wiimote_buffer[ingame_pad].Push(state);
+
+    // add to packet
+    AddWiimoteStateToPacket(ingame_pad, state, packet);
+    data_added = true;
   }
 
   return data_added;
@@ -4008,39 +2408,12 @@ void NetPlayClient::InvokeStop()
   m_wii_pad_event.Set();
   m_first_pad_status_received_event.Set();
   m_wait_on_input_event.Set();
-
-  std::ofstream json_stream;
-  auto t = std::time(nullptr);
-  auto tm = *std::localtime(&t);
-  std::ostringstream oss;
-  oss << std::put_time(&tm, "%d-%m-%Y_%H-%M-%S");
-  auto timestamp = oss.str();
-  std::string cur_directory = File::GetExeDirectory();
-  File::OpenFStream(json_stream, cur_directory + DIR_SEP "replay_" + timestamp + ".json",
-                    std::ios_base::out);
-  if (json_stream.is_open())
-  {
-    json_stream << inputs_output;
-    json_stream.close();
-  }
 }
 
-// called from ---GUI--- thread
+// called from ---GUI--- thread and ---NETPLAY--- thread (client side)
 bool NetPlayClient::StopGame()
 {
   InvokeStop();
-
-  if (IsInRollbackMode())
-  {
-    CloseSession();
-    game_started.store(false);
-    g_GekkoSpeedScale = 1.0;
-    g_GekkoTimesyncTargetScale = 1.0;
-    g_GekkoTimesyncSampleCounter = 0;
-    current_frame = -1;
-    advance_frames = 0;
-    Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0);
-  }
 
   NetPlay_Disable();
 
@@ -4053,7 +2426,6 @@ bool NetPlayClient::StopGame()
 // called from ---GUI--- thread
 void NetPlayClient::Stop()
 {
-  
   if (!m_is_running.IsSet())
     return;
 
@@ -4216,7 +2588,7 @@ void NetPlayClient::SendGameStatus()
     {
       result = SyncIdentifierComparison::DifferentGame;
     }
-}
+  }
 
   packet << result;
   Send(packet);
@@ -4279,7 +2651,10 @@ static std::string SHA1Sum(const std::string& file_path,
   // Convert to hex
   return fmt::format("{:02x}", fmt::join(ctx->Finish(), ""));
 }
-
+SyncIdentifier NetPlayClient::GetBrawlFileIdentifier()
+{
+  return SyncIdentifier{{}, "Save", {}, {}, {}, {}};
+}
 void NetPlayClient::ComputeGameDigest(const SyncIdentifier& sync_identifier)
 {
   if (m_should_compute_game_digest)
@@ -4294,7 +2669,8 @@ void NetPlayClient::ComputeGameDigest(const SyncIdentifier& sync_identifier)
   else if (auto game = m_dialog->FindGameFile(sync_identifier))
     file = game->GetFilePath();
   else if (sync_identifier == GetBrawlFileIdentifier())
-    file = File::GetSysDirectory() + "Wii" + DIR_SEP + "title" + DIR_SEP + "00010000" + DIR_SEP + "52534245" + DIR_SEP + "data" + DIR_SEP + BRAWL_SAVE_FILE;
+    file = File::GetSysDirectory() + "Wii" + DIR_SEP + "title" + DIR_SEP + "00010000" + DIR_SEP +
+           "52534245" + DIR_SEP + "data" + DIR_SEP + BRAWL_SAVE_FILE;
 
   if (file.empty() || !File::Exists(file))
   {
@@ -4324,87 +2700,6 @@ void NetPlayClient::ComputeGameDigest(const SyncIdentifier& sync_identifier)
   });
 }
 
-void NetPlayClient::NotifyDesync(int player_index, s32 frame)
-{
-  auto desync_start_time = std::chrono::high_resolution_clock::now();
-
-  // Check if we've notified about this player recently
-  auto now = std::chrono::steady_clock::now();
-  auto time_since_last =
-      std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_desync_notification)
-          .count();
-
-  INFO_LOG_FMT(BRAWLBACK, 
-               "DESYNC DETECTED - PlayerIdx: {} | Frame: {} | TimeSinceLastNotif: {}ms",
-               player_index, frame, time_since_last);
-
-  if (time_since_last < DESYNC_NOTIFICATION_COOLDOWN_MS)
-  {
-    INFO_LOG_FMT(BRAWLBACK, "Desync notification suppressed (cooldown active - {}ms remaining)",
-                 DESYNC_NOTIFICATION_COOLDOWN_MS - time_since_last);
-    return;  // Don't spam notifications
-  }
-
-  // Check if this is the same desync we already reported
-  if (m_last_desync_frame.count(player_index) &&
-      std::abs(m_last_desync_frame[player_index] - frame) < 60)  // Within 1 second
-  {
-    INFO_LOG_FMT(BRAWLBACK, 
-                 "Desync notification suppressed (similar to last desync - last frame: {})",
-                 m_last_desync_frame[player_index]);
-    return;
-  }
-
-  m_last_desync_frame[player_index] = frame;
-  m_last_desync_notification = now;
-
-  // Send desync notification to server
-  auto packet_send_start = std::chrono::high_resolution_clock::now();
-
-  sf::Packet packet;
-  packet << MessageID::DesyncDetected;
-  packet << static_cast<int>(player_index);
-  packet << frame;
-
-  SendAsync(std::move(packet));
-
-  auto packet_send_duration = std::chrono::duration_cast<std::chrono::microseconds>(
-      std::chrono::high_resolution_clock::now() - packet_send_start);
-
-  // Show local notification
-  std::string player_name = GetPlayerName(player_index);
-  std::string message =
-      fmt::format("Desync detected with player {} at frame {}", player_name, frame);
-
-  INFO_LOG_FMT(BRAWLBACK, 
-               "DESYNC NOTIFICATION SENT - Message: {} | PacketSendTime: {}µs",
-               message, packet_send_duration.count());
-
-  INFO_LOG_FMT(NETPLAY, "{}", message);
-
-  // Show on-screen display
-  OSD::AddTypedMessage(OSD::MessageType::NetPlayBuffer, message, OSD::Duration::VERY_LONG,
-                       OSD::Color::RED);
-}
-
-std::string NetPlayClient::GetPlayerName(int player_index)
-{
-  std::lock_guard lkp(m_crit.players);
-
-  // Find the player ID for this port
-  if (player_index >= 0 && player_index < m_pad_map.size())
-  {
-    PlayerId pid = m_pad_map[player_index];
-    auto it = m_players.find(pid);
-    if (it != m_players.end())
-    {
-      return it->second.name;
-    }
-  }
-
-  return fmt::format("Player {}", player_index);
-}
-
 const PadMappingArray& NetPlayClient::GetPadMapping() const
 {
   return m_net_settings.pad_map;
@@ -4420,6 +2715,64 @@ const PadMappingArray& NetPlayClient::GetWiimoteMapping() const
   return m_net_settings.wiimote_map;
 }
 
+void NetPlayClient::AdjustPadBufferSize(const unsigned int size)
+{
+  m_target_buffer_size = size;
+  m_dialog->OnPadBufferChanged(size);
+}
+
+// called from ---GUI--- and ---NETPLAY--- thread
+void NetPlayClient::AdjustPlayerPadBufferSize(u32 buffer)
+{
+  std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
+
+  m_local_player->buffer = buffer;
+  if (m_local_player->buffer < m_minimum_buffer_size)
+    m_local_player->buffer = m_minimum_buffer_size;
+
+  // not needed on clients with host input authority
+  if (!m_host_input_authority)
+  {
+    // tell clients to change buffer size
+    sf::Packet spac;
+    spac << MessageID::PadBufferPlayer;
+    spac << m_local_player->buffer;
+
+    SendAsync(std::move(spac));
+  }
+
+  m_dialog->OnPlayerPadBufferChanged(m_local_player->buffer);
+}
+
+void NetPlayClient::OnPadBufferMinimum(sf::Packet& packet)
+{
+  u32 size = 0;
+  packet >> size;
+
+  m_minimum_buffer_size = size;
+  m_dialog->OnMinimumPadBufferChanged(size);
+
+  if (m_local_player->buffer < m_minimum_buffer_size)
+    AdjustPlayerPadBufferSize(m_minimum_buffer_size);
+}
+
+void NetPlayClient::OnPadBufferPlayer(sf::Packet& packet)
+{
+  PlayerId pid;
+  packet >> pid;
+
+  {
+    std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
+    packet >> m_players[pid].buffer;
+  }
+}
+
+void NetPlayClient::AdjustMinimumPadBufferSize(const unsigned int size)
+{
+  m_minimum_buffer_size = size;
+  m_dialog->OnMinimumPadBufferChanged(size);
+}
+
 void NetPlayClient::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
                                    std::vector<u64> titles, std::string redirect_folder)
 {
@@ -4431,11 +2784,6 @@ void NetPlayClient::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
 SyncIdentifier NetPlayClient::GetSDCardIdentifier()
 {
   return SyncIdentifier{{}, "sd", {}, {}, {}, {}};
-}
-
-SyncIdentifier NetPlayClient::GetBrawlFileIdentifier()
-{
-  return SyncIdentifier{{}, "Save", {}, {}, {}, {}};
 }
 
 std::string GetPlayerMappingString(PlayerId pid, const PadMappingArray& pad_map,
@@ -4555,167 +2903,41 @@ void NetPlay_Disable()
   std::lock_guard lk(crit_netplay_client);
   netplay_client = nullptr;
 }
-bool NetPlayClient::process_pending_saves()
-{
-  const auto beginTime = std::chrono::steady_clock::now();
-  const size_t pendingCount = g_GekkoPendingSaves.size();
-  for (const auto& save : g_GekkoPendingSaves)
-  {
-    if (!save_gekko_state(save))
-    {
-      g_GekkoPendingSaves.clear();
-      return false;
-    }
-  }
-  g_GekkoPendingSaves.clear();
-  g_GekkoLastPendingSaveUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - beginTime)
-                                 .count();
-  if (g_GekkoLogEnabled && pendingCount > 0)
-  {
-    std::ostringstream stream;
-    stream << "pending_saves result=ok count=" << pendingCount
-           << " elapsed_us=" << g_GekkoLastPendingSaveUs
-           << " last_save_us=" << g_GekkoLastSaveStateUs;
-    write_gekko_log(stream.str());
-  }
-  return true;
-}
 
-int NetPlayClient::rollback_execute_end_frame()
-{
-  const auto beginTime = std::chrono::steady_clock::now();
-  write_gekko_log("end_frame begin");
-  const auto pendingSaveBeginTime = std::chrono::steady_clock::now();
-  if (!process_pending_saves())
-  {
-    write_gekko_log("end_frame result=fail reason=save");
-    return 0;
-  }
-  const auto pendingSaveUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - pendingSaveBeginTime)
-                                 .count();
-  long long debugEndUs = 0;
-  g_GekkoHasLatchedInput = false;
-  // Flush any callback queue entries that were never consumed by the game this frame.
-  {
-    std::lock_guard<std::mutex> lock(m_gekko_callback_mutex);
-    m_gekko_callback_codes.clear();
-    m_pending_gekko_saves.clear();
-    m_pending_gekko_loads.clear();
-    m_pending_gekko_advances.clear();
-  }
-  if (g_GekkoLogEnabled)
-  {
-    const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                             std::chrono::steady_clock::now() - beginTime)
-                             .count();
-    std::ostringstream stream;
-    stream << "end_frame result=ok total_us=" << totalUs << " pending_save_us=" << pendingSaveUs
-           << " debug_end_us=" << debugEndUs;
-    write_gekko_log(stream.str());
-  }
-  else
-  {
-    write_gekko_log("end_frame result=ok");
-  } 
-  return 1;
-}
 void OnFrameEnd()
 {
-  INFO_LOG_FMT(BRAWLBACK, "-- End of Frame {} --",
-               netplay_client ? netplay_client->current_frame : -1);
   if (IsNetPlayRunning() && netplay_client)
   {
     if (netplay_client->IsInRollbackMode())
     {
-      netplay_client->rollback_execute_end_frame();
+      if (!is_rollingback)
+      {
+        std::unique_lock lock(crit_netplay_client);
+        netplay_client->OnFrameEnd(lock);
+      }
+      else if (netplay_client->current_frame >= netplay_client->frame_to_stop_at)
+      {
+        Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0);
+        is_rollingback = false;
+      }
+
+      netplay_client->current_frame++;
     }
   }
 }
 
-void OnFrameStart(BrawlbackPad& pad)
-{
-  INFO_LOG_FMT(BRAWLBACK, "-- Start of Frame --");
-  if (IsNetPlayRunning() && netplay_client)
-  {
-    if (netplay_client->IsInRollbackMode())
-    {
-      netplay_client->OnFrameStart(pad);
-      game_started = true;
-    }
-  }
-}
-bool IsStarted()
-{
-  if (netplay_client)
-  {
-    return netplay_client->IsStarted();
-  }
-  else
-  {
-    return false;
-  }
-}
 bool IsRollingBack()
 {
-  if (netplay_client)
-  {
-    return netplay_client->IsRollingBack();
-  }
-  else
-  {
-    return false;
-  }
+  return netplay_client->IsRollingBack();
 }
 
 bool IsInRollbackMode()
 {
-  if (netplay_client)
-  {
-    return netplay_client->IsInRollbackMode();
-  }
-  else
-  {
-    return false;
-  }
-}
-
-s32 CurrentFrame()
-{
-  if (netplay_client)
-  {
-    return netplay_client->current_frame;
-  }
-  else
-  {
-    return 0;
-  }
-}
-
-s32 StopFrame()
-{
-  return netplay_client->frame_to_stop_at;
-}
-
-s32 AdvanceFrames()
-{
-  if (netplay_client)
-  {
-    return netplay_client->advance_frames;
-  }
-  else
-  {
-    return 1;
-  }
-}
-
-void IncrementCurrentFrame()
-{
-  netplay_client->current_frame++;
+  return netplay_client->IsInRollbackMode();
 }
 
 }  // namespace NetPlay
+
 // stuff hacked into dolphin
 
 // called from ---CPU--- thread
@@ -4802,4 +3024,3 @@ int SerialInterface::CSIDevice_GCController::NetPlay_InGamePadToLocalPad(int pad
 
   return pad_num;
 }
-

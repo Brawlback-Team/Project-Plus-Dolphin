@@ -66,6 +66,7 @@ public:
   void OnPlayerDisconnect(const std::string& player) override;
   void OnMinimumPadBufferChanged(u32 buffer) override;
   void OnPlayerPadBufferChanged(u32 buffer) override;
+  void OnPadBufferChanged(u32 buffer) override;
   void OnHostInputAuthorityChanged(bool enabled) override;
   void OnDesync(u32 frame, const std::string& player) override;
   void OnConnectionLost() override;
@@ -151,6 +152,8 @@ private:
   QSpinBox* m_minimum_buffer_size_box;
   QLabel* m_player_buffer_label;
   QSpinBox* m_player_buffer_size_box;
+  QLabel* m_buffer_label;
+  QSpinBox* m_buffer_size_box;
 
   QActionGroup* m_savedata_style_group;
   QAction* m_savedata_none_action;
@@ -158,7 +161,6 @@ private:
   QAction* m_savedata_load_and_write_action;
   QAction* m_savedata_all_wii_saves_action;
 
-  QAction* m_rollback_action;
   QAction* m_sync_codes_action;
   QAction* m_record_input_action;
   QAction* m_strict_settings_sync_action;
@@ -167,6 +169,7 @@ private:
   QAction* m_golf_mode_overlay_action;
   QAction* m_fixed_delay_action;
   QAction* m_hide_remote_gbas_action;
+  QAction* m_rollback_action;
   QCheckBox* m_brawlmusic_off;
   QCheckBox* m_spectator_mode;
   QPushButton* m_quit_button;
@@ -187,6 +190,7 @@ private:
   bool m_got_stop_request = true;
   int m_minimum_buffer_size = 0;
   int m_player_buffer_size = 0;
+  int m_buffer_size = 0;
   int m_player_count = 0;
   int m_old_player_count = 0;
   bool m_host_input_authority = false;

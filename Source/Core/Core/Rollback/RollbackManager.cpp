@@ -1,8 +1,6 @@
 // Copyright 2024 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#ifdef _WIN32
-
 #include "Core/Rollback/RollbackManager.h"
 
 #include <algorithm>
@@ -10,6 +8,8 @@
 #include <cstring>
 #include <fmt/format.h>
 
+#include <Core/State.h>
+#include "Common/Hash.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
 #include "Core/HW/Memmap.h"
@@ -22,24 +22,22 @@
 namespace Rollback
 {
 
-#if ROLLBACK_VALIDATE
+// Brawl's GameFrame::frameCounter at 0x901812a4 (MEM2). This resets when the
+// match scene starts and advances inside the real game loop.
+static constexpr uint32_t BRAWL_GAME_FRAME_COUNTER_MEM2_OFFSET = 0x001812a4u;
 
-// Physical offset of Brawl's "frames into current game" counter
-static constexpr uint32_t BRAWL_FRAME_COUNTER_PHYS = 0x8062B420 & 0x1FFFFFFF;
-
-static uint32_t ReadBrawlFrameCounter(const uint8_t* mem1_ptr, size_t mem1_size)
+uint32_t ReadBrawlMatchFrameCounter(const uint8_t* mem2_ptr, size_t mem2_size)
 {
-  if (!mem1_ptr || BRAWL_FRAME_COUNTER_PHYS + 4 > mem1_size)
+  if (!mem2_ptr || BRAWL_GAME_FRAME_COUNTER_MEM2_OFFSET + 4 > mem2_size)
     return 0;
+
   uint32_t raw;
-  std::memcpy(&raw, mem1_ptr + BRAWL_FRAME_COUNTER_PHYS, sizeof(raw));
+  std::memcpy(&raw, mem2_ptr + BRAWL_GAME_FRAME_COUNTER_MEM2_OFFSET, sizeof(raw));
   return Common::swap32(raw);
 }
 
-void RollbackManager::CaptureValSnapshot(int slot)
+void RollbackManager::CaptureFullRamSnapshot(RollbackSnapshot& snap)
 {
-  RollbackSnapshot& snap = m_val_snapshots[slot];
-
   if (!snap.mem1)
     snap.mem1 = std::make_unique<uint8_t[]>(m_mem1_size);
   std::memcpy(snap.mem1.get(), m_mem1_ptr, m_mem1_size);
@@ -51,9 +49,11 @@ void RollbackManager::CaptureValSnapshot(int slot)
     std::memcpy(snap.mem2.get(), m_mem2_ptr, m_mem2_size);
   }
 
-  snap.brawl_frame = ReadBrawlFrameCounter(m_mem1_ptr, m_mem1_size);
+  snap.brawl_frame = ReadBrawlMatchFrameCounter(m_mem2_ptr, m_mem2_size);
   snap.valid = true;
 }
+
+#if ROLLBACK_VALIDATE
 
 void RollbackManager::CompareValSnapshot(int target_slot, int frames_back) const
 {
@@ -73,40 +73,70 @@ void RollbackManager::CompareValSnapshot(int target_slot, int frames_back) const
 
   for (uint32_t page = 0; page < mem1_page_count; ++page)
   {
+    const uint32_t page_phys = page * static_cast<uint32_t>(PAGE_SIZE);
+    bool excluded = false;
+    for (const auto& r : m_exclude_regions)
+      if (page_phys >= r.phys_start && page_phys < r.phys_end)
+      {
+        excluded = true;
+        break;
+      }
+    if (excluded)
+      continue;
+
     const size_t offset = static_cast<size_t>(page) * PAGE_SIZE;
     if (std::memcmp(m_mem1_ptr + offset, snap.mem1.get() + offset, PAGE_SIZE) != 0)
     {
       if (mem1_mismatch < MAX_LOG_PAGES)
+      {
         mismatch_pages[mem1_mismatch] = page;
+      }
       ++mem1_mismatch;
     }
   }
 
   uint32_t mem2_mismatch = 0;
-  uint32_t mem2_mismatch_pages[MAX_LOG_PAGES];
+  uint32_t mem2_mismatch_pages[MAX_LOG_PAGES] = {};
   if (snap.mem2 && m_mem2_ptr && m_mem2_size > 0)
   {
     const uint32_t mem2_page_count = static_cast<uint32_t>(m_mem2_size / PAGE_SIZE);
     for (uint32_t page = 0; page < mem2_page_count; ++page)
     {
+      const uint32_t page_phys = 0x10000000u + page * static_cast<uint32_t>(PAGE_SIZE);
+      bool excluded = false;
+      for (const auto& r : m_exclude_regions)
+        if (page_phys >= r.phys_start && page_phys < r.phys_end)
+        {
+          excluded = true;
+          break;
+        }
+      if (excluded)
+        continue;
+
       const size_t offset = static_cast<size_t>(page) * PAGE_SIZE;
       if (std::memcmp(m_mem2_ptr + offset, snap.mem2.get() + offset, PAGE_SIZE) != 0)
       {
         if (mem2_mismatch < MAX_LOG_PAGES)
+        {
           mem2_mismatch_pages[mem2_mismatch] = page;
+        }
         ++mem2_mismatch;
       }
     }
   }
 
-  const uint32_t current_brawl_frame = ReadBrawlFrameCounter(m_mem1_ptr, m_mem1_size);
+  const uint32_t current_brawl_frame = ReadBrawlMatchFrameCounter(m_mem2_ptr, m_mem2_size);
   const bool frame_ok = (current_brawl_frame == snap.brawl_frame);
   const char* frame_tag = frame_ok ? "frame_ok" : "FRAME_MISMATCH";
 
   if (mem1_mismatch == 0 && mem2_mismatch == 0)
   {
-    INFO_LOG_FMT(COMMON, "[Rollback] VALIDATE OK  step={}  slot={}  brawl_frame={} (want {})  {}",
-                 frames_back, target_slot, current_brawl_frame, snap.brawl_frame, frame_tag);
+    const MemoryRegion& stack_excl = m_exclude_regions.back();
+    INFO_LOG_FMT(COMMON,
+                 "[Rollback] VALIDATE OK  step={}  slot={}  brawl_frame={} (want {})  {}  "
+                 "stack_excl=[0x{:08x},0x{:08x})",
+                 frames_back, target_slot, current_brawl_frame, snap.brawl_frame, frame_tag,
+                 stack_excl.phys_start, stack_excl.phys_end);
     return;
   }
 
@@ -121,25 +151,32 @@ void RollbackManager::CompareValSnapshot(int target_slot, int frames_back) const
   if (mem1_mismatch > MAX_LOG_PAGES)
     mem1_list += fmt::format(" (+{} more)", mem1_mismatch - MAX_LOG_PAGES);
 
-  static constexpr uint32_t MEM2_PHYS_BASE = 0x10000000u;
   std::string mem2_list;
-  const uint32_t mem2_logged = std::min(mem2_mismatch, static_cast<uint32_t>(MAX_LOG_PAGES));
-  for (uint32_t i = 0; i < mem2_logged; ++i)
   {
-    if (i)
-      mem2_list += ", ";
-    mem2_list += fmt::format("0x{:08x}", MEM2_PHYS_BASE + mem2_mismatch_pages[i] *
-                                                              static_cast<uint32_t>(PAGE_SIZE));
+    const uint32_t mem2_logged = std::min(mem2_mismatch, static_cast<uint32_t>(MAX_LOG_PAGES));
+    static constexpr uint32_t MEM2_PHYS_BASE = 0x10000000u;
+    for (uint32_t i = 0; i < mem2_logged; ++i)
+    {
+      if (i)
+        mem2_list += ", ";
+      mem2_list += fmt::format("0x{:08x}", MEM2_PHYS_BASE + mem2_mismatch_pages[i] *
+                                                                static_cast<uint32_t>(PAGE_SIZE));
+    }
+    if (mem2_mismatch > MAX_LOG_PAGES)
+      mem2_list += fmt::format(" (+{} more)", mem2_mismatch - MAX_LOG_PAGES);
   }
-  if (mem2_mismatch > MAX_LOG_PAGES)
-    mem2_list += fmt::format(" (+{} more)", mem2_mismatch - MAX_LOG_PAGES);
 
+  // Also show the live stack exclusion zone so we can tell whether wrong pages
+  // are just outside it (which would explain state corruption on return).
+  const MemoryRegion& stack_excl = m_exclude_regions.back();
   WARN_LOG_FMT(COMMON,
-               "[Rollback] VALIDATE FAIL  step={}  slot={}  - {} MEM1 page(s) wrong, {} MEM2 "
-               "page(s) wrong.  brawl_frame={} (want {})  {}\n  First MEM1 addrs: {}\n  First MEM2 "
-               "addrs: {}",
+               "[Rollback] VALIDATE FAIL  step={}  slot={}  - {} MEM1 + "
+               "{} MEM2 page(s) wrong.  "
+               "brawl_frame={} (want {})  {}  stack_excl=[0x{:08x},0x{:08x})\n"
+               "  First MEM1 addrs: {}\n  First MEM2 addrs: {}",
                frames_back, target_slot, mem1_mismatch, mem2_mismatch, current_brawl_frame,
-               snap.brawl_frame, frame_tag, mem1_list, mem2_list);
+               snap.brawl_frame, frame_tag, stack_excl.phys_start, stack_excl.phys_end, mem1_list,
+               mem2_list);
 }
 
 void RollbackManager::InvalidateValSnapshots()
@@ -161,17 +198,118 @@ void RollbackManager::BeginDoState()
   m_skip_ram_in_dostate.store(true, std::memory_order_seq_cst);
   m_skip_jit_clear_in_dostate.store(true, std::memory_order_seq_cst);
   VideoCommon_SetSkipGPUReadbackForRollback(true);
+  VideoCommon_SetSkipVertexFlushForRollback(true);
   m_skip_ios_in_dostate.store(true, std::memory_order_seq_cst);
   PowerPC_SetSkipDCacheFlushForRollback(true);
+  PowerPC_SetSkipCPURegsForRollback(true);
 }
 
 void RollbackManager::EndDoState()
 {
+  PowerPC_SetSkipCPURegsForRollback(false);
   PowerPC_SetSkipDCacheFlushForRollback(false);
   m_skip_ios_in_dostate.store(false, std::memory_order_seq_cst);
+  VideoCommon_SetSkipVertexFlushForRollback(false);
   VideoCommon_SetSkipGPUReadbackForRollback(false);
   m_skip_jit_clear_in_dostate.store(false, std::memory_order_seq_cst);
   m_skip_ram_in_dostate.store(false, std::memory_order_seq_cst);
+}
+
+void RollbackManager::AddExcludeRegion(uint32_t virt_addr, uint32_t size_bytes)
+{
+  INFO_LOG_FMT(BRAWLBACK, "Added exclude region {} - {}", virt_addr, virt_addr + size_bytes);
+  m_exclude_regions.push_back(MemoryRegion::FromVirt(virt_addr, size_bytes));
+}
+
+static const std::vector<MemoryRegion> s_brawlback_hardcoded_exclude_regions = {
+    // Brawlback C++ framework heap (MEM2).
+    // This holds rollback control state (framesToAdvance, pastFrameDatas, etc.)
+    // that must survive across a rollback restore unchanged.
+    // MemoryRegion::FromVirt(0x935d7660u, 0x89a0u),
+    MemoryRegion::FromVirt(0x935d3940u, 0x0000c6c0),
+    // default gecko codes region (do we actually want to exclude this? probably not...
+    // MemoryRegion::FromVirt(0x80001800, 0x80003000),
+
+    // bss/data sections of our cpp code framework
+    // see "infoSegmentAddress" - "memoryHeapEndAddress in settings.json in the BuildSystem
+    MemoryRegion::FromVirt(0x935D0000, 0x10000),
+};
+
+static const std::vector<MemoryRegionThroughPtrs> s_brawlback_hardcoded_desync_detection_regions = {
+    // GAME_FRAME->persistentFrameCounter
+    MemoryRegionThroughPtrs::FromVirt(0x901812a0u + 0x14u, 4),
+
+    // Player damage/percent
+    MemoryRegionThroughPtrs::FromVirt(0x80623324u, 4),  // P1
+    MemoryRegionThroughPtrs::FromVirt(0x80623568u, 4),  // P2
+    MemoryRegionThroughPtrs::FromVirt(0x806237ACu, 4),  // P3
+    MemoryRegionThroughPtrs::FromVirt(0x806239F0u, 4),  // P4
+
+    // Player stock count
+    MemoryRegionThroughPtrs::FromVirt(0x80623318u, 4),  // P1
+    MemoryRegionThroughPtrs::FromVirt(0x8062355Cu, 4),  // P2
+    MemoryRegionThroughPtrs::FromVirt(0x806237A0u, 4),  // P3
+    MemoryRegionThroughPtrs::FromVirt(0x806239E4u, 4),  // P4
+
+    // Player positions
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x34u, 0x60u, 0xD8u, 0xCu, 0xCu}, 4),    // P1 X
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x34u, 0x60u, 0xD8u, 0xCu, 0x10u}, 4),   // P1 Y
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x278u, 0x60u, 0xD8u, 0xCu, 0xCu}, 4),   // P2 X
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x278u, 0x60u, 0xD8u, 0xCu, 0x10u}, 4),  // P2 Y
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x4BCu, 0x60u, 0xD8u, 0xCu, 0xCu}, 4),   // P3 X
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x4BCu, 0x60u, 0xD8u, 0xCu, 0x10u}, 4),  // P3 Y
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x700u, 0x60u, 0xD8u, 0xCu, 0xCu}, 4),   // P4 X
+    MemoryRegionThroughPtrs::FromPtrs(0x80624780u, {0x700u, 0x60u, 0xD8u, 0xCu, 0x10u}, 4),  // P4 Y
+
+    // Player velocities
+    MemoryRegionThroughPtrs::FromVirt(0x80494F30u, 8),  // P1 Total Velocity (X, Y)
+    MemoryRegionThroughPtrs::FromVirt(0x8049DEE4u, 8),  // P2 Total Velocity (X, Y)
+    MemoryRegionThroughPtrs::FromVirt(0x80494F98u, 8),  // P3 Total Velocity (X, Y)
+    MemoryRegionThroughPtrs::FromVirt(0x80495000u, 8),  // P4 Total Velocity (X, Y)
+};
+
+static const u8* GetRegionPointer(const MemoryRegion& region, const u8* mem1_ptr, size_t mem1_size,
+                                  const u8* mem2_ptr, size_t mem2_size)
+{
+  if (region.phys_start >= region.phys_end)
+    return nullptr;
+
+  if (region.phys_start >= MEM2_BASE)
+  {
+    const u32 mem2_start = region.phys_start - MEM2_BASE;
+    const u32 mem2_end = region.phys_end - MEM2_BASE;
+    if (mem2_ptr && mem2_end <= mem2_size)
+      return mem2_ptr + mem2_start;
+    return nullptr;
+  }
+
+  if (mem1_ptr && region.phys_end <= mem1_size)
+    return mem1_ptr + region.phys_start;
+  return nullptr;
+}
+
+uint32_t CalculateBrawlbackDesyncChecksum(Core::System& system)
+{
+  auto& memory = system.GetMemory();
+  u8* const mem1 = memory.GetRAM();
+  u8* const mem2 = memory.GetEXRAM();
+  const size_t mem1_size = memory.GetRamSize();
+  const size_t mem2_size = memory.GetExRamSize();
+
+  u32 crc = Common::StartCRC32();
+  for (const MemoryRegionThroughPtrs& source_region :
+       s_brawlback_hardcoded_desync_detection_regions)
+  {
+    const bool is_pointer_region =
+        !source_region.pointer_offsets.empty() || source_region.final_data_size != 0;
+    const MemoryRegion region = is_pointer_region ?
+                                    source_region.Resolve(mem1, mem1_size, mem2, mem2_size) :
+                                    MemoryRegion{source_region.phys_start, source_region.phys_end};
+    const u32 region_len = region.phys_end - region.phys_start;
+    if (const u8* ptr = GetRegionPointer(region, mem1, mem1_size, mem2, mem2_size))
+      crc = Common::UpdateCRC32(crc, ptr, region_len);
+  }
+  return crc;
 }
 
 void RollbackManager::Init(Core::System& system)
@@ -179,6 +317,25 @@ void RollbackManager::Init(Core::System& system)
   if (m_initialized)
     Shutdown();
 
+  // Initialize WSQ job system once; workers persist across save/load cycles.
+  if (!m_dispatch_thread)
+  {
+    m_job_ctx.activate();
+    // Worker 0 is "owned" by the rollback thread — used for job creation/dispatch.
+    // All initialize_worker calls must be sequential (no thread safety in ctx setup).
+    m_dispatch_thread = m_job_ctx.initialize_worker(0, nullptr);
+    for (int i = 1; i <= ROLLBACK_NUM_HELPER_THREADS; ++i)
+    {
+      job::JobTaskThread* thr =
+          m_job_ctx.initialize_worker(static_cast<int64_t>(i) * 0x9e3779b97f4a7c15LL, nullptr);
+      m_worker_threads.emplace_back([thr]() {
+        ROLLBACK_THREAD_NAME("Rollback Job Pool");
+        thr->wait_for_termination();
+      });
+    }
+  }
+
+  m_exclude_regions = s_brawlback_hardcoded_exclude_regions;
   PerfInit();
 
   auto& memory = system.GetMemory();
@@ -192,6 +349,9 @@ void RollbackManager::Init(Core::System& system)
   for (int i = 0; i < NUM_SAVE_SLOTS; ++i)
     m_slots[i].Init(m_mem1_ptr, m_mem1_size, m_mem2_ptr, m_mem2_size, m_l1_cache_ptr,
                     m_l1_cache_size);
+
+  m_needs_source_mem1.assign(m_mem1_size / PAGE_SIZE, 0);
+  m_needs_source_mem2.assign(m_mem2_size / PAGE_SIZE, 0);
 
   JITDirtyBitmap::Get().Clear();
 
@@ -214,7 +374,11 @@ void RollbackManager::Shutdown()
   if (!m_initialized)
     return;
 
-  m_eviction_future = {};  // Wait for any in-flight eviction.
+  if (m_eviction_job)
+  {
+    job::DrainJobsUntilComplete(m_dispatch_thread, m_eviction_job);
+    m_eviction_job = nullptr;
+  }
 
   m_base_snapshot.valid = false;
   m_base_snapshot.mem1.reset();
@@ -234,6 +398,19 @@ void RollbackManager::Shutdown()
   m_frame_save_pending.store(false, std::memory_order_relaxed);
   m_frame_save_enabled.store(false, std::memory_order_relaxed);
   VideoCommon_SetSkipGPUReadbackForRollback(false);
+
+  // Signal WSQ workers to exit and wait for them.
+  // Workers are persistent — only tear them down on full shutdown.
+  if (m_dispatch_thread)
+  {
+    m_job_ctx.deactivate();
+    for (auto& t : m_worker_threads)
+      if (t.joinable())
+        t.join();
+    m_worker_threads.clear();
+    m_dispatch_thread = nullptr;
+  }
+
   m_initialized = false;
 
 #if ROLLBACK_VALIDATE
@@ -251,7 +428,11 @@ void RollbackManager::ToggleFrameSave()
     m_ring_next = 0;
     m_ring_count = 0;
 
-    m_eviction_future = {};
+    if (m_eviction_job)
+    {
+      job::DrainJobsUntilComplete(m_dispatch_thread, m_eviction_job);
+      m_eviction_job = nullptr;
+    }
     m_base_snapshot.valid = false;
 
     JITDirtyBitmap::Get().Clear();
@@ -288,41 +469,42 @@ void RollbackManager::SaveFrame(Core::System& system)
   {
     ROLLBACK_ZONE_N("BaseSnapshot::Init");
     std::unique_lock lk(m_base_snapshot.mutex);
-    m_base_snapshot.mem1 = std::make_unique<uint8_t[]>(m_mem1_size);
-    std::memcpy(m_base_snapshot.mem1.get(), m_mem1_ptr, m_mem1_size);
-    if (m_mem2_ptr && m_mem2_size > 0)
-    {
-      m_base_snapshot.mem2 = std::make_unique<uint8_t[]>(m_mem2_size);
-      std::memcpy(m_base_snapshot.mem2.get(), m_mem2_ptr, m_mem2_size);
-    }
-    m_base_snapshot.valid = true;
+    CaptureFullRamSnapshot(m_base_snapshot);
+    INFO_LOG_FMT(BRAWLBACK, "Captured base snapshot at brawl frame {}",
+                 m_base_snapshot.brawl_frame);
   }
 
   const int slot = m_ring_next;
 
   // Evict the oldest slot, async apply its deltas to the base snapshot
-  if (m_ring_count == NUM_SAVE_SLOTS)
+  if (m_ring_count >= NUM_SAVE_SLOTS)
   {
-    auto evicted = m_slots[slot].ExtractDeltas();
-    m_eviction_future =
-        std::async(std::launch::async, [this, evicted = std::move(evicted)]() mutable {
-          ROLLBACK_THREAD_NAME("Rollback Eviction");
+    ROLLBACK_ZONE_N("Prep eviction");
+    // Wait for any in-flight eviction — typically completes within the same frame.
+    if (m_eviction_job)
+    {
+      job::DrainJobsUntilComplete(m_dispatch_thread, m_eviction_job);
+      m_eviction_job = nullptr;
+    }
+    auto evicted = std::make_shared<Rollback::EvictedDelta>(m_slots[slot].ExtractDeltas());
+    m_eviction_job = job::KickRootJob(
+        m_dispatch_thread, [this, evicted](job::JobTaskThread&, job::Job&) mutable {
           ROLLBACK_ZONE_N("BaseSnapshot::Evict");
           std::unique_lock lk(m_base_snapshot.mutex);
 
-          const uint8_t* src = evicted.mem1.page_data.data();
-          for (uint32_t i = 0; i < evicted.mem1.page_count; ++i)
+          const uint8_t* src = evicted->mem1.page_data.data();
+          for (uint32_t i = 0; i < evicted->mem1.page_count; ++i)
           {
-            const size_t dst_off = static_cast<size_t>(evicted.mem1.page_indices[i]) * PAGE_SIZE;
+            const size_t dst_off = static_cast<size_t>(evicted->mem1.page_indices[i]) * PAGE_SIZE;
             std::memcpy(m_base_snapshot.mem1.get() + dst_off, src + i * PAGE_SIZE, PAGE_SIZE);
           }
 
           if (m_base_snapshot.mem2)
           {
-            src = evicted.mem2.page_data.data();
-            for (uint32_t i = 0; i < evicted.mem2.page_count; ++i)
+            src = evicted->mem2.page_data.data();
+            for (uint32_t i = 0; i < evicted->mem2.page_count; ++i)
             {
-              const size_t dst_off = static_cast<size_t>(evicted.mem2.page_indices[i]) * PAGE_SIZE;
+              const size_t dst_off = static_cast<size_t>(evicted->mem2.page_indices[i]) * PAGE_SIZE;
               std::memcpy(m_base_snapshot.mem2.get() + dst_off, src + i * PAGE_SIZE, PAGE_SIZE);
             }
           }
@@ -335,7 +517,8 @@ void RollbackManager::SaveFrame(Core::System& system)
   m_slots[slot].Save(system);
 
 #if ROLLBACK_VALIDATE
-  CaptureValSnapshot(slot);
+  RollbackSnapshot& snap = m_val_snapshots[slot];
+  CaptureFullRamSnapshot(snap);
 #endif
 }
 
@@ -345,69 +528,222 @@ void RollbackManager::LoadFrame(Core::System& system, int frames_back)
   if (!m_initialized)
     return;
 
-  // >= 2 frames: the target (for non-RAM state) plus one older slot (for page deltas)
-  if (m_ring_count < 2)
-  {
-    OSD::AddMessage(fmt::format("Cannot rollback (only {} frame(s) saved)", m_ring_count), 2000);
-    return;
-  }
+  ASSERT(frames_back >= 1 && m_ring_count >= 2 && frames_back < m_ring_count &&
+         frames_back <= Rollback::NUM_SAVE_SLOTS - 1);
 
-  frames_back = std::clamp(frames_back, 1, m_ring_count - 1);
+  {
+    ROLLBACK_ZONE_N("Preserve stack");
+    // Preserve the live call stack in RAM so execution continues normally
+    // after this load returns.  On PPC, r1 is the stack pointer and active
+    // frames live at addresses >= r1 (callers are above the current frame).
+    // We exclude those physical pages from the RAM restore so the function
+    // call chain that issued CMD_LOAD_SAVESTATE stays intact.
+    //
+    // Use the OS thread struct to find the exact stack top rather than
+    // assuming a fixed exclusion size (which could under- or over-cover).
+    // DAT_800000e4 (physical 0xe4) = current OSThread pointer (virtual).
+    // OSThread+0x304 = initialStackAddr (the HIGH end of the stack buffer).
+    const uint32_t r1_virt = system.GetPowerPC().GetPPCState().gpr[1];
+    const uint32_t r1_phys = r1_virt & 0x1FFF'FFFFu;
+    const uint32_t stack_page = r1_phys & ~(static_cast<uint32_t>(PAGE_SIZE) - 1u);
+
+    uint32_t stack_exclude_end = 0;
+    ASSERT(m_mem1_size > 0xe4 + 4);
+    uint32_t thread_virt;
+    std::memcpy(&thread_virt, m_mem1_ptr + 0xe4, 4);
+    thread_virt = Common::swap32(thread_virt);
+    const uint32_t thread_phys = thread_virt & 0x1FFF'FFFFu;
+    if (thread_phys + 0x308 <= m_mem1_size)
+    {
+      uint32_t stack_top_virt;
+      std::memcpy(&stack_top_virt, m_mem1_ptr + thread_phys + 0x304, 4);
+      stack_top_virt = Common::swap32(stack_top_virt);
+      const uint32_t stack_top_phys = stack_top_virt & 0x1FFF'FFFFu;
+      // Round up to next page boundary so the top page is fully covered.
+      const uint32_t stack_top_page = (stack_top_phys + static_cast<uint32_t>(PAGE_SIZE) - 1u) &
+                                      ~(static_cast<uint32_t>(PAGE_SIZE) - 1u);
+      if (stack_top_page > stack_page && stack_top_page <= static_cast<uint32_t>(m_mem1_size))
+        stack_exclude_end = stack_top_page;
+    }
+    ASSERT(stack_exclude_end != 0);
+
+    /*INFO_LOG_FMT(BRAWLBACK,
+                 "[Rollback] stack exclude: r1=0x{:08x} phys=[0x{:08x}, 0x{:08x}) ({} KB)", r1_virt,
+                 stack_page, stack_exclude_end, (stack_exclude_end - stack_page) / 1024);*/
+    m_exclude_regions.push_back(MemoryRegion{stack_page, stack_exclude_end});
+  }
 
   const int most_recent = Wrap(m_ring_next - 1, NUM_SAVE_SLOTS);
 
   const int target_slot = Wrap(most_recent - frames_back, NUM_SAVE_SLOTS);
 
-  // Gap pages: not in the target slot's delta (first written after the target frame).
-  // The base snapshot holds their correct pre-target values.
-  // We need to fetch these before applying deltas, which may mark pages dirty.
-  std::bitset<JITDirtyBitmap::ENTRY_COUNT> target_pages;
-  m_slots[target_slot].MarkTouchedGlobalPages(target_pages);
+  constexpr u32 BASE_SNAPSHOT_SENTINEL = UINT32_MAX;
 
-  // Apply deltas newest-to-oldest so pages in multiple slots end up at their target values.
-  for (int step = 1; step <= frames_back; ++step)
+  struct SourceEntry
   {
-    const int slot = Wrap(most_recent - step, NUM_SAVE_SLOTS);
-    m_slots[slot].ApplyDeltaReverse();
-  }
+    // source slot index, or BASE_SNAPSHOT_SENTINEL
+    u32 slot;
+    // position within delta.page_indices/page_data
+    u32 local_idx;
+  };
 
-  // Restore gap pages from base; read lock waits out any in-flight eviction
-  {
-    ROLLBACK_ZONE_N("GapPageRestore");
-    std::shared_lock lk(m_base_snapshot.mutex);
-    if (m_base_snapshot.valid)
+  // oldest slot currently alive in the ring
+  const int oldest_ring_slot = Wrap(m_ring_next - m_ring_count, NUM_SAVE_SLOTS);
+
+  static std::unordered_map<u32, SourceEntry> sourceDataToRestore;
+
+  DeltaSaveSlot& deltaSave = m_slots[target_slot];
+
+  // indexing + RAM restore happens on a worker thread so they overlap with DoState on the main
+  // thread
+  job::Job* ram_job = job::KickRootJob(m_dispatch_thread, [&](job::JobTaskThread&, job::Job&) {
+    u32 remaining = 0;
     {
-      const uint32_t mem1_pages = static_cast<uint32_t>(m_mem1_size / PAGE_SIZE);
-      for (uint32_t p = 0; p < mem1_pages; ++p)
+      ROLLBACK_ZONE_N("ram page indexing - forward");
+      std::memset(m_needs_source_mem1.data(), 0, m_needs_source_mem1.size());
+      std::memset(m_needs_source_mem2.data(), 0, m_needs_source_mem2.size());
+
+      for (int n = 0; n <= frames_back; n++)
       {
-        if (!target_pages.test(p))
-          std::memcpy(m_mem1_ptr + p * PAGE_SIZE, m_base_snapshot.mem1.get() + p * PAGE_SIZE,
-                      PAGE_SIZE);
-      }
-      if (m_mem2_ptr && m_base_snapshot.mem2)
-      {
-        const uint32_t mem2_pages = static_cast<uint32_t>(m_mem2_size / PAGE_SIZE);
-        for (uint32_t p = 0; p < mem2_pages; ++p)
+        const int slot = Wrap(target_slot + n, NUM_SAVE_SLOTS);
+        const RegionDelta& d1 = m_slots[slot].m_mem1_delta;
+        for (u32 i = 0; i < d1.page_count; i++)
         {
-          if (!target_pages.test(DeltaSaveSlot::MEM2_FIRST_PAGE + p))
-            std::memcpy(m_mem2_ptr + p * PAGE_SIZE, m_base_snapshot.mem2.get() + p * PAGE_SIZE,
-                        PAGE_SIZE);
+          const u16 idx = d1.page_indices[i];
+          if (!m_needs_source_mem1[idx])
+          {
+            m_needs_source_mem1[idx] = 1;
+            remaining++;
+          }
+        }
+        const RegionDelta& d2 = m_slots[slot].m_mem2_delta;
+        for (u32 i = 0; i < d2.page_count; i++)
+        {
+          const u16 idx = d2.page_indices[i];
+          if (!m_needs_source_mem2[idx])
+          {
+            m_needs_source_mem2[idx] = 1;
+            remaining++;
+          }
         }
       }
     }
+
+    // Walk from target_slot toward oldest. For each slot, satisfy any still-needed
+    // pages found there
+    {
+      ROLLBACK_ZONE_N("ram page indexing - backward");
+      sourceDataToRestore.clear();
+      sourceDataToRestore.reserve(remaining);
+
+      for (int slot = target_slot;; slot = Wrap(slot - 1, NUM_SAVE_SLOTS))
+      {
+        const RegionDelta& d1 = m_slots[slot].m_mem1_delta;
+        for (u32 i = 0; i < d1.page_count; i++)
+        {
+          const u16 idx = d1.page_indices[i];
+          if (m_needs_source_mem1[idx])
+          {
+            m_needs_source_mem1[idx] = 0;
+            sourceDataToRestore[idx] = {static_cast<u32>(slot), i};
+            remaining--;
+          }
+        }
+        const RegionDelta& d2 = m_slots[slot].m_mem2_delta;
+        for (u32 i = 0; i < d2.page_count; i++)
+        {
+          const u16 idx = d2.page_indices[i];
+          if (m_needs_source_mem2[idx])
+          {
+            m_needs_source_mem2[idx] = 0;
+            sourceDataToRestore[MEM2_FIRST_PAGE + idx] = {static_cast<u32>(slot), i};
+            remaining--;
+          }
+        }
+        if (remaining == 0 || slot == oldest_ring_slot)
+          break;
+      }
+
+      // Any pages still marked have no delta anywhere in the ring — use the base snapshot
+      for (u32 i = 0; i < static_cast<u32>(m_needs_source_mem1.size()); i++)
+      {
+        if (m_needs_source_mem1[i])
+          sourceDataToRestore[i] = {BASE_SNAPSHOT_SENTINEL, 0};
+      }
+      for (u32 i = 0; i < static_cast<u32>(m_needs_source_mem2.size()); i++)
+      {
+        if (m_needs_source_mem2[i])
+          sourceDataToRestore[MEM2_FIRST_PAGE + i] = {BASE_SNAPSHOT_SENTINEL, 0};
+      }
+    }
+
+    // TODO: this is uber parallelizable
+    {
+      ROLLBACK_ZONE_N("ram page restore");
+#if defined(ROLLBACK_PROFILE_TRACY)
+      auto x = StringFromFormat("Restored %u pages", sourceDataToRestore.size());
+      ZoneText(x.c_str(), x.size());
+#endif
+
+      for (const auto& [pageidx, entry] : sourceDataToRestore)
+      {
+        const bool isMem2 = (pageidx >= MEM2_FIRST_PAGE);
+        const u32 local_page = isMem2 ? (pageidx - MEM2_FIRST_PAGE) : pageidx;
+        uint8_t* const dst =
+            (isMem2 ? m_mem2_ptr : m_mem1_ptr) + static_cast<size_t>(local_page) * PAGE_SIZE;
+        const uint32_t dst_phys =
+            (isMem2 ? MEM2_BASE : 0u) + local_page * static_cast<uint32_t>(PAGE_SIZE);
+
+        const uint8_t* src;
+        if (entry.slot == BASE_SNAPSHOT_SENTINEL)
+        {
+          const uint8_t* const snap_base =
+              isMem2 ? m_base_snapshot.mem2.get() : m_base_snapshot.mem1.get();
+          src = snap_base + static_cast<size_t>(local_page) * PAGE_SIZE;
+        }
+        else
+        {
+          const Rollback::RegionDelta& src_delta =
+              isMem2 ? m_slots[entry.slot].m_mem2_delta : m_slots[entry.slot].m_mem1_delta;
+          src = src_delta.page_data.data() + static_cast<size_t>(entry.local_idx) * PAGE_SIZE;
+        }
+
+        savestateMemcpy(dst, src, PAGE_SIZE, dst_phys, m_exclude_regions);
+      }
+    }
+  });
+
+  bool ok = false;
+  {
+    ROLLBACK_ZONE_N("DoState restore");
+    BeginDoState();
+    ok |= State::LoadFromBuffer(
+        system, std::span<uint8_t>(deltaSave.m_save_buffer.data(), deltaSave.m_save_buffer.size()));
+    EndDoState();
   }
+
+  {
+    ROLLBACK_ZONE_N("L1 cache restore");
+    if (m_l1_cache_ptr && m_l1_cache_size > 0 && deltaSave.m_l1_cache_snapshot.data())
+      std::memcpy(m_l1_cache_ptr, deltaSave.m_l1_cache_snapshot.data(), m_l1_cache_size);
+  }
+
+  job::DrainJobsUntilComplete(m_dispatch_thread, ram_job);
 
 #if ROLLBACK_VALIDATE
   CompareValSnapshot(target_slot, frames_back);
 #endif
 
-  bool ok = m_slots[target_slot].RestoreNonDeltaState(system);
+  // Remove the temporary live-stack exclusion (always the last element pushed).
+  m_exclude_regions.pop_back();
 
-  auto& bitmap = JITDirtyBitmap::Get();
-  bitmap.ClearRange(0, static_cast<uint32_t>(m_mem1_size / PAGE_SIZE));
-  if (m_mem2_ptr && m_mem2_size > 0)
-    bitmap.ClearRange(DeltaSaveSlot::MEM2_FIRST_PAGE,
-                      static_cast<uint32_t>(m_mem2_size / PAGE_SIZE));
+  {
+    ROLLBACK_ZONE_N("Clear JIT dirty bitmap");
+    auto& bitmap = JITDirtyBitmap::Get();
+    bitmap.ClearRange(0, static_cast<uint32_t>(m_mem1_size / PAGE_SIZE));
+    if (m_mem2_ptr && m_mem2_size > 0)
+      bitmap.ClearRange(MEM2_FIRST_PAGE, static_cast<uint32_t>(m_mem2_size / PAGE_SIZE));
+  }
 
   // After loading, the target slot becomes the new "oldest" slot,
   // so the next save will overwrite the next slot.
@@ -415,11 +751,15 @@ void RollbackManager::LoadFrame(Core::System& system, int frames_back)
   m_ring_count = m_ring_count - frames_back;
 
   if (ok)
-    OSD::AddMessage(fmt::format("Rolled back {} frame(s)", frames_back), 2000);
+  {
+    ROLLBACK_ZONE_N("log");
+    INFO_LOG_FMT(BRAWLBACK, "Rolled back {} frame(s)", frames_back);
+  }
   else
+  {
+    ERROR_LOG_FMT(BRAWLBACK, "Rollback failed");
     OSD::AddMessage("Rollback state load failed", 3000, OSD::Color::RED);
+  }
 }
 
 }  // namespace Rollback
-
-#endif  // _WIN32

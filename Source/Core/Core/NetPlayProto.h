@@ -124,6 +124,7 @@ struct NetSettings
   bool use_fma = false;
   bool hide_remote_gbas = false;
   bool m_RollbackMode = false;
+
   Sram sram;
 
   // These are sent separately from the other settings
@@ -172,9 +173,10 @@ enum class MessageID : u8
   PadSpectator = 0x5F,
   PadData = 0x60,
   PadMapping = 0x61,
-  PadBufferMinimum = 0x62,
+  PadBuffer = 0x62,
   PadHostData = 0x63,
   GBAConfig = 0x64,
+  PadBufferMinimum = 0x65,
   PadBufferPlayer = 0x66,
 
   WiimoteData = 0x70,
@@ -213,9 +215,6 @@ enum class MessageID : u8
 
   SyncSaveData = 0xF1,
   SyncCodes = 0xF2,
-  AckInputs = 0xF3,
-  GekkoNetData = 0xF4,
-  RollbackMode = 0xF5
 };
 
 enum class ConnectionError : u8

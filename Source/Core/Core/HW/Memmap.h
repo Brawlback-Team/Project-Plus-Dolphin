@@ -123,30 +123,6 @@ public:
 
   void Clear();
 
-  // Brawlback -- Misc
-  std::map<u64, DirtyPage>& GetDirtyPages() { return m_dirty_pages; }
-  std::optional<LogicalMemoryView> IsAddressInLogicalMemory(const u8* address) const;
-  std::array<PhysicalMemoryRegion, 4>& GetPhysicalRegions() { return m_physical_regions; }
-  u32 GetEmulatedAddress(u8* address);
-  bool is_in_main_thread = true;
-
-  // Brawlback -- Dirty Page Handling
-  #ifdef _WIN32
-  bool IsAddressDirty(uintptr_t address);
-  bool IsPageDirty(uintptr_t page_address);
-  bool IsPageMainThreadWrite(uintptr_t page_address);
-  void SetPageDirtyBit(uintptr_t page_address, bool dirty, u64 dirty_address, bool is_main_thread_write);
-  void SetAddressDirtyBit(uintptr_t address, size_t size, bool dirty, bool is_main_thread_write);
-  bool HandleChangeProtection(void* address, size_t size, u32 flag);
-  bool HandleFault(uintptr_t fault_address);
-  u64 GetDirtyPageIndexFromAddress(u64 address);
-  void WriteProtectPhysicalMemoryRegions();
-  void InitDirtyPages();
-  bool IsAddressInEmulatedMemory(uintptr_t address);
-  bool IsAddressInFakeVMEML1Cache(uintptr_t address);
-  u32 FastmemAddressToEmulatedAddress(uintptr_t fault_address, LogicalMemoryView view);
-  #endif
-
   // Routines to access physically addressed memory, designed for use by
   // emulated hardware outside the CPU. Use "Device_" prefix.
   std::string GetString(u32 em_address, size_t size = 0);

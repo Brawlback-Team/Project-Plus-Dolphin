@@ -18,8 +18,6 @@
 #pragma once
 
 #include <optional>
-
-#include <rangeset/rangesizeset.h>
 #include <queue>
 #include "Common/CommonTypes.h"
 #include "Common/RangeSizeSet.h"

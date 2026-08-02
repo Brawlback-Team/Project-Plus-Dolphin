@@ -51,8 +51,6 @@ void GCPadWiiUConfigDialog::CreateLayout()
 
 void GCPadWiiUConfigDialog::ConnectWidgets()
 {
-  connect(m_poll_rate_timer, &QTimer::timeout, this, &GCPadWiiUConfigDialog::UpdatePollRate);
-  m_poll_rate_timer->start(1500);
   connect(m_rumble, &QCheckBox::toggled, this, &GCPadWiiUConfigDialog::SaveSettings);
   connect(m_simulate_bongos, &QCheckBox::toggled, this, &GCPadWiiUConfigDialog::SaveSettings);
   connect(m_button_box, &QDialogButtonBox::accepted, this, &GCPadWiiUConfigDialog::accept);
@@ -88,12 +86,6 @@ void GCPadWiiUConfigDialog::UpdateAdapterStatus()
   m_rumble->setEnabled(detected);
   m_simulate_bongos->setEnabled(detected);
   m_poll_rate_label->setHidden(!detected);
-}
-
-void GCPadWiiUConfigDialog::UpdatePollRate()
-{
-  QString poll_rate_text = tr("Poll Rate: %1 hz").arg(1000.0 / GCAdapter::ReadRate());
-  m_poll_rate_label->setText(poll_rate_text);
 }
 
 void GCPadWiiUConfigDialog::LoadSettings()

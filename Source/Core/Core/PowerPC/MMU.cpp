@@ -702,10 +702,8 @@ void MMU::Write(const Common::MakeAtLeastU32<T> var, const u32 address)
 {
   Memcheck(address, var, true, sizeof(T));
   WriteToHardware<XCheckTLBFlag::Write>(address, var, sizeof(T));
-#ifdef _WIN32
   m_memory.MarkRangeDirty(address,
                           sizeof(T));  // Track MMU slow-path writes (interpreter, backpatch).
-#endif
 }
 template void MMU::Write<u8>(const u32 var, const u32 address);
 template void MMU::Write<u16>(const u32 var, const u32 address);
@@ -1065,6 +1063,8 @@ void MMU::ClearDCacheLine(u32 address)
   // is unlikely to matter.
   for (u32 i = 0; i < 32; i += 4)
     WriteToHardware<XCheckTLBFlag::Write, true>(address + i, 0, 4);
+
+  m_memory.MarkRangeDirty(address, 32);
 }
 
 void MMU::StoreDCacheLine(u32 address)
@@ -2030,15 +2030,18 @@ void MMU::DBATUpdated()
   m_dbat_table = std::move(new_dbat_table);
 
 #ifndef _ARCH_32
-  m_memory.UpdateDBATMappings(m_dbat_table);
+  if (table_changed)
+  {
+    m_memory.UpdateDBATMappings(m_dbat_table);
 
-  // Calling UpdateDBATMappings removes all fastmem page table mappings, so we have to recreate
-  // them. We need to go through them anyway because there may have been a change in which DBATs
-  // or memchecks are shadowing which page table mappings.
-  if (!m_page_table.empty())
-    ReloadPageTable();
+    // Calling UpdateDBATMappings removes all fastmem page table mappings, so we have to recreate
+    // them. We need to go through them anyway because there may have been a change in which DBATs
+    // or memchecks are shadowing which page table mappings.
+    if (!m_page_table.empty())
+      ReloadPageTable();
 
-  Rollback::RollbackManager::Get().NotifyDBATMappingsWereUpdated();
+    Rollback::RollbackManager::Get().NotifyDBATMappingsWereUpdated();
+  }
 #endif
 
   // IsOptimizable*Address and dcbz depends on the BAT mapping, so we need a flush here.

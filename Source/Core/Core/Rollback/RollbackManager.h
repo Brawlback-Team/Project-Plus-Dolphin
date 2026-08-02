@@ -3,30 +3,18 @@
 
 #pragma once
 
-#ifdef _WIN32
-
 #include <atomic>
+#include <bitset>
 #include <cstdint>
-#include <future>
 #include <memory>
 #include <shared_mutex>
-
+#include <thread>
+#include <vector>
 #include "Core/Rollback/DeltaSaveSlot.h"
+#include "job.h"
 
 // Set to 1 to enable full-RAM shadow snapshots for rollback validation
-#define ROLLBACK_VALIDATE 0
-
-// BOOKMARK: optimize!
-// Both: proper multithreading and NT wide stores
-// Loading:
-//  crunch down all the deltas to remove "duplicates" - i.e. if frame 0 and frame 1 both touched
-//      page X, only the oldest delta (frame 0) needs to be applied to restore the target frame;
-//      applying frame 1's delta would just write the same data back into page X and waste time.
-//  overlap the applydeltas work with gappagerestore work
-// RestoreNonDeltaState can also probably be overlapped with the above memcpy work?
-// Saving:
-//  fan-out memcpy (parallelize DeltaSaveSlot::Save), use nt wide stores
-//  use threadpool for the async eviction job, instead of launching a new thread every time
+#define ROLLBACK_VALIDATE DEV_DESYNC_MODE
 
 namespace Core
 {
@@ -35,12 +23,12 @@ class System;
 
 namespace Rollback
 {
-static constexpr int NUM_SAVE_SLOTS = 8;
-
+static constexpr int NUM_SAVE_SLOTS = 5 + 1;
+static constexpr int ROLLBACK_NUM_HELPER_THREADS = 5 + 1;  // plus one extra for eviction job
+static constexpr u32 SAVESTATE_NUM_WORK_CHUNKS = 5;
 class RollbackManager
 {
 public:
-
   RollbackManager() = default;
   ~RollbackManager() = default;
 
@@ -56,6 +44,8 @@ public:
 
   void SaveFrame(Core::System& system);
   void LoadFrame(Core::System& system, int frames_back = 1);
+
+  void AddExcludeRegion(uint32_t virt_addr, uint32_t size_bytes);
 
   bool IsInitialized() const { return m_initialized; }
 
@@ -73,19 +63,26 @@ public:
 
   void NotifyDBATMappingsWereUpdated() {}
 
-private:
+  // WSQ job system: m_dispatch_thread is worker 0, owned by the rollback thread.
+  // Background workers run wait_for_termination() on their own std::threads.
+  job::JobSysCtx m_job_ctx;
+  job::JobTaskThread* m_dispatch_thread = nullptr;
+  std::vector<std::thread> m_worker_threads;
+
   bool m_initialized = false;
 
-  uint8_t* m_mem1_ptr  = nullptr;
-  size_t   m_mem1_size = 0;
-  uint8_t* m_mem2_ptr  = nullptr;
-  size_t   m_mem2_size = 0;
-  uint8_t* m_l1_cache_ptr  = nullptr;
-  size_t   m_l1_cache_size = 0;
+  uint8_t* m_mem1_ptr = nullptr;
+  size_t m_mem1_size = 0;
+  uint8_t* m_mem2_ptr = nullptr;
+  size_t m_mem2_size = 0;
+  uint8_t* m_l1_cache_ptr = nullptr;
+  size_t m_l1_cache_size = 0;
 
   DeltaSaveSlot m_slots[NUM_SAVE_SLOTS];
 
-  int m_ring_next  = 0;  // index of the slot that will be written by the next savestate
+  std::vector<MemoryRegion> m_exclude_regions;
+
+  int m_ring_next = 0;  // index of the slot that will be written by the next savestate
   int m_ring_count = 0;
 
   struct RollbackSnapshot
@@ -100,17 +97,23 @@ private:
   // Rolling base: full MEM1+MEM2 state at the oldest reachable frame
   RollbackSnapshot m_base_snapshot;
 
-  std::future<void> m_eviction_future;
+  job::Job* m_eviction_job = nullptr;
+
+  // one byte per page, 1 = needs a source, 0 = satisfied.
+  std::vector<u8> m_needs_source_mem1;
+  std::vector<u8> m_needs_source_mem2;
+
+  void CaptureFullRamSnapshot(RollbackSnapshot& snap);
 
 #if ROLLBACK_VALIDATE
   RollbackSnapshot m_val_snapshots[NUM_SAVE_SLOTS];
 
-  void CaptureValSnapshot(int slot);
   void CompareValSnapshot(int target_slot, int frames_back) const;
   void InvalidateValSnapshots();
 #endif
 };
 
-}  // namespace Rollback
+uint32_t ReadBrawlMatchFrameCounter(const uint8_t* mem2_ptr, size_t mem2_size);
+uint32_t CalculateBrawlbackDesyncChecksum(Core::System& system);
 
-#endif  // _WIN32
+}  // namespace Rollback

@@ -26,7 +26,6 @@ private:
 
 private:
   void UpdateAdapterStatus();
-  void UpdatePollRate();
 
   int m_port;
 

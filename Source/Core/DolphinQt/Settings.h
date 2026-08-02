@@ -56,6 +56,9 @@ public:
   void InitDefaultPalette();
   bool IsSystemDark();
   bool IsThemeDark();
+  QString GetLauncherPath() const;
+
+  void SetLauncherPath(QString path);
 
   void SetUserStyleName(const QString& stylesheet_name);
   QString GetUserStyleName() const;

@@ -7,10 +7,12 @@
 
 #include <cstddef>
 #include <functional>
+#include <span>
 #include <string>
 #include <type_traits>
 
-#include "Common/CommonTypes.h"
+#include <Common/Buffer.h>
+#include <Common/CommonTypes.h>
 
 namespace Core
 {
@@ -97,6 +99,9 @@ void Load(Core::System& system, int slot);
 
 void SaveAs(Core::System& system, std::string filename);
 void LoadAs(Core::System& system, std::string filename);
+
+bool LoadFromBuffer(Core::System& system, std::span<u8> buffer);
+std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer);
 
 void LoadLastSaved(Core::System& system, int i = 1);
 void SaveFirstSaved(Core::System& system);

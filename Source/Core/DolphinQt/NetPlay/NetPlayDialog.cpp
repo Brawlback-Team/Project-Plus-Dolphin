@@ -193,11 +193,9 @@ void NetPlayDialog::CreateMainLayout()
          "configured by the host.\nSuitable for competitive games where fairness and minimal "
          "latency are most important."));
   m_fixed_delay_action->setCheckable(true);
-  #ifdef _WIN32
   m_rollback_action = m_network_menu->addAction(tr("Rollback"));
   m_rollback_action->setToolTip(tr("[WIP] -- WINDOWS ONLY"));
   m_rollback_action->setCheckable(true);
-  #endif
   m_host_input_authority_action = m_network_menu->addAction(tr("Host Input Authority"));
   m_host_input_authority_action->setToolTip(
       tr("Host has control of sending all inputs to the game, as received from other players, "
@@ -214,9 +212,7 @@ void NetPlayDialog::CreateMainLayout()
   m_network_mode_group = new QActionGroup(this);
   m_network_mode_group->setExclusive(true);
   m_network_mode_group->addAction(m_fixed_delay_action);
-  #ifdef _WIN32
   m_network_mode_group->addAction(m_rollback_action);
-  #endif
   m_network_mode_group->addAction(m_host_input_authority_action);
   m_network_mode_group->addAction(m_golf_mode_action);
   m_fixed_delay_action->setChecked(true);
@@ -1005,6 +1001,19 @@ void NetPlayDialog::OnPlayerPadBufferChanged(u32 buffer)
   m_player_buffer_size = static_cast<int>(buffer);
 }
 
+void NetPlayDialog::OnPadBufferChanged(u32 buffer)
+{
+  QueueOnObject(this, [this, buffer] {
+    const QSignalBlocker blocker(m_buffer_size_box);
+    m_buffer_size_box->setValue(buffer);
+  });
+  DisplayMessage(m_host_input_authority ? tr("Max buffer size changed to %1").arg(buffer) :
+                                          tr("Buffer size changed to %1").arg(buffer),
+                 "darkcyan");
+
+  m_buffer_size = static_cast<int>(buffer);
+}
+
 void NetPlayDialog::OnHostInputAuthorityChanged(bool enabled)
 {
   m_host_input_authority = enabled;
@@ -1299,12 +1308,10 @@ void NetPlayDialog::SaveSettings()
   {
     network_mode = "hostinputauthority";
   }
-  #ifdef _WIN32
   else if (m_rollback_action->isChecked())
   {
     network_mode = "rollback";
   }
-  #endif
   else if (m_golf_mode_action->isChecked())
   {
     network_mode = "golf";

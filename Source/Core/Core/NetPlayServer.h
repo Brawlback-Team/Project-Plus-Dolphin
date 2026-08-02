@@ -18,7 +18,6 @@
 #include "Common/SPSCQueue.h"
 #include "Common/Timer.h"
 #include "Common/TraversalClient.h"
-#include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/SyncIdentifier.h"
 #include "UICommon/NetPlayIndex.h"
@@ -53,7 +52,7 @@ public:
   bool StartGame();
   bool RequestStartGame();
   void AbortGameStart();
-  void SetRollback(const bool enable);
+  void AdjustMinimumPadBufferSize(unsigned int size);
 
   PadMappingArray GetPadMapping() const;
   void SetPadMapping(const PadMappingArray& mappings);
@@ -64,7 +63,7 @@ public:
   PadMappingArray GetWiimoteMapping() const;
   void SetWiimoteMapping(const PadMappingArray& mappings);
 
-  void AdjustMinimumPadBufferSize(unsigned int size);
+  void AdjustPadBufferSize(unsigned int size);
   void SetHostInputAuthority(bool enable);
 
   void KickPlayer(PlayerId player);
@@ -89,8 +88,8 @@ private:
 
     ENetPeer* socket = nullptr;
     u32 ping = 0;
+    u32 buffer = 0;
     u32 current_game = 0;
-    unsigned int buffer;
 
     Common::QoSSession qos_session;
 
@@ -170,6 +169,7 @@ private:
   bool m_update_pings = false;
   u32 m_current_game = 0;
   unsigned int m_minimum_buffer_size = 0;
+  unsigned int m_target_buffer_size = 0;
   PadMappingArray m_pad_map;
   GBAConfigArray m_gba_config;
   PadMappingArray m_wiimote_map;
@@ -213,6 +213,5 @@ private:
   Common::TraversalClient* m_traversal_client = nullptr;
   NetPlayUI* m_dialog = nullptr;
   NetPlayIndex m_index;
-  bool m_rollback_mode;
 };
 }  // namespace NetPlay

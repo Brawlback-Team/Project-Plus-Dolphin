@@ -23,7 +23,6 @@
 #else
 #include "Common/MsgHandler.h"
 #endif
-#include "EXI_Brawlback.h"
 
 namespace ExpansionInterface
 {
@@ -176,9 +175,6 @@ std::unique_ptr<IEXIDevice> EXIDevice_Create(Core::System& system, const EXIDevi
 
   case EXIDeviceType::AGP:
     result = std::make_unique<CEXIAgp>(system, slot);
-    break;
-  case EXIDeviceType::Brawlback:
-    result = std::make_unique<CEXIBrawlback>(system);
     break;
   case EXIDeviceType::Baseboard:
     result = std::make_unique<CEXIBaseboard>(system);

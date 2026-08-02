@@ -1,31 +1,33 @@
 // Copyright 2024 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#ifdef _WIN32
-
 #include "Core/Rollback/Perf.h"
-
-#if defined(HAVE_SUPERLUMINAL_PERFORMANCEAPI) && defined(ROLLBACK_PROFILE_SUPERLUMINAL)
+#include <Common/Logging/Log.h>
 
 namespace Rollback
 {
+#if defined(HAVE_SUPERLUMINAL_PERFORMANCEAPI) && defined(ROLLBACK_PROFILE_SUPERLUMINAL)
 PerformanceAPI_Functions g_perf_api = {};
-}
-
+PerformanceAPI_ModuleHandle moduleHandle = {};
 #endif
 
-namespace Rollback
-{
 void PerfInit()
 {
 #if defined(HAVE_SUPERLUMINAL_PERFORMANCEAPI) && defined(ROLLBACK_PROFILE_SUPERLUMINAL)
-  if (PerformanceAPI_LoadFrom("PerformanceAPI.dll", &Rollback::g_perf_api))
+  if (moduleHandle != NULL)
+    return;
+  moduleHandle = PerformanceAPI_LoadFrom(
+      L"C:\\Program Files\\Superluminal\\Performance\\API\\dll\\x64\\PerformanceAPI.dll",
+      &g_perf_api);
+  if (moduleHandle == NULL)
   {
-    if (g_perf_api.Initialize)
-      g_perf_api.Initialize();
+    moduleHandle = PerformanceAPI_LoadFrom(L"PerformanceAPI.dll", &g_perf_api);
+  }
+  if (moduleHandle == NULL)
+  {
+    WARN_LOG_FMT(BRAWLBACK, "Failed to find superluminal api");
   }
 #endif
 }
-}  // namespace Rollback
 
-#endif
+}  // namespace Rollback

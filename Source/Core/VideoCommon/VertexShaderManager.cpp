@@ -480,3 +480,13 @@ void VertexShaderManager::DoState(PointerWrap& p)
     dirty = true;
   }
 }
+
+void VertexShaderManager::SetProjectionMatrix(XFStateManager& xf_state_manager)
+{
+  if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty())
+  {
+    xf_state_manager.ResetProjection();
+    auto corrected_matrix = LoadProjectionMatrix();
+    memcpy(constants.projection.data(), corrected_matrix.data.data(), 4 * sizeof(float4));
+  }
+}

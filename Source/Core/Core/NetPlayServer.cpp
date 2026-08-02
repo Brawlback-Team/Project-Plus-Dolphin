@@ -70,8 +70,6 @@
 
 #include "UICommon/GameFile.h"
 
-#include "Brawlback/TimeSync.h"
-
 #if !defined(_WIN32)
 #include <sys/socket.h>
 #ifdef __HAIKU__
@@ -169,7 +167,7 @@ NetPlayServer::NetPlayServer(const u16 port, const bool forward_port, NetPlayUI*
     is_connected = true;
     m_do_loop = true;
     m_thread = std::thread(&NetPlayServer::ThreadFunc, this);
-    m_minimum_buffer_size = 3;
+    m_target_buffer_size = 5;
     m_chunked_data_thread = std::thread(&NetPlayServer::ChunkedDataThreadFunc, this);
 
 #ifdef USE_UPNP
@@ -328,7 +326,7 @@ void NetPlayServer::ThreadFunc()
 
           if (error != ConnectionError::NoError)
           {
-            INFO_LOG_FMT(NETPLAY, "Error {} initializing peer {:x}:{}", u8(error),
+            INFO_LOG_FMT(NETPLAY, "Error {} initializing peer {:x}:{}", static_cast<u8>(error),
                          netEvent.peer->address.host, netEvent.peer->address.port);
 
             sf::Packet spac;
@@ -393,7 +391,8 @@ void NetPlayServer::ThreadFunc()
         if (static_cast<int>(netEvent.type) == Common::ENet::SKIPPABLE_EVENT)
           INFO_LOG_FMT(NETPLAY, "enet_host_service: skippable packet event");
         else
-          ERROR_LOG_FMT(NETPLAY, "enet_host_service: unknown event type: {}", int(netEvent.type));
+          ERROR_LOG_FMT(NETPLAY, "enet_host_service: unknown event type: {}",
+                        static_cast<int>(netEvent.type));
         break;
       }
     }
@@ -484,7 +483,7 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
   }
 
   if (!m_host_input_authority)
-    SendResponseToPlayer(new_player, MessageID::PadBufferMinimum, m_minimum_buffer_size);
+    SendResponseToPlayer(new_player, MessageID::PadBuffer, m_target_buffer_size);
 
   SendResponseToPlayer(new_player, MessageID::HostInputAuthority, m_host_input_authority);
 
@@ -495,9 +494,6 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
 
     SendResponseToPlayer(new_player, MessageID::GameStatus, existing_player.pid,
                          static_cast<u8>(existing_player.game_status));
-						 
-	SendResponseToPlayer(new_player, MessageID::PadBufferPlayer, existing_player.pid,
-                         static_cast<u8>(existing_player.buffer));
   }
 
   if (Config::Get(Config::NETPLAY_ENABLE_QOS))
@@ -687,19 +683,19 @@ void NetPlayServer::UpdateWiimoteMapping()
 }
 
 // called from ---GUI--- thread and ---NETPLAY--- thread
-void NetPlayServer::AdjustMinimumPadBufferSize(unsigned int size)
+void NetPlayServer::AdjustPadBufferSize(unsigned int size)
 {
   std::lock_guard lkg(m_crit.game);
 
-  m_minimum_buffer_size = size;
+  m_target_buffer_size = size;
 
   // not needed on clients with host input authority
   if (!m_host_input_authority)
   {
     // tell clients to change buffer size
     sf::Packet spac;
-    spac << MessageID::PadBufferMinimum;
-    spac << m_minimum_buffer_size;
+    spac << MessageID::PadBuffer;
+    spac << m_target_buffer_size;
 
     SendAsyncToClients(std::move(spac));
   }
@@ -720,21 +716,7 @@ void NetPlayServer::SetHostInputAuthority(const bool enable)
 
   // resend pad buffer to clients when disabled
   if (!m_host_input_authority)
-    AdjustMinimumPadBufferSize(m_minimum_buffer_size);
-}
-
-void NetPlayServer::SetRollback(const bool enable)
-{
-  std::lock_guard lkg(m_crit.game);
-
-  m_rollback_mode = enable;
-
-  // tell clients about the new value
-  sf::Packet spac;
-  spac << MessageID::RollbackMode;
-  spac << m_rollback_mode;
-
-  SendAsyncToClients(std::move(spac));
+    AdjustPadBufferSize(m_target_buffer_size);
 }
 
 void NetPlayServer::SendAsync(sf::Packet&& packet, const PlayerId pid, const u8 channel_id)
@@ -806,23 +788,21 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SendToClients(spac, player.pid);
   }
   break;
-  
   case MessageID::PadBufferPlayer:
   {
-	u32 buffer;
-	packet >> buffer;
+    u32 buffer;
+    packet >> buffer;
 
-	player.buffer = buffer;
+    player.buffer = buffer;
 
-	sf::Packet spac;
-	spac << MessageID::PadBufferPlayer;
-	spac << player.pid;
-	spac << buffer;
+    sf::Packet spac;
+    spac << MessageID::PadBufferPlayer;
+    spac << player.pid;
+    spac << buffer;
 
-	SendToClients(spac, player.pid);
-	}
+    SendToClients(spac, player.pid);
+  }
   break;
-
   case MessageID::ChunkedDataProgress:
   {
     u32 cid;
@@ -847,47 +827,6 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
   }
   break;
 
-  case MessageID::PadSpectator:
-  {
-    bool spectator;
-    packet >> spectator;
-
-    auto padmap = GetPadMapping();
-  
-    int player_port = -1;
-    for (int i = 0; i < (int)padmap.size(); i++)
-    {
-      if (padmap[i] == player.pid)
-      {
-        player_port = i;
-        break;
-      }
-    }
-
-    if (spectator)
-    {
-      if (player_port != -1)
-        padmap[player_port] = 0;
-    }
-    else
-    {
-      bool assigned = false;
-      for (int i = 0; i < (int)padmap.size(); i++)
-      {
-        if (padmap[i] == 0)
-        {
-          padmap[i] = player.pid;
-          assigned = true;
-          break;
-        }
-      }
-    }
-
-    this->SetPadMapping(padmap);
-  }
-  break;
-
-
   case MessageID::PadData:
   {
     // if this is pad data from the last game still being received, ignore it
@@ -899,82 +838,41 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
 
     while (!packet.endOfPacket())
     {
-      if (m_rollback_mode)
+      PadIndex map;
+      packet >> map;
+
+      // If the data is not from the correct player,
+      // then disconnect them.
+      if (!IsValidPadIndex(m_pad_map, map) || m_pad_map.at(map) != player.pid)
       {
-        PadIndex map;
-        packet >> map;
-
-        int pad_info;
-        packet >> pad_info;
-        u8 sizeofFramedatas = 0;
-        packet >> sizeofFramedatas;
-        spac << map << pad_info << sizeofFramedatas;
-        PlayerId playerIndex = 0;
-        s32 maxFrame;
-        packet >> playerIndex;
-        packet >> maxFrame;
-        spac << playerIndex;
-        spac << maxFrame;
-        for (int i = 0; i < sizeofFramedatas; i++)
-        {
-          Inputs pad;
-          packet >> pad.game_pad.buttons >> pad.game_pad._buttons >> pad.game_pad.holdButtons >> pad.game_pad.rapidFireButtons >>
-              pad.game_pad.newPressedButtons >> pad.game_pad.releasedButtons >> pad.game_pad.stickX >> pad.game_pad.stickY >>
-              pad.game_pad.cStickX >> pad.game_pad.cStickY >> pad.game_pad.LAnalogue >> pad.game_pad.RAnalogue >> pad.game_pad.LTrigger >>
-              pad.game_pad.RTrigger;
-          packet >> pad.emu_pad.button >> pad.emu_pad.stickX >> pad.emu_pad.stickY >> pad.emu_pad.substickX
-                 >> pad.emu_pad.substickY >> pad.emu_pad.triggerLeft >> pad.emu_pad.triggerRight
-                 >> pad.emu_pad.analogA >> pad.emu_pad.analogB >> pad.emu_pad.isConnected;
-          spac << pad.game_pad.buttons << pad.game_pad._buttons << pad.game_pad.holdButtons << pad.game_pad.rapidFireButtons <<
-              pad.game_pad.newPressedButtons << pad.game_pad.releasedButtons << pad.game_pad.stickX << pad.game_pad.stickY <<
-              pad.game_pad.cStickX << pad.game_pad.cStickY << pad.game_pad.LAnalogue << pad.game_pad.RAnalogue << pad.game_pad.LTrigger <<
-              pad.game_pad.RTrigger;
-          spac << pad.emu_pad.button << pad.emu_pad.stickX << pad.emu_pad.stickY <<
-              pad.emu_pad.substickX << pad.emu_pad.substickY << pad.emu_pad.triggerLeft <<
-              pad.emu_pad.triggerRight << pad.emu_pad.analogA << pad.emu_pad.analogB <<
-              pad.emu_pad.isConnected;
-        }
-
-        SendToClients(spac, player.pid);
+        return 1;
       }
-      else
+
+      GCPadStatus pad;
+      packet >> pad.button;
+      spac << map << pad.button;
+      if (!m_gba_config.at(map).enabled)
       {
-        PadIndex map;
-        packet >> map;
+        packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
+            pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
 
-        // If the data is not from the correct player,
-        // then disconnect them.
-        if (!IsValidPadIndex(m_pad_map, map) || m_pad_map.at(map) != player.pid)
-        {
-          return 1;
-        }
-
-        GCPadStatus pad;
-        packet >> pad.button;
-        spac << map << pad.button;
-        if (!m_gba_config.at(map).enabled)
-        {
-          packet >> pad.analogA >> pad.analogB >> pad.stickX >> pad.stickY >> pad.substickX >>
-              pad.substickY >> pad.triggerLeft >> pad.triggerRight >> pad.isConnected;
-
-          spac << pad.analogA << pad.analogB << pad.stickX << pad.stickY << pad.substickX
-               << pad.substickY << pad.triggerLeft << pad.triggerRight << pad.isConnected;
-        }
-
-        if (m_host_input_authority)
-        {
-          // Prevent crash before game stop if the golfer disconnects
-          if (m_current_golfer != 0)
-          {
-            if (const auto it = m_players.find(m_current_golfer); it != m_players.end())
-              Send(it->second.socket, spac);
-          }
-        }
-        else
-        {
-          SendToClients(spac, player.pid);
-        }
+        spac << pad.analogA << pad.analogB << pad.stickX << pad.stickY << pad.substickX
+             << pad.substickY << pad.triggerLeft << pad.triggerRight << pad.isConnected;
       }
+    }
+
+    if (m_host_input_authority)
+    {
+      // Prevent crash before game stop if the golfer disconnects
+      if (m_current_golfer != 0)
+      {
+        if (const auto it = m_players.find(m_current_golfer); it != m_players.end())
+          Send(it->second.socket, spac);
+      }
+    }
+    else
+    {
+      SendToClients(spac, player.pid);
     }
   }
   break;
@@ -1241,46 +1139,7 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SendToClients(spac);
   }
   break;
-  case MessageID::DesyncDetected:
-  {
-    int player_index;
-    s32 frame;
-    packet >> player_index;
-    packet >> frame;
 
-    INFO_LOG_FMT(NETPLAY, "Desync reported by player {} for player index {} at frame {}",
-                 player.pid, player_index, frame);
-
-    if (m_settings.m_RollbackMode)
-    {
-      // In rollback mode, broadcast to all players for awareness
-      sf::Packet spac;
-      spac << MessageID::DesyncDetected;
-      spac << player_index;
-      spac << frame;
-      SendToClients(spac);
-
-      // Log for analysis
-      std::string log_message =
-          fmt::format("[DESYNC] Player {} reported desync with player index {} at frame {}",
-                      player.name, player_index, frame);
-
-      // Optionally save to file for debugging
-      // SaveDesyncLog(log_message, frame);
-    }
-    else
-    {
-      // In delay-based mode, this is critical - stop the game
-      m_is_running = false;
-
-      sf::Packet spac;
-      spac << MessageID::DesyncDetected;
-      spac << player_index;
-      spac << frame;
-      SendToClients(spac);
-    }
-  }
-  break;
   case MessageID::GameDigestResult:
   {
     std::string result;
@@ -1314,8 +1173,8 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SyncSaveDataID sub_id;
     packet >> sub_id;
 
-    INFO_LOG_FMT(NETPLAY, "Got client SyncSaveData message: {:x} from client {}", u8(sub_id),
-                 player.pid);
+    INFO_LOG_FMT(NETPLAY, "Got client SyncSaveData message: {:x} from client {}",
+                 static_cast<u8>(sub_id), player.pid);
 
     switch (sub_id)
     {
@@ -1371,8 +1230,8 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     SyncCodeID sub_id;
     packet >> sub_id;
 
-    INFO_LOG_FMT(NETPLAY, "Got client SyncCodes message: {:x} from client {}", u8(sub_id),
-                 player.pid);
+    INFO_LOG_FMT(NETPLAY, "Got client SyncCodes message: {:x} from client {}",
+                 static_cast<u8>(sub_id), player.pid);
 
     // Check If Code Sync was successful or not
     switch (sub_id)
@@ -1421,33 +1280,7 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     }
   }
   break;
-  case MessageID::GekkoNetData:
-  {
-    // Forward GekkoNet data to all other clients
-    sf::Packet spac;
-    spac << MessageID::GekkoNetData;
 
-    // Copy raw GekkoNet payload (skip the MessageID byte)
-    const u8* data = static_cast<const u8*>(packet.getData()) + sizeof(MessageID);
-    size_t size = packet.getDataSize() - sizeof(MessageID);
-    spac.append(data, size);
-
-    SendToClients(spac, player.pid);
-  }
-  break;
-  case MessageID::AckInputs:
-  {
-    Brawlback::FrameAck frame;
-    packet >> frame.frame;
-    packet >> frame.playerIdx;
-    sf::Packet spac;
-    spac << MessageID::AckInputs;
-    spac << frame.frame;
-    spac << frame.playerIdx;
-
-    SendToClients(spac, player.pid);
-    break;
-  }
   default:
     PanicAlertFmtT("Unknown message with id:{0} received from player:{1} Kicking player!",
                    static_cast<u8>(mid), player.pid);
@@ -1659,11 +1492,7 @@ bool NetPlayServer::SetupNetSettings()
   settings.strict_settings_sync = Config::Get(Config::NETPLAY_STRICT_SETTINGS_SYNC);
   settings.sync_codes = Config::Get(Config::NETPLAY_SYNC_CODES);
   settings.golf_mode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "golf";
-  #ifdef _WIN32
   settings.m_RollbackMode = Config::Get(Config::NETPLAY_NETWORK_MODE) == "rollback";
-  #else
-  settings.m_RollbackMode = false;
-  #endif
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   settings.spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);
@@ -1777,7 +1606,7 @@ bool NetPlayServer::StartGame()
 
   // no change, just update with clients
   if (!m_host_input_authority)
-    AdjustMinimumPadBufferSize(m_minimum_buffer_size);
+    AdjustPadBufferSize(m_target_buffer_size);
 
   m_current_golfer = 1;
   m_pending_golfer = 0;
@@ -1873,10 +1702,10 @@ bool NetPlayServer::StartGame()
   spac << region;
   spac << m_settings.sync_codes;
 
-  spac << m_settings.m_RollbackMode;
   spac << m_settings.golf_mode;
   spac << m_settings.use_fma;
   spac << m_settings.hide_remote_gbas;
+  spac << m_settings.m_RollbackMode;
 
   for (size_t i = 0; i < sizeof(m_settings.sram); ++i)
     spac << m_settings.sram[i];
@@ -1887,6 +1716,24 @@ bool NetPlayServer::StartGame()
   m_is_running = true;
 
   return true;
+}
+
+void NetPlayServer::AdjustMinimumPadBufferSize(unsigned int size)
+{
+  std::lock_guard lkg(m_crit.game);
+
+  m_minimum_buffer_size = size;
+
+  // not needed on clients with host input authority
+  if (!m_host_input_authority)
+  {
+    // tell clients to change buffer size
+    sf::Packet spac;
+    spac << MessageID::PadBufferMinimum;
+    spac << m_minimum_buffer_size;
+
+    SendAsyncToClients(std::move(spac));
+  }
 }
 
 void NetPlayServer::AbortGameStart()

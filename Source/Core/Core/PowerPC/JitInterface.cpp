@@ -18,6 +18,7 @@
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "Core/Rollback/RollbackManager.h"
 
 #ifdef _M_X86_64
 #include "Core/PowerPC/Jit64/Jit.h"
@@ -40,8 +41,14 @@ void JitInterface::SetJit(std::unique_ptr<JitBase> jit)
 
 void JitInterface::DoState(PointerWrap& p)
 {
-  if (m_jit && p.IsReadMode())
-    m_jit->ClearCache();
+  if (!m_jit || !p.IsReadMode())
+    return;
+
+  // Skip the cache clear during rollback - we can assume jit is still valid
+  if (Rollback::RollbackManager::Get().m_skip_jit_clear_in_dostate.load(std::memory_order_relaxed))
+    return;
+
+  m_jit->ClearCache();
 }
 
 CPUCoreBase* JitInterface::InitJitCore(PowerPC::CPUCore core)
@@ -237,6 +244,8 @@ void JitInterface::ClearCache(const Core::CPUThreadGuard&)
 
 void JitInterface::ClearSafe()
 {
+  if (Rollback::RollbackManager::Get().m_skip_jit_clear_in_dostate.load(std::memory_order_relaxed))
+    return;
   if (m_jit)
     m_jit->GetBlockCache()->Clear();
 }

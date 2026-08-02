@@ -3,8 +3,12 @@
 
 // Rollback profiling - Superluminal and Tracy can be active simultaneously.
 // Comment out either line below to disable that backend at compile time.
+#if defined(HAVE_SUPERLUMINAL_PERFORMANCEAPI)
 #define ROLLBACK_PROFILE_SUPERLUMINAL
+#endif
+#if defined(HAVE_TRACY)
 #define ROLLBACK_PROFILE_TRACY
+#endif
 
 #define PERF_CONCAT_(a, b) a##b
 #define PERF_CONCAT(a, b) PERF_CONCAT_(a, b)
@@ -33,15 +37,14 @@ struct InstrumentationScope
 };
 }  // namespace Rollback
 
-#define ROLLBACK_SL_ZONE_() \
+#define ROLLBACK_SL_ZONE_()                                                                        \
   ::Rollback::InstrumentationScope PERF_CONCAT(_sl_, __LINE__)(__FUNCTION__)
-#define ROLLBACK_SL_ZONE_N_(name) \
-  ::Rollback::InstrumentationScope PERF_CONCAT(_sl_, __LINE__)(name)
-#define ROLLBACK_SL_THREAD_NAME_(name)                               \
-  do                                                                 \
-  {                                                                  \
-    if (::Rollback::g_perf_api.SetCurrentThreadName)                 \
-      ::Rollback::g_perf_api.SetCurrentThreadName(name);             \
+#define ROLLBACK_SL_ZONE_N_(name) ::Rollback::InstrumentationScope PERF_CONCAT(_sl_, __LINE__)(name)
+#define ROLLBACK_SL_THREAD_NAME_(name)                                                             \
+  do                                                                                               \
+  {                                                                                                \
+    if (::Rollback::g_perf_api.SetCurrentThreadName)                                               \
+      ::Rollback::g_perf_api.SetCurrentThreadName(name);                                           \
   } while (0)
 
 #else
@@ -55,8 +58,8 @@ struct InstrumentationScope
 #if defined(HAVE_TRACY) && defined(ROLLBACK_PROFILE_TRACY)
 #include <tracy/Tracy.hpp>
 
-#define ROLLBACK_TR_ZONE_()            ZoneScoped
-#define ROLLBACK_TR_ZONE_N_(name)      ZoneScopedN(name)
+#define ROLLBACK_TR_ZONE_() ZoneScoped
+#define ROLLBACK_TR_ZONE_N_(name) ZoneScopedN(name)
 #define ROLLBACK_TR_THREAD_NAME_(name) tracy::SetThreadName(name)
 
 #else
@@ -72,8 +75,12 @@ namespace Rollback
 void PerfInit();
 }  // namespace Rollback
 
-#define ROLLBACK_ZONE()        ROLLBACK_SL_ZONE_();       ROLLBACK_TR_ZONE_()
-#define ROLLBACK_ZONE_N(name)  ROLLBACK_SL_ZONE_N_(name); ROLLBACK_TR_ZONE_N_(name)
-#define ROLLBACK_THREAD_NAME(name) \
-  ROLLBACK_SL_THREAD_NAME_(name); \
+#define ROLLBACK_ZONE()                                                                            \
+  ROLLBACK_SL_ZONE_();                                                                             \
+  ROLLBACK_TR_ZONE_()
+#define ROLLBACK_ZONE_N(name)                                                                      \
+  ROLLBACK_SL_ZONE_N_(name);                                                                       \
+  ROLLBACK_TR_ZONE_N_(name)
+#define ROLLBACK_THREAD_NAME(name)                                                                 \
+  ROLLBACK_SL_THREAD_NAME_(name);                                                                  \
   ROLLBACK_TR_THREAD_NAME_(name)
