@@ -10,11 +10,12 @@
 #include <shared_mutex>
 #include <thread>
 #include <vector>
+#include "Core/Brawlback/include/brawlback-common/BrawlbackConstants.h"
 #include "Core/Rollback/DeltaSaveSlot.h"
 #include "job.h"
 
 // Set to 1 to enable full-RAM shadow snapshots for rollback validation
-#define ROLLBACK_VALIDATE 1
+#define ROLLBACK_VALIDATE 0
 
 namespace Core
 {
@@ -23,9 +24,9 @@ class System;
 
 namespace Rollback
 {
-static constexpr int NUM_SAVE_SLOTS = 5 + 1;
-static constexpr int ROLLBACK_NUM_HELPER_THREADS = 5 + 1;  // plus one extra for eviction job
-static constexpr u32 SAVESTATE_NUM_WORK_CHUNKS = 5;
+static constexpr int NUM_SAVE_SLOTS = MAX_SAVESTATES;  // MAX_ROLLBACK_FRAMES + 1
+static constexpr int ROLLBACK_NUM_HELPER_THREADS = MAX_SAVESTATES;  // plus one extra for eviction job
+static constexpr u32 SAVESTATE_NUM_WORK_CHUNKS = MAX_ROLLBACK_FRAMES;
 class RollbackManager
 {
 public:

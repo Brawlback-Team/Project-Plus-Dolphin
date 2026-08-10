@@ -132,7 +132,7 @@ void RollbackManager::CompareValSnapshot(int target_slot, int frames_back) const
   if (mem1_mismatch == 0 && mem2_mismatch == 0)
   {
     const MemoryRegion& stack_excl = m_exclude_regions.back();
-    INFO_LOG_FMT(COMMON,
+    INFO_LOG_FMT(BRAWLBACK,
                  "[Rollback] VALIDATE OK  step={}  slot={}  brawl_frame={} (want {})  {}  "
                  "stack_excl=[0x{:08x},0x{:08x})",
                  frames_back, target_slot, current_brawl_frame, snap.brawl_frame, frame_tag,
@@ -169,7 +169,7 @@ void RollbackManager::CompareValSnapshot(int target_slot, int frames_back) const
   // Also show the live stack exclusion zone so we can tell whether wrong pages
   // are just outside it (which would explain state corruption on return).
   const MemoryRegion& stack_excl = m_exclude_regions.back();
-  WARN_LOG_FMT(COMMON,
+  WARN_LOG_FMT(BRAWLBACK,
                "[Rollback] VALIDATE FAIL  step={}  slot={}  - {} MEM1 + "
                "{} MEM2 page(s) wrong.  "
                "brawl_frame={} (want {})  {}  stack_excl=[0x{:08x},0x{:08x})\n"
@@ -226,13 +226,13 @@ static const std::vector<MemoryRegion> s_brawlback_hardcoded_exclude_regions = {
     // This holds rollback control state (framesToAdvance, pastFrameDatas, etc.)
     // that must survive across a rollback restore unchanged.
     // MemoryRegion::FromVirt(0x935d7660u, 0x89a0u),
-    MemoryRegion::FromVirt(0x935d3940u, 0x0000c6c0),
+    //MemoryRegion::FromVirt(0x935d3940u, 0x0000c6c0),
     // default gecko codes region (do we actually want to exclude this? probably not...
     // MemoryRegion::FromVirt(0x80001800, 0x80003000),
 
     // bss/data sections of our cpp code framework
     // see "infoSegmentAddress" - "memoryHeapEndAddress in settings.json in the BuildSystem
-    MemoryRegion::FromVirt(0x935D0000, 0x10000),
+    //MemoryRegion::FromVirt(0x935D0000, 0x10000),
 };
 
 static const std::vector<MemoryRegionThroughPtrs> s_brawlback_hardcoded_desync_detection_regions = {
@@ -499,14 +499,11 @@ void RollbackManager::SaveFrame(Core::System& system)
             std::memcpy(m_base_snapshot.mem1.get() + dst_off, src + i * PAGE_SIZE, PAGE_SIZE);
           }
 
-          if (m_base_snapshot.mem2)
+          src = evicted->mem2.page_data.data();
+          for (uint32_t i = 0; i < evicted->mem2.page_count; ++i)
           {
-            src = evicted->mem2.page_data.data();
-            for (uint32_t i = 0; i < evicted->mem2.page_count; ++i)
-            {
-              const size_t dst_off = static_cast<size_t>(evicted->mem2.page_indices[i]) * PAGE_SIZE;
-              std::memcpy(m_base_snapshot.mem2.get() + dst_off, src + i * PAGE_SIZE, PAGE_SIZE);
-            }
+            const size_t dst_off = static_cast<size_t>(evicted->mem2.page_indices[i]) * PAGE_SIZE;
+            std::memcpy(m_base_snapshot.mem2.get() + dst_off, src + i * PAGE_SIZE, PAGE_SIZE);
           }
         });
   }
@@ -717,7 +714,7 @@ bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
   {
     ROLLBACK_ZONE_N("DoState restore");
     BeginDoState();
-    ok |= State::LoadFromBuffer(
+    ok = State::LoadFromBuffer(
         system, std::span<uint8_t>(deltaSave.m_save_buffer.data(), deltaSave.m_save_buffer.size()));
     EndDoState();
   }

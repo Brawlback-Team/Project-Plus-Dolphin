@@ -512,6 +512,7 @@ if (NOT APPLE AND NOT ANDROID)
   # Symlink Sys
   add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
+      -DDOLPHIN_FORCE_COPY_DATA=${DOLPHIN_FORCE_COPY_DATA}
       -Dtarget="${CMAKE_SOURCE_DIR}/Data/Sys"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
       -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
@@ -520,6 +521,7 @@ if (NOT APPLE AND NOT ANDROID)
   # Symlink COPYING
   add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
+      -DDOLPHIN_FORCE_COPY_DATA=${DOLPHIN_FORCE_COPY_DATA}
       -Dtarget="${CMAKE_SOURCE_DIR}/COPYING"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/COPYING"
       -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
@@ -528,6 +530,7 @@ if (NOT APPLE AND NOT ANDROID)
   # Symlink Licenses dir
   add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
+      -DDOLPHIN_FORCE_COPY_DATA=${DOLPHIN_FORCE_COPY_DATA}
       -Dtarget="${CMAKE_SOURCE_DIR}/LICENSES"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Licenses"
       -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
@@ -537,6 +540,7 @@ if (WIN32)
   # Symlink qt.conf
   add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND ${CMAKE_COMMAND}
+      -DDOLPHIN_FORCE_COPY_DATA=${DOLPHIN_FORCE_COPY_DATA}
       -Dtarget="${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win"
       -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/qt.conf"
       -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"
@@ -546,6 +550,7 @@ if (WIN32)
     # Symlink build_info.txt
     add_custom_command(TARGET project-plus-dolphin POST_BUILD
       COMMAND ${CMAKE_COMMAND}
+        -DDOLPHIN_FORCE_COPY_DATA=${DOLPHIN_FORCE_COPY_DATA}
         -Dtarget="${CMAKE_BINARY_DIR}/build_info.txt"
         -Dlink="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
         -P="${CMAKE_SOURCE_DIR}/CMake/DolphinSymlinkOrCopy.cmake"

@@ -19,9 +19,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
-#ifdef _WIN32
-#include "Core/Rollback/DeltaSaveSlot.h"
-#endif
+#include "Core/Rollback/RollbackManager.h"
 
 using namespace Gen;
 

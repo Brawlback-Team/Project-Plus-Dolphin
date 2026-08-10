@@ -308,7 +308,47 @@ void NetPlayServer::ThreadFunc()
       break;
       case ENET_EVENT_TYPE_RECEIVE:
       {
-        INFO_LOG_FMT(NETPLAY, "enet_host_service: receive event");
+        INFO_LOG_FMT(NETPLAY, "enet_host_service: receive event on channel {}", 
+                     netEvent.channelID);
+
+        // Relay GekkoNet channel packets to all other clients
+        if (netEvent.channelID == GEKKONET_CHANNEL)
+        {
+          if (netEvent.peer->data)
+          {
+            auto it = m_players.find(*PeerPlayerId(netEvent.peer));
+            if (it != m_players.end())
+            {
+              Client& sender = it->second;
+
+              // Relay to all other clients
+              std::lock_guard lkg(m_crit.game);
+              for (auto& pair : m_players)
+              {
+                if (pair.first != sender.pid)
+                {
+                  ENetPacket* relay_packet = enet_packet_create(netEvent.packet->data, 
+                                                                  netEvent.packet->dataLength,
+                                                                  ENET_PACKET_FLAG_UNSEQUENCED);
+                  if (relay_packet)
+                  {
+                    enet_peer_send(pair.second.socket, GEKKONET_CHANNEL, relay_packet);
+                  }
+                }
+              }
+            }
+          }
+
+          enet_packet_destroy(netEvent.packet);
+          break;
+        }
+
+        // Normal NetPlay packet (includes CHUNKED_DATA_CHANNEL and DEFAULT_CHANNEL)
+        if (netEvent.channelID == CHUNKED_DATA_CHANNEL)
+        {
+          INFO_LOG_FMT(NETPLAY, "Received chunked data packet from peer ({} bytes)", 
+                       netEvent.packet->dataLength);
+        }
 
         sf::Packet rpac;
         rpac.append(netEvent.packet->data, netEvent.packet->dataLength);

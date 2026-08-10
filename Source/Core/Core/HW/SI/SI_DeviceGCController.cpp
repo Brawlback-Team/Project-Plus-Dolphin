@@ -15,6 +15,7 @@
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Movie.h"
+#include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
@@ -142,8 +143,6 @@ GCPadStatus CSIDevice_GCController::GetPadStatus()
 {
   GCPadStatus pad_status = {};
 
-  // For netplay, the local controllers are polled in GetNetPads(), and
-  // the remote controllers receive their status there as well
   if (!NetPlay::IsNetPlayRunning())
   {
     pad_status = Pad::GetStatus(m_device_number);

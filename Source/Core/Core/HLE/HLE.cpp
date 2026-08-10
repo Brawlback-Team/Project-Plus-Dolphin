@@ -26,7 +26,7 @@ namespace HLE
 static std::map<u32, u32> s_hooked_addresses;
 
 // clang-format off
-constexpr std::array<Hook, 24> os_patches{{
+constexpr std::array<Hook, 28> os_patches{{
     // Placeholder, os_patches[0] is the "non-existent function" index
     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
 
@@ -59,7 +59,11 @@ constexpr std::array<Hook, 24> os_patches{{
     {"GeckoCodehandler",             HLE_Misc::GeckoCodeHandlerICacheFlush, HookType::Start,   HookFlag::Fixed},
     {"GeckoHandlerReturnTrampoline", HLE_Misc::GeckoReturnTrampoline,       HookType::Replace, HookFlag::Fixed},
     {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed}, // apploader needs OSReport-like function
-    {"BrawlbackHandler",             HLE_Misc::BrawlbackHandler,            HookType::Start,   HookFlag::Fixed} // Brawlback needs a function to handle its custom code, this is it
+    {"BrawlbackGekkoNetUnconditionalFrame", HLE_Misc::BrawlbackGekkoNetUnconditionalFrame, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackGekkoNetGameLoop",    HLE_Misc::BrawlbackGekkoNetGameLoop,   HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackGekkoNetGameProcCallsite", HLE_Misc::BrawlbackGekkoNetGameProcCallsite, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackGekkoNetFrameEnd",    HLE_Misc::BrawlbackGekkoNetFrameEnd,   HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackGekkoNetLoopEnd",     HLE_Misc::BrawlbackGekkoNetLoopEnd,    HookType::Replace, HookFlag::Fixed}
 }};
 // clang-format on
 
@@ -105,7 +109,14 @@ void PatchFixedFunctions(Core::System& system)
   // This has to always be installed even if cheats are not enabled because of the possibility of
   // loading a savestate where PC is inside the code handler while cheats are disabled.
   Patch(system, Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
-  Patch(system, 0x80017504, "BrawlbackHandler");
+
+  // Brawlback frame handling hooks
+  // CRITICAL: The unconditional hook must be installed first to ensure GekkoNet logic runs every frame
+  Patch(system, 0x800171b4, "BrawlbackGekkoNetUnconditionalFrame"); // BRAWL_UNCONDITIONAL_HOOK_ADDR
+  Patch(system, 0x80017344, "BrawlbackGekkoNetGameLoop");    // BRAWL_GAME_LOOP_HOOK_ADDR - loop entry (inside conditionals)
+  Patch(system, 0x80017350, "BrawlbackGekkoNetGameProcCallsite");      // BRAWL_GAMEPROC_CALLSITE_ADDR - before gameProc (inside conditionals)
+  Patch(system, 0x80017504, "BrawlbackGekkoNetFrameEnd");    // BRAWL_FRAME_END_ADDR - after simulation completes (stw r0,0x100(r23))
+  Patch(system, 0x80017508, "BrawlbackGekkoNetLoopEnd");     // BRAWL_LOOP_END_ADDR - controls outer game loop iteration (b 0x800171b4)
 }
 
 void PatchFunctions(Core::System& system)

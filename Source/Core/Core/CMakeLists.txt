@@ -578,6 +578,19 @@ add_library(core
   Rollback/Perf.h
   Rollback/RollbackManager.cpp
   Rollback/RollbackManager.h
+  Brawlback/include/gekkonet/GekkoLib/src/backend.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/event.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/game_session.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/gekkonet.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/input.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/net.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/player.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/replay.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/replay_session.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/spectator_session.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/storage.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/stress_session.cpp
+  Brawlback/include/gekkonet/GekkoLib/src/sync.cpp
   State.cpp
   State.h
   SyncIdentifier.h
@@ -712,6 +725,37 @@ PRIVATE
   LZ4::LZ4
   ZLIB::ZLIB
 )
+
+# GekkoNet library configuration
+target_include_directories(core PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/gekkonet/GekkoLib/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/gekkonet/GekkoLib/include/private
+  ${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/gekkonet/GekkoLib/thirdparty
+)
+target_compile_definitions(core PRIVATE
+  -DGEKKONET_STATIC
+  -DGEKKONET_NO_ASIO
+)
+
+# Suppress warnings for GekkoNet source files
+if(MSVC)
+  set_source_files_properties(
+    Brawlback/include/gekkonet/GekkoLib/src/backend.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/event.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/game_session.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/gekkonet.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/input.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/net.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/player.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/replay.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/replay_session.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/spectator_session.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/storage.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/stress_session.cpp
+    Brawlback/include/gekkonet/GekkoLib/src/sync.cpp
+    PROPERTIES COMPILE_FLAGS "/WX- /wd4018 /wd4389 /wd4244 /wd4267"
+  )
+endif()
 
 if(LIBUDEV_FOUND)
   target_include_directories(core PRIVATE ${LIBUDEV_INCLUDE_DIR})
