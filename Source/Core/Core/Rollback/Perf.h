@@ -1,4 +1,3 @@
-
 #pragma once
 
 // Rollback profiling - Superluminal and Tracy can be active simultaneously.
@@ -56,7 +55,7 @@ struct InstrumentationScope
 #endif  // HAVE_SUPERLUMINAL_PERFORMANCEAPI && ROLLBACK_PROFILE_SUPERLUMINAL
 
 #if defined(HAVE_TRACY) && defined(ROLLBACK_PROFILE_TRACY)
-#include <tracy/Tracy.hpp>
+#include "tracy/tracy/Tracy.hpp"
 
 #define ROLLBACK_TR_ZONE_() ZoneScoped
 #define ROLLBACK_TR_ZONE_N_(name) ZoneScopedN(name)

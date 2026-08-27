@@ -45,6 +45,8 @@
 #include "Core/Config/SessionSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/DVD/DVDThread.h"
 #include "Core/GeckoCode.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
@@ -1099,62 +1101,14 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     const bool is_host = m_local_player->IsHost();
     std::string remote_addr;
     unsigned short local_port;
-    bool is_local_test = false;
 
-    // Local testing mode: check for gkk_connect.txt file
-    // This allows testing two instances on the same machine without netplay lobby
-    const std::string gkk_file = File::GetExeDirectory() + "/gkk_connect.txt";
-    bool use_file_based_testing = File::Exists(gkk_file);
-
-    if (use_file_based_testing)
-    {
-      // File-based local testing (like EXI implementation)
-      // This bypasses ENet connection info and uses predetermined ports
-      constexpr u16 BASE_PORT = 51441;  // Base port for local testing
-      u16 lport = BASE_PORT;
-      u16 rport = BASE_PORT + 1;
-      bool file_is_client = false;
-
-      std::ifstream file(gkk_file);
-      if (file.is_open())
-      {
-        std::string line;
-        if (std::getline(file, line))
-        {
-          // Trim whitespace
-          line.erase(0, line.find_first_not_of(" \t\r\n"));
-          line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-          if (line == "client")
-          {
-            file_is_client = true;
-            std::swap(lport, rport);
-          }
-        }
-        file.close();
-      }
-
-      is_local_test = true;
-      local_port = lport;
-      remote_addr = fmt::format("127.0.0.1:{}", rport);
-    }
-    // Extract actual IP and port from ENet connection
-    else if (m_server && m_client)
+    if (m_server && m_client)
     {
       // Get remote peer's IP address and port from m_server (ENetPeer)
       char remote_ip[256];
       if (enet_address_get_host_ip(&m_server->address, remote_ip, sizeof(remote_ip)) == 0)
       {
         std::string remote_ip_str(remote_ip);
-
-        // Check if this is a local test connection (localhost)
-        is_local_test = (remote_ip_str == "127.0.0.1" || remote_ip_str == "::1" || 
-                         remote_ip_str == "localhost");
-
-        if (is_local_test)
-        {
-        }
-
         remote_addr = fmt::format("{}:{}", remote_ip_str, m_server->address.port);
       }
       else
@@ -1177,8 +1131,8 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
       }
 
       }
-      else
-      {
+    else
+    {
         // Fallback to placeholder values if connection info not available
       if (is_host)
       {
@@ -1193,15 +1147,6 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     }
 
     InitGekkoSession(remote_addr, local_port, is_host);
-
-    // Begin the GekkoNet session immediately after initialization
-    // This starts the handshake process with the remote player
-    if (m_gekko_session)
-    {
-      int event_count = 0;
-      gekko_update_session(m_gekko_session, &event_count);
-      ProcessGekkoEvents();
-    }
   }
 
   m_dialog->OnMsgStartGame();
@@ -1374,6 +1319,7 @@ void NetPlayClient::DestroyGekkoSession()
     gekko_destroy(&m_gekko_session);
     m_gekko_session = nullptr;
     m_gekko_session_started = false;
+    m_gekko_frame_save_initialized = false;
   }
 
   // Cleanup custom ENet adapter
@@ -1397,10 +1343,10 @@ void NetPlayClient::DestroyGekkoSession()
   m_gekko_remote_handle = -1;
 }
 
-void NetPlayClient::ProcessGekkoEvents()
+bool NetPlayClient::ProcessGekkoEvents()
 {
   if (!m_gekko_session)
-    return;
+    return false;
 
   int session_event_count = 0;
   auto** session_events = gekko_session_events(m_gekko_session, &session_event_count);
@@ -1429,53 +1375,24 @@ void NetPlayClient::ProcessGekkoEvents()
     case GekkoPlayerDisconnected:
       WARN_LOG_FMT(BRAWLBACK, "GekkoNet: Player {} disconnected",
                    session_events[i]->data.disconnected.handle);
-      break;
+      return false;
 
     case GekkoDesyncDetected:
+#ifdef BRAWLBACK_DESYNC_DETECTION
       WARN_LOG_FMT(BRAWLBACK, "GekkoNet: Desync detected at frame {} (remote={}, local_checksum={:08x}, remote_checksum={:08x})",
                    session_events[i]->data.desynced.frame,
                    session_events[i]->data.desynced.remote_handle,
                    session_events[i]->data.desynced.local_checksum,
                    session_events[i]->data.desynced.remote_checksum);
+
+      return false;
+#endif
       break;
 
     default:
       break;
     }
   }
-}
-
-// Processes pending GekkoNet session events (syncing/connected/started/disconnected/desync).
-// Returns false if the caller should abort the current HandleGekkoFrame() call (disconnect or desync).
-bool NetPlayClient::ProcessGekkoFrameSessionEvents()
-{
-  int session_event_count = 0;
-  auto** session_events = gekko_session_events(m_gekko_session, &session_event_count);
-
-  for (int i = 0; i < session_event_count; i++)
-  {
-    switch (session_events[i]->type)
-    {
-    case GekkoPlayerSyncing:
-      break;
-    case GekkoPlayerConnected:
-      break;
-    case GekkoSessionStarted:
-      m_gekko_session_started = true;
-      m_gekko_connect_wait_ticks = 0;
-      break;
-    case GekkoPlayerDisconnected:
-      return false;
-    case GekkoDesyncDetected:
-      if (session_events[i]->data.desynced.frame > GAME_FULL_START_FRAME)
-      {
-      }
-      return false;
-    default:
-      break;
-    }
-  }
-
   return true;
 }
 
@@ -1518,13 +1435,15 @@ void NetPlayClient::HandleGekkoFrame()
 
   gekko_add_local_input(m_gekko_session, m_gekko_local_handle, &m_gekko_last_local_input);
 
-  // Process session events first
-  if (!ProcessGekkoFrameSessionEvents())
-    return;
-
-  // Update session and get game events
   int game_event_count = 0;
   GekkoGameEvent** game_events = gekko_update_session(m_gekko_session, &game_event_count);
+
+  if (!ProcessGekkoEvents())
+  {
+    m_gekko_pending_ops.adv_count = 0;
+    return;
+  }
+
   int num_adv = 0;
   bool pending_load = false;
   int pending_load_frame = 0;
@@ -1536,22 +1455,30 @@ void NetPlayClient::HandleGekkoFrame()
     switch (evt.type)
     {
     case GekkoSaveEvent:
+      INFO_LOG_FMT(BRAWLBACK, "GekkoNet: SAVE event at frame {}", evt.data.save.frame);
       if (evt.data.save.state_len)
         *evt.data.save.state_len = sizeof(u32);
-      if (evt.data.save.checksum)
-        *evt.data.save.checksum = 0;
       if (num_adv > 0)
+      {
         m_gekko_pending_ops.save_after[num_adv - 1] = true;
+        m_gekko_pending_ops.save_checksum_ptrs[num_adv - 1] = evt.data.save.checksum;
+      }
       else
+      {
+        if (evt.data.save.checksum)
+          *evt.data.save.checksum = Rollback::CalculateBrawlbackDesyncChecksum(Core::System::GetInstance());
         pending_initial_save = true;
+      }
       break;
 
     case GekkoLoadEvent:
+      INFO_LOG_FMT(BRAWLBACK, "GekkoNet: LOAD event at frame {}", evt.data.load.frame);
       pending_load = true;
       pending_load_frame = evt.data.load.frame;
       break;
 
     case GekkoAdvanceEvent:
+      INFO_LOG_FMT(BRAWLBACK, "GekkoNet: ADVANCE event at frame {}", evt.data.adv.frame);
       if (num_adv < GekkonetPendingOps::MAX_ADVANCE)
       {
         m_gekko_pending_ops.adv_frames[num_adv] = static_cast<u32>(evt.data.adv.frame);
@@ -1617,15 +1544,25 @@ void NetPlayClient::HandleGekkoFrame()
     }
   }
 
-  // Handle rollback load ONCE before any iterations run (matching EXI implementation)
-  // If a LOAD event was queued for the first advance (load_before[0]), perform it now
-  if (num_adv > 0 && m_gekko_pending_ops.load_before[0])
+  int load_idx = -1;
+  for (int i = 0; i < num_adv; i++)
   {
-    const int target_frame = m_gekko_pending_ops.load_before_frame[0];
-    // frames_back should be from our current position to the target
-    const int frames_back = static_cast<int>(current_frame) - target_frame;
+    if (m_gekko_pending_ops.load_before[i])
+    {
+      load_idx = i;
+      break;
+    }
+  }
+
+  if (load_idx >= 0)
+  {
+    const int target_frame = m_gekko_pending_ops.load_before_frame[load_idx];
+    const int frames_back = num_adv > 0 ? static_cast<int>(current_frame) - target_frame : 0;
 
     auto& rbMgr = Rollback::RollbackManager::Get();
+
+    INFO_LOG_FMT(BRAWLBACK, "GekkoNet: Rollback - load_idx={} current_frame={} target_frame={} frames_back={} num_adv={} ring_count={}",
+                 load_idx, current_frame, target_frame, frames_back, num_adv, rbMgr.m_ring_count);
 
     if (frames_back >= 1 && frames_back <= MAX_ROLLBACK_FRAMES &&
         rbMgr.m_ring_count >= 2 && frames_back < rbMgr.m_ring_count)
@@ -1640,33 +1577,6 @@ void NetPlayClient::HandleGekkoFrame()
     }
   }
 
-  // A LOAD event with no following ADVANCE event in this batch is unusual,
-  // but if it happens, apply it immediately relative to the last processed
-  // advance frame (there is no later advance slot to attach it to).
-  if (pending_load && num_adv > 0)
-  {
-    const int frames_back =
-      static_cast<int>(m_gekko_pending_ops.adv_frames[num_adv - 1]) - pending_load_frame;
-
-    auto& rbMgr = Rollback::RollbackManager::Get();
-    if (frames_back >= 1 && frames_back <= MAX_ROLLBACK_FRAMES &&
-        rbMgr.m_ring_count >= 2 && frames_back < rbMgr.m_ring_count)
-    {
-      rbMgr.LoadFrame(Core::System::GetInstance(), frames_back);
-    }
-    pending_load = false;
-  }
-
-  // Saves and loads are now applied precisely in-order relative to their
-  // corresponding advance iterations in OnResimFrame(), matching GekkoNet's
-  // actual event ordering (e.g. ADVANCE, SAVE, LOAD, ADVANCE, SAVE). 
-  // Per-iteration saves are tracked in m_gekko_pending_ops.save_after[i] and
-  // checked by the FrameEnd hook using ShouldSaveAfterIteration().
-  // The m_gekko_pending_final_save flag is now only used for frame -1 saves.
-
-  // Handle SAVE events that occurred before any ADVANCE (e.g., frame -1 saves).
-  // These saves capture the state before any simulation in this batch, so they
-  // should be executed immediately rather than deferred.
   if (pending_initial_save)
   {
     Rollback::RollbackManager::Get().SaveFrame(Core::System::GetInstance());
@@ -1684,48 +1594,46 @@ void NetPlayClient::HandleGekkoFrame()
       break;
     }
   }
+  CheckForLocalAdvantage();
+}
 
-  // Display frame advantage
-  const float ahead = gekko_frames_ahead(m_gekko_session);
-  const u32 color = ahead > 0.5f ? OSD::Color::YELLOW :
-                    ahead < -0.5f ? OSD::Color::CYAN : OSD::Color::GREEN;
-  OSD::AddTypedMessage(OSD::MessageType::NetPlayPing,
-                       fmt::format("Frame adv: {:.1f}", ahead), 1000, color);
+void NetPlayClient::CheckForLocalAdvantage()
+{
+  {
+    // Display frame advantage
+    const float ahead = gekko_frames_ahead(m_gekko_session);
+    const u32 color = ahead > 0.5f  ? OSD::Color::YELLOW :
+                      ahead < -0.5f ? OSD::Color::CYAN :
+                                      OSD::Color::GREEN;
+    OSD::AddTypedMessage(OSD::MessageType::NetPlayPing, fmt::format("Frame adv: {:.1f}", ahead),
+                         1000, color);
+  }
 }
 
 void NetPlayClient::PauseForLocalAdvantage()
 {
-  if (!m_gekko_session)
-    return;
-
   constexpr float GEKKONET_FRAME_US = 1'000'000.0f / 60.0f;
   constexpr float GEKKONET_TIMESYNC_EXTRA_US = GEKKONET_FRAME_US * 0.06f;
-
   float ahead = gekko_frames_ahead(m_gekko_session);
-  if (ahead > 0.6f)
+  if (ahead >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
   {
-    if (ahead >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
+    // Hard stall: we're so far ahead that the peer can't keep up.
+    // Poll in a tight loop until the gap drops, giving the peer time to catch up.
+    auto deadline2 = std::chrono::steady_clock::now() + std::chrono::milliseconds(32);
+    while (gekko_frames_ahead(m_gekko_session) >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
     {
-      // Hard stall: we're so far ahead that the peer can't keep up.
-      // Poll in a tight loop until the gap drops, giving the peer time to catch up.
-      auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(32);
-      while (gekko_frames_ahead(m_gekko_session) >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
-      {
-        {
-          std::lock_guard<std::mutex> lock(m_gekko_poll_mutex);
-          gekko_network_poll(m_gekko_session);
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
-        if (std::chrono::steady_clock::now() >= deadline)
-          break;
-      }
+      gekko_network_poll(m_gekko_session);
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+
+      if (std::chrono::steady_clock::now() >= deadline2)
+        break;
     }
-    else
-    {
-      // Proportional slowdown: sleep a fraction of a frame scaled to the gap.
-      const int sleep_us = static_cast<int>(ahead * ahead * GEKKONET_TIMESYNC_EXTRA_US);
-      std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
-    }
+  }
+  else
+  {
+    // Proportional slowdown: sleep a fraction of a frame scaled to the gap.
+    const int sleep_us = static_cast<int>(ahead * ahead * GEKKONET_TIMESYNC_EXTRA_US);
+    std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   }
 }
 
@@ -1739,16 +1647,22 @@ void NetPlayClient::InjectPads(const std::array<GCPadStatus, 4>& pads, Core::Sys
 
     const u32 base = BRAWL_PAD_RAW_BASE + static_cast<u32>(i) * BRAWL_PAD_STRIDE;
 
-    const u16 buttons_be = Common::swap16(pads[i].button);
+    // GCPadStatus button bits match gfPadButtons bit layout exactly.
+    // gfPadButtons is a u32 with buttons in the lower 16 bits; write big-endian.
+    u16 buttons_be = Common::swap16(pads[i].button);
     mem.CopyToEmu(base + PAD_OFF_BUTTONS, &buttons_be, 2);
 
+    // Sticks: GCPadStatus uses unsigned 0-255 (center=128); gfPadStatus uses signed (center=0).
+    // Triggers: GCPadStatus uses unsigned 0-255 (0=not pressed); gfPadStatus uses the same
+    // 0-based magnitude stored in a char — do NOT subtract 128 or the unpressed value (0)
+    // becomes -128 (0x80), making both triggers appear permanently held.
     const s8 sticks[6] = {
-      static_cast<s8>(pads[i].stickX - GCPadStatus::MAIN_STICK_CENTER_X),
-      static_cast<s8>(pads[i].stickY - GCPadStatus::MAIN_STICK_CENTER_Y),
+      static_cast<s8>(pads[i].stickX    - GCPadStatus::MAIN_STICK_CENTER_X),
+      static_cast<s8>(pads[i].stickY    - GCPadStatus::MAIN_STICK_CENTER_Y),
       static_cast<s8>(pads[i].substickX - GCPadStatus::C_STICK_CENTER_X),
       static_cast<s8>(pads[i].substickY - GCPadStatus::C_STICK_CENTER_Y),
-      static_cast<s8>(pads[i].triggerLeft - 128),   // Triggers also centered at 0 in gfPadStatus
-      static_cast<s8>(pads[i].triggerRight - 128),
+      static_cast<s8>(pads[i].triggerLeft),
+      static_cast<s8>(pads[i].triggerRight),
     };
     mem.CopyToEmu(base + PAD_OFF_STICKS, sticks, 6);
   }
@@ -1761,9 +1675,14 @@ void NetPlayClient::OnFrameStart(std::unique_lock<std::mutex>& lock)
 {
   if (m_use_gekko_netplay && m_gekko_session)
   {
-    if (!Rollback::RollbackManager::Get().m_frame_save_enabled.load(std::memory_order_relaxed))
+    if (!m_gekko_frame_save_initialized)
     {
-      Rollback::RollbackManager::Get().ToggleFrameSave();
+      auto& rbMgr = Rollback::RollbackManager::Get();
+      if (!rbMgr.m_frame_save_enabled.load(std::memory_order_relaxed))
+      {
+        rbMgr.ToggleFrameSave();
+      }
+      m_gekko_frame_save_initialized = true;
     }
 
     HandleGekkoFrame();
@@ -1772,7 +1691,6 @@ void NetPlayClient::OnFrameStart(std::unique_lock<std::mutex>& lock)
       const u32 last_adv_frame = m_gekko_pending_ops.adv_frames[m_gekko_pending_ops.adv_count - 1];
       current_frame = last_adv_frame;
     }
-    return;
   }
 }
 
@@ -1785,6 +1703,11 @@ void NetPlayClient::InjectPadsForIteration(int iteration_index)
   {
     return;
   }
+
+  // Log which frame's inputs we're injecting
+  INFO_LOG_FMT(BRAWLBACK, "GekkoNet: InjectPadsForIteration - iteration={} target_frame={} is_rollback={}",
+               iteration_index, m_gekko_pending_ops.adv_frames[iteration_index],
+               m_gekko_pending_ops.adv_rollback[iteration_index]);
 
   // Update rollback state for this specific iteration
   m_is_rolling_back = m_gekko_pending_ops.adv_rollback[iteration_index];
@@ -3697,6 +3620,22 @@ bool IsInRollbackMode()
   return netplay_client->IsInRollbackMode();
 }
 
+GekkoSession* GetGekkoSession()
+{
+  if (!netplay_client)
+    return nullptr;
+
+  return netplay_client->GetGekkoSession();
+}
+
+bool GetShouldSleep()
+{
+  if (!netplay_client || !GetGekkoSession())
+    return false;
+
+  return gekko_frames_ahead(GetGekkoSession()) > 0.6f;
+}
+
 int GetFramesToAdvance()
 {
   if (!netplay_client)
@@ -3727,6 +3666,12 @@ bool ShouldSaveAfterIteration(int iteration_index)
   return netplay_client->GetShouldSaveAfterIteration(iteration_index);
 }
 
+void WriteGekkoChecksumForIteration(int iteration_index, u32 checksum)
+{
+  if (netplay_client)
+    netplay_client->WriteGekkoChecksumForIteration(iteration_index, checksum);
+}
+
 int GetCurrentIteration()
 {
   if (!netplay_client)
@@ -3752,7 +3697,6 @@ void PauseForLocalAdvantage()
   if (netplay_client)
     netplay_client->PauseForLocalAdvantage();
 }
-
 }  // namespace NetPlay
 
 // stuff hacked into dolphin

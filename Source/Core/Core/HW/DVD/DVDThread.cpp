@@ -24,6 +24,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/IOS/ES/Formats.h"
+#include "Core/NetPlayClient.h"
 #include "Core/System.h"
 
 #include "DiscIO/Enums.h"
@@ -214,7 +215,36 @@ void DVDThread::StartReadInternal(bool copy_to_ram, u32 output_address, u64 dvd_
   request.time_started_ticks = core_timing.GetTicks();
   request.realtime_started_us = Common::Timer::NowUs();
 
-  m_dvd_thread.Push(std::move(request));
+  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  {
+    // In rollback mode, savestates can be saved/loaded many times per real second while the
+    // real DVD thread completes reads asynchronously on its own schedule. FinishRead() blocks
+    // on m_result_queue.WaitForData() until the result for a given id shows up, but a rollback
+    // can rewind/replay the same id after a differently-timed real read already consumed (and
+    // discarded) that id's result via DoState(), leaving nothing to ever wake FinishRead back
+    // up (observed as the game hanging forever in DVDCancel's OSSleepThread loop, since the
+    // interrupt that would satisfy its wait condition never arrives). Process the read here on
+    // the CPU thread instead, so the result always exists before the completion event we're
+    // about to schedule can run.
+    m_file_logger.Log(*m_disc, request.partition, request.dvd_offset);
+    std::vector<u8> buffer(request.length);
+    if (!m_disc->Read(request.dvd_offset, request.length, buffer.data(), request.partition))
+      buffer.resize(0);
+    request.realtime_done_us = Common::Timer::NowUs();
+
+    // FinishRead() normally does this copy, but not until its CoreTiming event actually fires.
+    // Our HLE hooks for the guest's DI wait loops (see HLE_Misc.cpp) can force the guest to
+    // observe completion before that event runs, so do the copy now to avoid handing the game
+    // stale/uninitialized RAM as "successfully read" data.
+    if (request.copy_to_ram && buffer.size() == request.length)
+      m_system.GetMemory().CopyToEmu(request.output_address, buffer.data(), request.length);
+
+    m_result_queue.Push(ReadResult(std::move(request), std::move(buffer)));
+  }
+  else
+  {
+    m_dvd_thread.Push(std::move(request));
+  }
   core_timing.ScheduleEvent(ticks_until_completion, m_finish_read, id);
 }
 

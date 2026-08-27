@@ -714,9 +714,7 @@ void MMU::Write<u64>(const u64 var, const u32 address)
   Memcheck(address, var, true, 8);
   WriteToHardware<XCheckTLBFlag::Write>(address, static_cast<u32>(var >> 32), 4);
   WriteToHardware<XCheckTLBFlag::Write>(address + sizeof(u32), static_cast<u32>(var), 4);
-#ifdef _WIN32
   m_memory.MarkRangeDirty(address, 8);
-#endif
 }
 
 void MMU::Write_U16_Swap(const u32 var, const u32 address)

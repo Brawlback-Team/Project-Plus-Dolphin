@@ -38,6 +38,7 @@
 #include "Core/IOS/DI/DI.h"
 #include "Core/IOS/IOS.h"
 #include "Core/Movie.h"
+#include "Core/NetPlayClient.h"
 #include "Core/System.h"
 
 #include "DiscIO/Blob.h"
@@ -1511,10 +1512,17 @@ void DVDInterface::ScheduleReads(u64 offset, u32 length, const DiscIO::Partition
       head_position = dvd_offset + DVD_ECC_BLOCK_SIZE;
     }
 
-    // Schedule this read to complete at the appropriate time
+    // Schedule this read to complete at the appropriate time. Realistic seek/rotational/transfer
+    // latency can be longer than the CoreTiming ticks a single rollback resimulation pass
+    // advances by, so a resimulated read could get restarted by the next rollback before it ever
+    // has a chance to finish, hanging the game forever waiting on a completion that can never
+    // catch up. Use a negligible latency instead so it always resolves through the real DI
+    // interrupt within the same pass.
+    const bool rollback_active = NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode();
     const ReplyType chunk_reply_type = chunk_length == length ? reply_type : ReplyType::NoReply;
     dvd_thread.StartReadToEmulatedRAM(output_address, offset, chunk_length, partition,
-                                      chunk_reply_type, ticks_until_completion);
+                                      chunk_reply_type,
+                                      rollback_active ? 1 : ticks_until_completion);
 
     // Advance the read window
     output_address += chunk_length;

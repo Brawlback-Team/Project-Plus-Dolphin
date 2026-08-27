@@ -70,35 +70,48 @@ void savestateMemcpy(void* dst, const void* src, size_t size, uint32_t dst_phys,
 
   while (cursor < end)
   {
-    // If cursor falls inside an excluded region, jump past it.
-    bool jumped = false;
+    // Find the next excluded region that overlaps or comes after cursor
+    uint32_t seg_end = end;
+    bool found_exclusion = false;
+
     for (const auto& r : excl)
     {
-      if (cursor >= r.phys_start && cursor < r.phys_end)
+      if (r.phys_end <= cursor)
+        continue;  // Region is before current cursor
+
+      if (r.phys_start < end)
       {
-        cursor = std::min(r.phys_end, end);
-        jumped = true;
-        break;
+        if (r.phys_start > cursor)
+        {
+          // There's a copyable segment before this exclusion
+          seg_end = std::min(seg_end, r.phys_start);
+        }
+        else if (cursor >= r.phys_start && cursor < r.phys_end)
+        {
+          // Cursor is inside an excluded region; skip to its end
+          cursor = std::min(r.phys_end, end);
+          found_exclusion = true;
+          break;
+        }
       }
     }
-    if (jumped)
-      continue;
 
-    // Find the nearest upcoming exclusion boundary within [cursor, end).
-    uint32_t seg_end = end;
-    for (const auto& r : excl)
-    {
-      if (r.phys_start > cursor && r.phys_start < seg_end)
-        seg_end = r.phys_start;
-    }
+    if (found_exclusion)
+      continue;  // Restart loop with updated cursor
 
-    // Copy the clear segment.
+    // Copy the safe segment [cursor, seg_end)
     const size_t offset = cursor - dst_phys;
     const size_t copy_size = seg_end - cursor;
-    copy_avx2_nt_unroll(d + offset, s + offset, copy_size);
+    if (copy_size > 0)
+    {
+      memcpy(d + offset, s + offset, copy_size);
+    }
+
     cursor = seg_end;
   }
 }
+
+
 
 void DeltaSaveSlot::Init(uint8_t* mem1_ptr, size_t mem1_size, uint8_t* mem2_ptr, size_t mem2_size,
                          uint8_t* l1_cache_ptr, size_t l1_cache_size)
@@ -200,7 +213,7 @@ void enqueueSubsectionJobs(u32 first_page, u32 page_count, const uint8_t* region
     }
 #if defined(HAVE_TRACY)
     auto x =
-        StringFromFormat("page count %u (offset %u size %u)", this_split_written, offset, size);
+        std::format("page count %u (offset %u size %u)", this_split_written, offset, size);
     ZoneText(x.c_str(), x.size());
 #endif
   };

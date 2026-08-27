@@ -16,6 +16,7 @@
 
 // Set to 1 to enable full-RAM shadow snapshots for rollback validation
 #define ROLLBACK_VALIDATE 0
+#define BRAWLBACK_DESYNC_DETECTION 0
 
 namespace Core
 {
@@ -24,9 +25,9 @@ class System;
 
 namespace Rollback
 {
-static constexpr int NUM_SAVE_SLOTS = MAX_SAVESTATES;  // MAX_ROLLBACK_FRAMES + 1
-static constexpr int ROLLBACK_NUM_HELPER_THREADS = MAX_SAVESTATES;  // plus one extra for eviction job
-static constexpr u32 SAVESTATE_NUM_WORK_CHUNKS = MAX_ROLLBACK_FRAMES;
+static constexpr int NUM_SAVE_SLOTS = MAX_ROLLBACK_FRAMES + 1;  // MAX_ROLLBACK_FRAMES + 1
+static constexpr int ROLLBACK_NUM_HELPER_THREADS = 5 + 1;  // plus one extra for eviction job
+static constexpr u32 SAVESTATE_NUM_WORK_CHUNKS = 5;
 class RollbackManager
 {
 public:

@@ -26,7 +26,7 @@ namespace HLE
 static std::map<u32, u32> s_hooked_addresses;
 
 // clang-format off
-constexpr std::array<Hook, 28> os_patches{{
+constexpr std::array<Hook, 31> os_patches{{
     // Placeholder, os_patches[0] is the "non-existent function" index
     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
 
@@ -60,10 +60,13 @@ constexpr std::array<Hook, 28> os_patches{{
     {"GeckoHandlerReturnTrampoline", HLE_Misc::GeckoReturnTrampoline,       HookType::Replace, HookFlag::Fixed},
     {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed}, // apploader needs OSReport-like function
     {"BrawlbackGekkoNetUnconditionalFrame", HLE_Misc::BrawlbackGekkoNetUnconditionalFrame, HookType::Replace, HookFlag::Fixed},
-    {"BrawlbackGekkoNetGameLoop",    HLE_Misc::BrawlbackGekkoNetGameLoop,   HookType::Replace, HookFlag::Fixed},
-    {"BrawlbackGekkoNetGameProcCallsite", HLE_Misc::BrawlbackGekkoNetGameProcCallsite, HookType::Replace, HookFlag::Fixed},
     {"BrawlbackGekkoNetFrameEnd",    HLE_Misc::BrawlbackGekkoNetFrameEnd,   HookType::Replace, HookFlag::Fixed},
-    {"BrawlbackGekkoNetLoopEnd",     HLE_Misc::BrawlbackGekkoNetLoopEnd,    HookType::Replace, HookFlag::Fixed}
+    {"BrawlbackGekkoNetLoopEnd",     HLE_Misc::BrawlbackGekkoNetLoopEnd,    HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackDVDCancelSleepHook",  HLE_Misc::BrawlbackDVDCancelSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackCancelTaskSleepHook", HLE_Misc::BrawlbackCancelTaskSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackFileIOMutexSleepHook", HLE_Misc::BrawlbackFileIOMutexSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackDVDReadPrioSleepHook", HLE_Misc::BrawlbackDVDReadPrioSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimRenderHook", HLE_Misc::BrawlbackSkipResimRenderHook, HookType::Replace, HookFlag::Fixed}
 }};
 // clang-format on
 
@@ -111,12 +114,14 @@ void PatchFixedFunctions(Core::System& system)
   Patch(system, Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
 
   // Brawlback frame handling hooks
-  // CRITICAL: The unconditional hook must be installed first to ensure GekkoNet logic runs every frame
   Patch(system, 0x800171b4, "BrawlbackGekkoNetUnconditionalFrame"); // BRAWL_UNCONDITIONAL_HOOK_ADDR
-  Patch(system, 0x80017344, "BrawlbackGekkoNetGameLoop");    // BRAWL_GAME_LOOP_HOOK_ADDR - loop entry (inside conditionals)
-  Patch(system, 0x80017350, "BrawlbackGekkoNetGameProcCallsite");      // BRAWL_GAMEPROC_CALLSITE_ADDR - before gameProc (inside conditionals)
-  Patch(system, 0x80017504, "BrawlbackGekkoNetFrameEnd");    // BRAWL_FRAME_END_ADDR - after simulation completes (stw r0,0x100(r23))
+  Patch(system, 0x80017504, "BrawlbackGekkoNetFrameEnd");    // BRAWL_GAME_LOOP_HOOK_ADDR - loop entry (inside conditionals)
   Patch(system, 0x80017508, "BrawlbackGekkoNetLoopEnd");     // BRAWL_LOOP_END_ADDR - controls outer game loop iteration (b 0x800171b4)
+  Patch(system, 0x801fb1a8, "BrawlbackDVDCancelSleepHook");  // `bl OSSleepThread` inside DVDCancel's wait loop (dvd.o)
+  Patch(system, 0x801cff38, "BrawlbackCancelTaskSleepHook"); // `bl OSSleepThread` inside TaskManager::CancelTask's wait loop
+  Patch(system, 0x801dec5c, "BrawlbackFileIOMutexSleepHook"); // `bl OSSleepThread` inside OSLockMutex's contention loop
+  Patch(system, 0x801f68ec, "BrawlbackDVDReadPrioSleepHook"); // `bl OSSleepThread` inside DVDReadPrio's wait loop
+  Patch(system, 0x80017404, "BrawlbackSkipResimRenderHook"); // render dispatch branch in gfApplication::mainLoopSub
 }
 
 void PatchFunctions(Core::System& system)

@@ -724,6 +724,7 @@ PRIVATE
   LZO::LZO
   LZ4::LZ4
   ZLIB::ZLIB
+  tracy
 )
 
 # GekkoNet library configuration
@@ -732,9 +733,15 @@ target_include_directories(core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/gekkonet/GekkoLib/include/private
   ${CMAKE_CURRENT_SOURCE_DIR}/Brawlback/include/gekkonet/GekkoLib/thirdparty
 )
+
+# Tracy include directories
+target_include_directories(core PRIVATE
+  ${CMAKE_SOURCE_DIR}/Externals
+)
 target_compile_definitions(core PRIVATE
-  -DGEKKONET_STATIC
-  -DGEKKONET_NO_ASIO
+  GEKKONET_STATIC
+  GEKKONET_NO_ASIO
+  HAVE_TRACY
 )
 
 # Suppress warnings for GekkoNet source files
