@@ -104,7 +104,7 @@ void savestateMemcpy(void* dst, const void* src, size_t size, uint32_t dst_phys,
     const size_t copy_size = seg_end - cursor;
     if (copy_size > 0)
     {
-      memcpy(d + offset, s + offset, copy_size);
+      std::memcpy(d + offset, s + offset, copy_size);
     }
 
     cursor = seg_end;

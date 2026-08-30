@@ -26,7 +26,7 @@ namespace HLE
 static std::map<u32, u32> s_hooked_addresses;
 
 // clang-format off
-constexpr std::array<Hook, 31> os_patches{{
+constexpr std::array<Hook, 40> os_patches{{
     // Placeholder, os_patches[0] is the "non-existent function" index
     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
 
@@ -64,9 +64,18 @@ constexpr std::array<Hook, 31> os_patches{{
     {"BrawlbackGekkoNetLoopEnd",     HLE_Misc::BrawlbackGekkoNetLoopEnd,    HookType::Replace, HookFlag::Fixed},
     {"BrawlbackDVDCancelSleepHook",  HLE_Misc::BrawlbackDVDCancelSleepHook, HookType::Replace, HookFlag::Fixed},
     {"BrawlbackCancelTaskSleepHook", HLE_Misc::BrawlbackCancelTaskSleepHook, HookType::Replace, HookFlag::Fixed},
-    {"BrawlbackFileIOMutexSleepHook", HLE_Misc::BrawlbackFileIOMutexSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackGXDrawDoneSleepHook", HLE_Misc::BrawlbackGXDrawDoneSleepHook, HookType::Replace, HookFlag::Fixed},
     {"BrawlbackDVDReadPrioSleepHook", HLE_Misc::BrawlbackDVDReadPrioSleepHook, HookType::Replace, HookFlag::Fixed},
-    {"BrawlbackSkipResimRenderHook", HLE_Misc::BrawlbackSkipResimRenderHook, HookType::Replace, HookFlag::Fixed}
+    {"BrawlbackVIWaitForRetraceSleepHook", HLE_Misc::BrawlbackVIWaitForRetraceSleepHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackFrameBufferSyncWaitHook", HLE_Misc::BrawlbackFrameBufferSyncWaitHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipPadThreadReadHook", HLE_Misc::BrawlbackSkipPadThreadReadHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimRenderHook", HLE_Misc::BrawlbackSkipResimRenderHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimTaskProcessFirstHook", HLE_Misc::BrawlbackSkipResimTaskProcessFirstHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimTaskProcessSecondHook", HLE_Misc::BrawlbackSkipResimTaskProcessSecondHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimWaveSoundAllocHook", HLE_Misc::BrawlbackSkipResimWaveSoundAllocHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimSeqSoundAllocHook", HLE_Misc::BrawlbackSkipResimSeqSoundAllocHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSkipResimStrmSoundAllocHook", HLE_Misc::BrawlbackSkipResimStrmSoundAllocHook, HookType::Replace, HookFlag::Fixed},
+    {"BrawlbackSyncCharSelectRandomSeedHook", HLE_Misc::BrawlbackSyncCharSelectRandomSeedHook, HookType::Start, HookFlag::Fixed}
 }};
 // clang-format on
 
@@ -119,9 +128,25 @@ void PatchFixedFunctions(Core::System& system)
   Patch(system, 0x80017508, "BrawlbackGekkoNetLoopEnd");     // BRAWL_LOOP_END_ADDR - controls outer game loop iteration (b 0x800171b4)
   Patch(system, 0x801fb1a8, "BrawlbackDVDCancelSleepHook");  // `bl OSSleepThread` inside DVDCancel's wait loop (dvd.o)
   Patch(system, 0x801cff38, "BrawlbackCancelTaskSleepHook"); // `bl OSSleepThread` inside TaskManager::CancelTask's wait loop
-  Patch(system, 0x801dec5c, "BrawlbackFileIOMutexSleepHook"); // `bl OSSleepThread` inside OSLockMutex's contention loop
-  Patch(system, 0x801f68ec, "BrawlbackDVDReadPrioSleepHook"); // `bl OSSleepThread` inside DVDReadPrio's wait loop
+  Patch(system, 0x801f0ac0, "BrawlbackGXDrawDoneSleepHook"); // `bl OSSleepThread` inside GXDrawDone's wait loop (GXMisc.o)
+  Patch(system, 0x801f68ec, "BrawlbackDVDReadPrioSleepHook"); // instruction before `bl OSSleepThread` inside DVDReadPrio's wait loop
+  Patch(system, 0x801e894c, "BrawlbackVIWaitForRetraceSleepHook"); // `bl OSSleepThread` inside VIWaitForRetrace's wait loop
+  Patch(system, 0x80023b1c, "BrawlbackFrameBufferSyncWaitHook"); // `bl VIWaitForRetrace` inside gfFrameBuffer::sync's busy-wait loop
+  Patch(system, 0x80029464, "BrawlbackSkipPadThreadReadHook"); // `bl updateLowGC` inside updateLow (gf_pad.o)
   Patch(system, 0x80017404, "BrawlbackSkipResimRenderHook"); // render dispatch branch in gfApplication::mainLoopSub
+  // BrawlbackSkipResimTaskProcessFirstHook is intentionally NOT patched here anymore: ecMgr,
+  // EffectManager and soEffectScreenManager's gfTask::process can reach
+  // soAnimCmdInterpreter::systemCmdFuncWaitRnadi (a "wait a random number of frames" anim
+  // command), which draws from the same global mt_prng stream as everything else, including
+  // Luigi's Green Missile misfire roll (ftLuigiStatusUniqProcessSpecialSRam::execFixPos).
+  // Skipping this call on throwaway resimulation iterations meant a peer that had to resimulate
+  // consumed fewer mt_prng draws than a peer that didn't, permanently desyncing every later
+  // random roll (misfires, item spawns, etc.) between the two clients.
+  Patch(system, 0x801c9bfc, "BrawlbackSkipResimWaveSoundAllocHook"); // `bl detail_AllocWaveSound` in SoundArchivePlayer::detail_SetupSound
+  Patch(system, 0x801c9aac, "BrawlbackSkipResimSeqSoundAllocHook"); // `bl detail_AllocSeqSound` in SoundArchivePlayer::detail_SetupSound
+  Patch(system, 0x801c9b54, "BrawlbackSkipResimStrmSoundAllocHook"); // `bl detail_AllocStrmSound` in SoundArchivePlayer::detail_SetupSound
+  Patch(system, 0x8003fb4c, "BrawlbackSyncCharSelectRandomSeedHook"); // srandi__mt_prng_o_ - intercept all global mtRand PRNG seed initialization
+  Patch(system, 0x803f8c5c, "BrawlbackSyncCharSelectRandomSeedHook"); // srand__rand_o_ - intercept all global C rand PRNG seed initialization
 }
 
 void PatchFunctions(Core::System& system)

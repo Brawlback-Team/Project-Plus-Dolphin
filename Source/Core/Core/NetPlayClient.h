@@ -4,6 +4,7 @@
 #pragma once
 
 #include <SFML/Network/Packet.hpp>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <map>
@@ -24,6 +25,7 @@
 #include "Core/SyncIdentifier.h"
 #include "InputCommon/GCPadStatus.h"
 #include "Brawlback/include/brawlback-common/BrawlbackConstants.h"
+#include "Brawlback/include/brawlback-common/GfPadStatus.h"
 
 class BootSessionData;
 
@@ -51,13 +53,10 @@ struct SerializedWiimoteState;
 namespace NetPlay
 {
 // Brawl pad memory layout constants (EXI-style injection)
-// gfPadSystem instance at 0x805bacc0, raw pads at +0x40, stride 0x40
+// gfPadSystem instance at 0x805bacc0, raw pads at +0x40, stride sizeof(gfPadStatus)
 static constexpr u32 BRAWL_PADSYSTEM_INSTANCE = 0x805bacc0;
 static constexpr u32 BRAWL_PAD_RAW_BASE = BRAWL_PADSYSTEM_INSTANCE + 0x40;
-static constexpr u32 BRAWL_PAD_STRIDE = 0x40;
-// gfPadStatus button field offsets (each is a u32, button bits in lower 16 bits)
-static constexpr u32 PAD_OFF_BUTTONS = 0x06;
-static constexpr u32 PAD_OFF_STICKS = 0x30;  // m_stickX
+static constexpr u32 BRAWL_PAD_STRIDE = sizeof(gfPadStatus);
 
 // Forward declare GekkoNet adapter functions
 void GekkoNetAdapter_SendData(GekkoNetAddress* address, const char* data, int length);
@@ -223,6 +222,7 @@ public:
   bool IsRollingBack();
   bool IsInRollbackMode();
   int GetFramesToAdvance();
+  bool IsTimeSynced();
 
   // GekkoNet outer game loop iteration control
   int GetGekkoCurrentIteration() const { return m_gekko_current_iteration; }
@@ -245,13 +245,14 @@ public:
 
   // Only for use in NetPlayClient.cpp >:(
   u64 current_frame = 0;
+  // Only meaningful once a Gekko session exists; see IsTimeSynced().
   bool time_synced = false;
 
   bool done_fast_forwarding;
 
   // EXI-style SI override interface for GekkoNet pad injection
   // Called from SI device code to override pad reads during resimulation
-  static bool GetOverrideInput(int pad_num, GCPadStatus* status);
+  static bool GetOverrideInput(int pad_num, gfPadStatus* status);
   
   inline GekkoSession* GetGekkoSession() { return m_gekko_session; }
 
@@ -476,7 +477,7 @@ private:
   bool m_gekko_seen_frame_zero = false;
   int m_gekko_connect_wait_ticks = 0;
   bool m_use_gekko_netplay = false;
-  GCPadStatus m_gekko_last_local_input;
+  gfPadStatus m_gekko_last_local_input{};
   bool m_is_rolling_back = false;
 
   // GekkoNet pending operations for current frame
@@ -486,7 +487,7 @@ private:
     int adv_count = 0;
     u32 adv_frames[MAX_ADVANCE]{};
     bool adv_rollback[MAX_ADVANCE]{};
-    std::array<std::array<GCPadStatus, MAX_ADVANCE>, 4> adv_pads{};
+    std::array<std::array<gfPadStatus, MAX_ADVANCE>, 4> adv_pads{};
     bool save_after[MAX_ADVANCE]{};
     u32* save_checksum_ptrs[MAX_ADVANCE]{};
     bool load_before[MAX_ADVANCE]{};
@@ -501,9 +502,8 @@ private:
       std::memset(save_checksum_ptrs, 0, sizeof(save_checksum_ptrs));
       std::memset(load_before, 0, sizeof(load_before));
       std::memset(load_before_frame, 0, sizeof(load_before_frame));
-      // Initialize with default GCPadStatus (centered sticks at 0x80)
       for (auto& player_pads : adv_pads)
-        player_pads.fill(GCPadStatus{});
+        player_pads.fill(gfPadStatus{});
     }
   };
   GekkonetPendingOps m_gekko_pending_ops;
@@ -511,9 +511,9 @@ private:
   int m_gekko_current_iteration = 0;
   bool m_gekko_frame_save_initialized = false;
   static inline std::atomic<bool> s_override_active{false};
-  static inline std::array<GCPadStatus, 4> s_override_pads{};
+  static inline std::array<gfPadStatus, 4> s_override_pads{};
 
-  void InjectPads(const std::array<GCPadStatus, 4>& pads, Core::System& system);
+  void InjectPads(const std::array<gfPadStatus, 4>& pads, Core::System& system);
 };
 
 void NetPlay_Enable(NetPlayClient* const np);
@@ -533,6 +533,9 @@ void PauseForLocalAdvantage();
 bool IsTimeSynced();
 bool IsRollingBack();
 bool IsInRollbackMode();
+u64 GetInitialRTCValue();
+bool IsGekkoCpuStalled();
+void SetGekkoCpuStalled(bool stalled);
 int GetFramesToAdvance();
 bool GetShouldSleep();
 }  // namespace NetPlay

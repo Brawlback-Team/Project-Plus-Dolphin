@@ -97,6 +97,77 @@ using namespace WiimoteCommon;
 static std::mutex crit_netplay_client;
 static NetPlayClient* netplay_client = nullptr;
 static bool s_si_poll_batching = false;
+static std::atomic<bool> s_gekko_cpu_stalled{false};
+
+enum class GfPadError : s8
+{
+  None = 0,
+  NoController = -1,
+};
+
+GfPadError GetInjectedPadError(bool is_connected)
+{
+  if (!is_connected)
+    return GfPadError::NoController;
+
+  return GfPadError::None;
+}
+
+// Builds the raw-sample portion of gfPadStatus exactly as updateLowGC does, from a GCPadStatus
+// poll. m_buttonsHeld/PressedThisFrame/ReleasedThisFrame and the motion floats are left zeroed -
+// the game's own gfPadStatus::update() derives those from the previous frame's (already
+// rollback-synced) state, so they must never be synced over the network.
+static gfPadStatus ConvertToGfPadStatus(const GCPadStatus& pad)
+{
+  gfPadStatus status{};
+  u32 buttons = 0;
+  if (pad.button & PAD_BUTTON_LEFT)
+    buttons |= gfPadButtons::DLeft;
+  if (pad.button & PAD_BUTTON_DOWN)
+    buttons |= gfPadButtons::DDown;
+  if (pad.button & PAD_BUTTON_RIGHT)
+    buttons |= gfPadButtons::DRight;
+  if (pad.button & PAD_BUTTON_UP)
+    buttons |= gfPadButtons::DUp;
+  if (pad.button & PAD_TRIGGER_Z)
+    buttons |= gfPadButtons::Z;
+  if (pad.button & PAD_TRIGGER_R)
+    buttons |= gfPadButtons::R;
+  if (pad.button & PAD_TRIGGER_L)
+    buttons |= gfPadButtons::L;
+  if (pad.button & PAD_BUTTON_A)
+    buttons |= gfPadButtons::A;
+  if (pad.button & PAD_BUTTON_B)
+    buttons |= gfPadButtons::B;
+  if (pad.button & PAD_BUTTON_X)
+    buttons |= gfPadButtons::X;
+  if (pad.button & PAD_BUTTON_Y)
+    buttons |= gfPadButtons::Y;
+  if (pad.button & PAD_BUTTON_START)
+    buttons |= gfPadButtons::Start;
+  // gfPadStatus::update() reads the new sample's m_buttonsCurrentFrame2 (offset 0x4), not
+  // m_buttonsCurrentFrame - updateLowGC writes the same raw value into both fields.
+  status.m_buttonsCurrentFrame.bits = buttons;
+  status.m_buttonsCurrentFrame2.bits = buttons;
+
+  // Sticks: GCPadStatus uses unsigned 0-255 (center=128); gfPadStatus uses signed (center=0).
+  // Triggers: GCPadStatus uses unsigned 0-255 (0=not pressed); gfPadStatus uses the same
+  // 0-based magnitude stored in a char - do NOT subtract 128 or the unpressed value (0)
+  // becomes -128 (0x80), making both triggers appear permanently held.
+  status.m_stickX = static_cast<s8>(pad.stickX - GCPadStatus::MAIN_STICK_CENTER_X);
+  status.m_stickY = static_cast<s8>(pad.stickY - GCPadStatus::MAIN_STICK_CENTER_Y);
+  status.m_subStickX = static_cast<s8>(pad.substickX - GCPadStatus::C_STICK_CENTER_X);
+  status.m_subStickY = static_cast<s8>(pad.substickY - GCPadStatus::C_STICK_CENTER_Y);
+  status.m_lTriggerAnalog = static_cast<s8>(pad.triggerLeft);
+  status.m_rTriggerAnalog = static_cast<s8>(pad.triggerRight);
+
+  // The GekkoNet sample is a completed read. Its connection state maps directly to PADRead's
+  // success/no-controller statuses; local SI transfer state belongs to the host poll, not this
+  // injected remote input.
+  status.m_error = static_cast<gfPadError::PadError>(GetInjectedPadError(pad.isConnected));
+  status.m_controllerType = gfPadType::GCC;
+  return status;
+}
 
 // GekkoNet adapter static instance
 static NetPlayClient* s_gekko_client_instance = nullptr;
@@ -1266,7 +1337,7 @@ void NetPlayClient::InitGekkoSession(const std::string& remote_addr, unsigned sh
 
   GekkoConfig cfg{};
   cfg.num_players = 2;
-  cfg.input_size = sizeof(GCPadStatus);
+  cfg.input_size = sizeof(gfPadStatus);
   cfg.state_size = sizeof(u32);
   cfg.input_prediction_window = MAX_ROLLBACK_FRAMES;  // MAX_ROLLBACK_FRAMES
   cfg.max_spectators = 0;
@@ -1320,6 +1391,7 @@ void NetPlayClient::DestroyGekkoSession()
     m_gekko_session = nullptr;
     m_gekko_session_started = false;
     m_gekko_frame_save_initialized = false;
+    time_synced = false;
   }
 
   // Cleanup custom ENet adapter
@@ -1369,6 +1441,9 @@ bool NetPlayClient::ProcessGekkoEvents()
 
     case GekkoSessionStarted:
       m_gekko_session_started = true;
+      // Both peers only reach this once GekkoNet's handshake fully completes on both sides, so
+      // it's the earliest point we can be sure neither side is running ahead of the other.
+      time_synced = true;
       INFO_LOG_FMT(BRAWLBACK, "GekkoNet: Session started");
       break;
 
@@ -1385,7 +1460,7 @@ bool NetPlayClient::ProcessGekkoEvents()
                    session_events[i]->data.desynced.local_checksum,
                    session_events[i]->data.desynced.remote_checksum);
 
-      return false;
+      return true;
 #endif
       break;
 
@@ -1419,15 +1494,11 @@ void NetPlayClient::HandleGekkoFrame()
       if (local_pad < 4)
       {
         // Poll the correct input source based on SI device configuration
-        if (Config::Get(Config::GetInfoForSIDevice(pad_nb)) ==
-            SerialInterface::SIDEVICE_WIIU_ADAPTER)
-        {
-          m_gekko_last_local_input = GCAdapter::Input(local_pad);
-        }
-        else
-        {
-          m_gekko_last_local_input = Pad::GetStatus(local_pad);
-        }
+        const GCPadStatus raw_pad = (Config::Get(Config::GetInfoForSIDevice(pad_nb)) ==
+                                      SerialInterface::SIDEVICE_WIIU_ADAPTER) ?
+                                         GCAdapter::Input(local_pad) :
+                                         Pad::GetStatus(local_pad);
+        m_gekko_last_local_input = ConvertToGfPadStatus(raw_pad);
       }
       break;  // Found our local pad, no need to continue
     }
@@ -1492,7 +1563,7 @@ void NetPlayClient::HandleGekkoFrame()
         }
 
         for (int p = 0; p < 4; p++)
-          m_gekko_pending_ops.adv_pads[p][num_adv] = GCPadStatus();
+          m_gekko_pending_ops.adv_pads[p][num_adv] = gfPadStatus();
 
         if (evt.data.adv.inputs)
         {
@@ -1522,8 +1593,8 @@ void NetPlayClient::HandleGekkoFrame()
 
           for (int player_idx = 0; player_idx < 2; player_idx++)
           {
-            const GCPadStatus* pad_ptr = reinterpret_cast<const GCPadStatus*>(
-              static_cast<const void*>(evt.data.adv.inputs + player_idx * sizeof(GCPadStatus)));
+            const gfPadStatus* pad_ptr = reinterpret_cast<const gfPadStatus*>(
+              static_cast<const void*>(evt.data.adv.inputs + player_idx * sizeof(gfPadStatus)));
 
             // Map GekkoNet player index to in-game port
             int port = (player_idx == m_gekko_local_handle) ? adv_local_port : adv_remote_port;
@@ -1556,21 +1627,32 @@ void NetPlayClient::HandleGekkoFrame()
 
   if (load_idx >= 0)
   {
-    const int target_frame = m_gekko_pending_ops.load_before_frame[load_idx];
-    const int frames_back = num_adv > 0 ? static_cast<int>(current_frame) - target_frame : 0;
+    // GekkoNet's load event carries the *snapshot's own* frame index - i.e. the last-known-good
+    // frame whose end-of-frame state was saved (see GameSession::HandleRollback(), which loads
+    // sync_frame = min - 1 and then resimulates starting at sync_frame + 1). SaveFrame captures
+    // state after GameProc, so that snapshot is exactly the state ready to begin the frame after
+    // it - which is the paired advance event at load_idx, not the load event's own frame number.
+    const int snapshot_frame = m_gekko_pending_ops.load_before_frame[load_idx];
+    const int target_frame = static_cast<int>(m_gekko_pending_ops.adv_frames[load_idx]);
+    // GekkoNet's own current-frame pointer (GameSession::HandleRollback's `current`) sits one
+    // past the last advance event it emits - its resim loop runs `for (frame = sync_frame + 1;
+    // frame < current; frame++)`, so `current` is never itself an advance event. That pointer is
+    // exactly where our ring's most-recent slot already sits (ready to begin `current`), so
+    // frames_back must count from last_adv_frame + 1, not last_adv_frame itself - using
+    // last_adv_frame directly undercounts by one and loads a snapshot one frame too new.
+    const int normal_frame = static_cast<int>(m_gekko_pending_ops.adv_frames[num_adv - 1]);
+    const int frames_back = normal_frame - target_frame;
 
     auto& rbMgr = Rollback::RollbackManager::Get();
 
-    INFO_LOG_FMT(BRAWLBACK, "GekkoNet: Rollback - load_idx={} current_frame={} target_frame={} frames_back={} num_adv={} ring_count={}",
-                 load_idx, current_frame, target_frame, frames_back, num_adv, rbMgr.m_ring_count);
+    INFO_LOG_FMT(BRAWLBACK, "GekkoNet: Rollback - load_idx={} last_adv_frame={} target_frame={} snapshot_frame={} frames_back={} num_adv={} ring_count={}",
+           load_idx, normal_frame, target_frame, snapshot_frame, frames_back, num_adv,
+           rbMgr.m_ring_count);
 
     if (frames_back >= 1 && frames_back <= MAX_ROLLBACK_FRAMES &&
         rbMgr.m_ring_count >= 2 && frames_back < rbMgr.m_ring_count)
     {
       rbMgr.LoadFrame(Core::System::GetInstance(), frames_back);
-
-      // Update current_frame to reflect the loaded frame
-      current_frame = target_frame;
 
       // Reset iteration counter to 0 - all following advances will be resimulations
       SetGekkoCurrentIteration(0);
@@ -1617,17 +1699,7 @@ void NetPlayClient::PauseForLocalAdvantage()
   float ahead = gekko_frames_ahead(m_gekko_session);
   if (ahead >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
   {
-    // Hard stall: we're so far ahead that the peer can't keep up.
-    // Poll in a tight loop until the gap drops, giving the peer time to catch up.
-    auto deadline2 = std::chrono::steady_clock::now() + std::chrono::milliseconds(32);
-    while (gekko_frames_ahead(m_gekko_session) >= static_cast<float>(MAX_ROLLBACK_FRAMES - 1))
-    {
-      gekko_network_poll(m_gekko_session);
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
-
-      if (std::chrono::steady_clock::now() >= deadline2)
-        break;
-    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(32));
   }
   else
   {
@@ -1637,7 +1709,22 @@ void NetPlayClient::PauseForLocalAdvantage()
   }
 }
 
-void NetPlayClient::InjectPads(const std::array<GCPadStatus, 4>& pads, Core::System& system)
+// Guest memory is big-endian; every multi-byte field must be swapped before the raw memcpy below.
+static gfPadStatus ToBigEndian(gfPadStatus status)
+{
+  status.m_buttonsCurrentFrame.bits = Common::swap32(status.m_buttonsCurrentFrame.bits);
+  status.m_buttonsCurrentFrame2.bits = Common::swap32(status.m_buttonsCurrentFrame2.bits);
+  status.m_buttonsHeld.bits = Common::swap32(status.m_buttonsHeld.bits);
+  status.m_buttonsPressedThisFrame.bits = Common::swap32(status.m_buttonsPressedThisFrame.bits);
+  status.m_buttonsReleasedThisFrame.bits = Common::swap32(status.m_buttonsReleasedThisFrame.bits);
+  status.m_buttonsPressedThisFrame2.bits = Common::swap32(status.m_buttonsPressedThisFrame2.bits);
+  // The motion floats are always 0 for a GC pad, so their bit pattern is swap-invariant.
+  status.m_controllerType =
+      static_cast<gfPadType::PadType>(Common::swap32(static_cast<u32>(status.m_controllerType)));
+  return status;
+}
+
+void NetPlayClient::InjectPads(const std::array<gfPadStatus, 4>& pads, Core::System& system)
 {
   auto& mem = system.GetMemory();
 
@@ -1646,25 +1733,8 @@ void NetPlayClient::InjectPads(const std::array<GCPadStatus, 4>& pads, Core::Sys
     s_override_pads[i] = pads[i];
 
     const u32 base = BRAWL_PAD_RAW_BASE + static_cast<u32>(i) * BRAWL_PAD_STRIDE;
-
-    // GCPadStatus button bits match gfPadButtons bit layout exactly.
-    // gfPadButtons is a u32 with buttons in the lower 16 bits; write big-endian.
-    u16 buttons_be = Common::swap16(pads[i].button);
-    mem.CopyToEmu(base + PAD_OFF_BUTTONS, &buttons_be, 2);
-
-    // Sticks: GCPadStatus uses unsigned 0-255 (center=128); gfPadStatus uses signed (center=0).
-    // Triggers: GCPadStatus uses unsigned 0-255 (0=not pressed); gfPadStatus uses the same
-    // 0-based magnitude stored in a char — do NOT subtract 128 or the unpressed value (0)
-    // becomes -128 (0x80), making both triggers appear permanently held.
-    const s8 sticks[6] = {
-      static_cast<s8>(pads[i].stickX    - GCPadStatus::MAIN_STICK_CENTER_X),
-      static_cast<s8>(pads[i].stickY    - GCPadStatus::MAIN_STICK_CENTER_Y),
-      static_cast<s8>(pads[i].substickX - GCPadStatus::C_STICK_CENTER_X),
-      static_cast<s8>(pads[i].substickY - GCPadStatus::C_STICK_CENTER_Y),
-      static_cast<s8>(pads[i].triggerLeft),
-      static_cast<s8>(pads[i].triggerRight),
-    };
-    mem.CopyToEmu(base + PAD_OFF_STICKS, sticks, 6);
+    const gfPadStatus be_status = ToBigEndian(pads[i]);
+    mem.CopyToEmu(base, &be_status, sizeof(gfPadStatus));
   }
 
   // Enable SI override flag
@@ -1709,10 +1779,16 @@ void NetPlayClient::InjectPadsForIteration(int iteration_index)
                iteration_index, m_gekko_pending_ops.adv_frames[iteration_index],
                m_gekko_pending_ops.adv_rollback[iteration_index]);
 
-  // Update rollback state for this specific iteration
-  m_is_rolling_back = m_gekko_pending_ops.adv_rollback[iteration_index];
+  // GekkoNet's own adv_rollback flag stays true for every iteration in a correction burst,
+  // including the final one - which is the only iteration that actually renders/presents
+  // (see HLE_Misc::IsResimulationPass / BrawlbackSkipResimRenderHook). Presentation code
+  // (Present.cpp, BPStructs.cpp) uses IsRollingBack() to skip overlay drawing and immediate
+  // XFB swaps, so trusting adv_rollback here made those get skipped for the real displayed
+  // frame too, causing the on-screen UI/HUD to visibly pop out and back in on every rollback.
+  // Only the throwaway resimulation iterations should count as "rolling back".
+  m_is_rolling_back = iteration_index != m_gekko_pending_ops.adv_count - 1;
 
-  std::array<GCPadStatus, 4> pads_for_iteration;
+  std::array<gfPadStatus, 4> pads_for_iteration;
   for (int port = 0; port < 4; port++)
   {
     pads_for_iteration[port] = m_gekko_pending_ops.adv_pads[port][iteration_index];
@@ -1739,6 +1815,15 @@ int NetPlayClient::GetFramesToAdvance()
   }
 
   return 1;
+}
+
+bool NetPlayClient::IsTimeSynced()
+{
+  // No Gekko session for the match exists yet (still booting/in menus) - nothing to wait on.
+  if (!m_use_gekko_netplay || !m_gekko_session)
+    return true;
+
+  return time_synced;
 }
 
 void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
@@ -2656,7 +2741,7 @@ void NetPlayClient::OnConnectFailed(Common::TraversalConnectFailedReason reason)
   }
 }
 
-bool NetPlayClient::GetOverrideInput(int pad_num, GCPadStatus* status)
+bool NetPlayClient::GetOverrideInput(int pad_num, gfPadStatus* status)
 {
   if (!s_override_active || pad_num < 0 || pad_num >= MAX_NUM_PLAYERS)
     return false;
@@ -2685,62 +2770,14 @@ bool NetPlayClient::GetNetPads(const int pad_nb, const bool batching, GCPadStatu
         return true;
       }
 
-      const int current_iteration = GetGekkoCurrentIteration();
-
-      if (current_iteration > 0)
-      {
-        if (s_override_active.load(std::memory_order_acquire) && pad_nb >= 0 && pad_nb < 4)
-        {
-          *pad_status = s_override_pads[pad_nb];
-        }
-        else
-        {
-          *pad_status = GCPadStatus();
-        }
-        return true;
-      }
-
-      const int local_pad = InGamePadToLocalPad(pad_nb);
-
-      const auto& pad_mapping = GetPadMapping();
-      bool is_local_player_pad = false;
-
-      if (pad_nb >= 0 && pad_nb < static_cast<int>(pad_mapping.size()))
-      {
-        is_local_player_pad = (pad_mapping[pad_nb] == m_local_player->pid);
-      }
-      if (is_local_player_pad)
-      {
-        if (local_pad < 4)
-        {
-          if (Config::Get(Config::GetInfoForSIDevice(pad_nb)) ==
-                   SerialInterface::SIDEVICE_WIIU_ADAPTER)
-          {
-            *pad_status = GCAdapter::Input(local_pad);
-          }
-          else
-          {
-            *pad_status = Pad::GetStatus(local_pad);
-          }
-
-          m_gekko_last_local_input = *pad_status;
-        }
-        else
-        {
-          *pad_status = GCPadStatus();
-        }
-      }
-      else
-      {
-        if (s_override_active.load(std::memory_order_acquire) && pad_nb >= 0 && pad_nb < 4)
-        {
-          *pad_status = s_override_pads[pad_nb];
-        }
-        else
-        {
-          *pad_status = GCPadStatus();
-        }
-      }
+      // InjectPads (driven by HandleGekkoFrame's own poll + GekkoNet's synced/delayed value) is
+      // the sole source of pad data once rollback netplay starts - this legacy SI return path
+      // must always be a dummy. Real-polling hardware here for the local player - even only on
+      // the final, real iteration of a pass - reads undelayed input at a slightly different
+      // real-world instant than what was already recorded and network-synced, so it can
+      // silently diverge from what the remote peer computes for the exact same frame, corrupting
+      // real (non-throwaway) game state and desyncing right after resimulation catches up.
+      *pad_status = GCPadStatus();
       return true;
     }
     *pad_status = GCPadStatus();
@@ -3599,7 +3636,7 @@ bool IsTimeSynced()
 {
   if (IsNetPlayRunning() && IsInRollbackMode())
   {
-    return netplay_client->time_synced;
+    return netplay_client->IsTimeSynced();
   }
   return true;
 }
@@ -3618,6 +3655,25 @@ bool IsInRollbackMode()
     return false;
 
   return netplay_client->IsInRollbackMode();
+}
+
+u64 GetInitialRTCValue()
+{
+  if (!netplay_client)
+    return 0;
+
+  return netplay_client->GetInitialRTCValue();
+}
+
+bool IsGekkoCpuStalled()
+{
+  return s_gekko_cpu_stalled.load(std::memory_order_acquire);
+}
+
+void SetGekkoCpuStalled(bool stalled)
+{
+  s_gekko_cpu_stalled.store(stalled, std::memory_order_release);
+  s_gekko_cpu_stalled.notify_all();
 }
 
 GekkoSession* GetGekkoSession()

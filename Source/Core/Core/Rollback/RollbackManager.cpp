@@ -14,6 +14,7 @@
 #include "Common/Hash.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
+#include "Core/CoreTiming.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/Perf.h"
@@ -337,6 +338,41 @@ static const u8* GetRegionPointer(const MemoryRegion& region, const u8* mem1_ptr
     return mem1_ptr + region.phys_start;
   return nullptr;
 }
+
+// gfSceneManager::currentScene->sceneName == "scMelee" (see scMelee::create()). The scene
+// manager is in MEM1, but the current scene can be allocated in MEM2, so resolve each pointer
+// through the guest memory map instead of treating every pointer as a MEM1 offset.
+static bool IsCurrentSceneMelee(const Memory::MemoryManager& memory)
+{
+  constexpr u32 SCENE_MANAGER_PTR_ADDR = 0x805a0060u;
+  constexpr u32 CURRENT_SCENE_OFFSET = 0x4u;
+  constexpr u32 SCENE_NAME_OFFSET = 0x0u;
+  constexpr char kMeleeSceneName[] = "scMelee";
+
+  auto read_u32 = [&](u32 address) -> u32 {
+    const u8* const ptr = memory.GetPointerForRange(address, sizeof(u32));
+    if (!ptr)
+      return 0;
+    u32 v;
+    std::memcpy(&v, ptr, sizeof(v));
+    return Common::swap32(v);
+  };
+
+  const u32 scene_manager = read_u32(SCENE_MANAGER_PTR_ADDR);
+  if (scene_manager == 0)
+    return false;
+
+  const u32 current_scene = read_u32(scene_manager + CURRENT_SCENE_OFFSET);
+  if (current_scene == 0)
+    return false;
+
+  const u32 scene_name_ptr = read_u32(current_scene + SCENE_NAME_OFFSET);
+  const u8* const scene_name = memory.GetPointerForRange(scene_name_ptr, sizeof(kMeleeSceneName));
+  if (!scene_name)
+    return false;
+
+  return std::memcmp(scene_name, kMeleeSceneName, sizeof(kMeleeSceneName)) == 0;
+}
 #endif
 
 uint32_t CalculateBrawlbackDesyncChecksum(Core::System& system)
@@ -347,6 +383,9 @@ uint32_t CalculateBrawlbackDesyncChecksum(Core::System& system)
   u8* const mem2 = memory.GetEXRAM();
   const size_t mem1_size = memory.GetRamSize();
   const size_t mem2_size = memory.GetExRamSize();
+
+  if (!IsCurrentSceneMelee(memory))
+    return 0;
 
   u32 crc = Common::StartCRC32();
   for (const MemoryRegionThroughPtrs& source_region :
@@ -627,6 +666,12 @@ bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
     m_exclude_regions.push_back(MemoryRegion{stack_page, stack_exclude_end});
   }
 
+  auto sorted_exclude_regions = std::make_shared<std::vector<MemoryRegion>>(m_exclude_regions);
+  std::sort(sorted_exclude_regions->begin(), sorted_exclude_regions->end(),
+            [](const MemoryRegion& left, const MemoryRegion& right) {
+              return left.phys_start < right.phys_start;
+            });
+
   const int most_recent = Wrap(m_ring_next - 1, NUM_SAVE_SLOTS);
 
   const int target_slot = Wrap(most_recent - frames_back, NUM_SAVE_SLOTS);
@@ -746,7 +791,8 @@ bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
       for (auto const& kv : sourceDataToRestore)
       {
         page_jobs.push_back(w.create_job_as_child(
-            j, [this, page_key = kv.first, source_entry = kv.second](job::JobTaskThread&, job::Job&) {
+            j, [this, sorted_exclude_regions, page_key = kv.first,
+              source_entry = kv.second](job::JobTaskThread&, job::Job&) {
               const bool isMem2 = (page_key >= MEM2_FIRST_PAGE);
               const u32 local_page = isMem2 ? (page_key - MEM2_FIRST_PAGE) : page_key;
               uint8_t* const dst =
@@ -768,7 +814,7 @@ bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
                 src = src_delta.page_data.data() + static_cast<size_t>(source_entry.local_idx) * PAGE_SIZE;
               }
 
-              savestateMemcpy(dst, src, PAGE_SIZE, dst_phys, m_exclude_regions);
+              savestateMemcpy(dst, src, PAGE_SIZE, dst_phys, *sorted_exclude_regions);
             }));
       }
 
@@ -785,6 +831,19 @@ bool RollbackManager::LoadFrame(Core::System& system, int frames_back)
     ok = State::LoadFromBuffer(
         system, std::span<uint8_t>(deltaSave.m_save_buffer.data(), deltaSave.m_save_buffer.size()));
     EndDoState();
+  }
+
+  {
+    // CoreTiming::DoState rewinds global_timer/slice_length, but PowerPCManager::DoState
+    // deliberately skips ppc_state.downcount (it's live CPU context). Advance() derives elapsed
+    // cycles as slice_length - downcount, so pairing a rewound slice_length with a stale downcount
+    // makes the global timer jump - or run backwards - and queued events stop coming due. The VI
+    // retrace interrupt is one of them, so __VIRetraceHandler never runs its
+    // OSWakeupThread(__VIRetraceQueue) and the game hangs forever inside VIWaitForRetrace. Close
+    // the current slice out at zero length so the next Advance() re-primes both values from the
+    // restored event queue.
+    system.GetCoreTiming().GetGlobals().slice_length = 0;
+    system.GetPowerPC().GetPPCState().downcount = 0;
   }
 
   {

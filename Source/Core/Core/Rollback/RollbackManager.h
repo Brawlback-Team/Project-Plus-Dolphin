@@ -16,7 +16,7 @@
 
 // Set to 1 to enable full-RAM shadow snapshots for rollback validation
 #define ROLLBACK_VALIDATE 0
-#define BRAWLBACK_DESYNC_DETECTION 0
+#define BRAWLBACK_DESYNC_DETECTION 1
 
 namespace Core
 {

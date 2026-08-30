@@ -678,6 +678,7 @@ if(_M_X86_64)
     PowerPC/Jit64Common/TrampolineCache.cpp
     PowerPC/Jit64Common/TrampolineCache.h
     PowerPC/Jit64Common/TrampolineInfo.h
+    Brawlback/include/brawlback-common/GfPadStatus.h
   )
 elseif(_M_ARM_64)
   target_sources(core PRIVATE

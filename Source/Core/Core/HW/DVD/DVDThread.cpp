@@ -3,11 +3,13 @@
 
 #include "Core/HW/DVD/DVDThread.h"
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
+#include <thread>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -325,6 +327,9 @@ void DVDThread::FinishRead(u64 id, s64 cycles_late)
 
 void DVDThread::ProcessReadRequest(ReadRequest&& request)
 {
+  while (NetPlay::IsGekkoCpuStalled())
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
   m_file_logger.Log(*m_disc, request.partition, request.dvd_offset);
 
   std::vector<u8> buffer(request.length);
