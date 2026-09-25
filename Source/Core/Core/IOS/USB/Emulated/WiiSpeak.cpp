@@ -246,6 +246,8 @@ int WiiSpeak::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
       WARN_LOG_FMT(IOS_USB, "Wii Speak data truncated, {} byte(s) lost in isochronous message",
                    remainder);
     }
+    if (size != 0)
+      memory.MarkRangeDirty(cmd->data_address, size);
     break;
   }
   case ENDPOINT_AUDIO_OUT:

@@ -494,6 +494,7 @@ void FifoPlayer::WriteMemory(const MemoryUpdate& memUpdate)
     mem = &memory.GetRAM()[memUpdate.address & memory.GetRamMask()];
 
   std::ranges::copy(memUpdate.data, mem);
+  memory.MarkRangeDirty(memUpdate.address, memUpdate.data.size());
 }
 
 void FifoPlayer::WriteFifo(const u8* data, u32 start, u32 end)

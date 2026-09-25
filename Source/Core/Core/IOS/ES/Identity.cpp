@@ -60,6 +60,8 @@ IPCReply ESDevice::Encrypt(u32 uid, const IOCtlVRequest& request)
 
   const ReturnCode ret =
       GetEmulationKernel().GetIOSC().Encrypt(keyIndex, iv, source, size, destination, PID_ES);
+  if (ret == IPC_SUCCESS)
+    memory.MarkRangeDirty(request.io_vectors[1].address, size);
   return IPCReply(ret);
 }
 
@@ -80,6 +82,8 @@ IPCReply ESDevice::Decrypt(u32 uid, const IOCtlVRequest& request)
 
   const ReturnCode ret =
       GetEmulationKernel().GetIOSC().Decrypt(keyIndex, iv, source, size, destination, PID_ES);
+  if (ret == IPC_SUCCESS)
+    memory.MarkRangeDirty(request.io_vectors[1].address, size);
   return IPCReply(ret);
 }
 
@@ -129,6 +133,8 @@ IPCReply ESDevice::Sign(const IOCtlVRequest& request)
 
   GetEmulationKernel().GetIOSC().Sign(sig_out, ap_cert_out, m_core.m_title_context.tmd.GetTitleId(),
                                       data, data_size);
+  memory.MarkRangeDirty(request.io_vectors[0].address, sizeof(Common::ec::Signature));
+  memory.MarkRangeDirty(request.io_vectors[1].address, sizeof(CertECC));
   return IPCReply(IPC_SUCCESS);
 }
 

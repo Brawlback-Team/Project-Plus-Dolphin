@@ -736,6 +736,7 @@ int LogitechMic::SubmitTransfer(std::unique_ptr<IsoMessage> cmd)
   }
 
   cmd->FillBuffer(packets, cmd->length);
+  memory.MarkRangeDirty(cmd->data_address, cmd->length);
   cmd->ScheduleTransferCompletion(cmd->length, 1000);
   return IPC_SUCCESS;
 }

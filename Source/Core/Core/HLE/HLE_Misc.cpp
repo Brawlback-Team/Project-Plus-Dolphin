@@ -195,7 +195,10 @@ void BrawlbackGekkoNetUnconditionalFrame(const Core::CPUThreadGuard& guard)
   }
 
   NetPlay::SetGekkoCpuStalled(false);
-  NetPlay::InjectPadsForIteration(current_iteration);
+  const bool is_resimulation_pass = IsResimulationPass();
+  NetPlay::SetGekkoResimulationPass(is_resimulation_pass);
+  if (is_resimulation_pass)
+    NetPlay::InjectPadsForIteration(current_iteration);
 
   // Execute the original instruction: li r25, 0x1
   ppc_state.gpr[25] = (s16)0x1;
@@ -481,30 +484,34 @@ bool IsResimulationPass()
   return frames_to_advance > 1 && current_iteration != frames_to_advance - 1;
 }
 
-// `bl updateLowGC` inside updateLow (gf_pad.o @ 0x80029464), called both by gfPadReadThread's
-// independently alarm-scheduled loop and (indirectly) by our own resimulation loop. updateLowGC
-// calls the real PADRead() to refill gfPadSystem+0x40 - the exact same raw pad buffer
-// NetPlayClient::InjectPads writes into - so letting it run races the two writers. updateLow
-// itself must still run past this call: it also pushes gfPadSystem+0x40 onto gfPadStatusQueue,
-// which updateGame can read from instead of the raw buffer directly, so skip only the real
-// hardware re-poll and leave our injected values in place for that push to pick up.
+// updateLowGC calls PADRead and writes its results into gfPadSystem+0x40. During resimulation,
+// that would overwrite GekkoNet's input for the iteration before updateLow queues it, so skip
+// only the physical poll in that case. Normal passes still perform the original call and capture
+// its completed sample at the following instruction.
 static constexpr u32 BRAWL_PAD_UPDATELOWGC_CALL_ADDR = 0x80029464;
 static constexpr u32 BRAWL_PAD_UPDATELOWGC_ADDR = 0x80029578;
 static constexpr u32 BRAWL_PAD_UPDATELOWGC_RETURN_ADDR = 0x80029468;
 
-void BrawlbackSkipPadThreadReadHook(const Core::CPUThreadGuard& guard)
+void BrawlbackSkipResimPadThreadReadHook(const Core::CPUThreadGuard& guard)
 {
   auto& ppc_state = guard.GetSystem().GetPPCState();
 
-  if (NetPlay::IsNetPlayRunning() && NetPlay::IsInRollbackMode())
+  if (IsResimulationPass())
   {
     ppc_state.npc = BRAWL_PAD_UPDATELOWGC_RETURN_ADDR;
     return;
   }
 
-  // Not rollback netplay: replicate the original `bl updateLowGC` we replaced.
   LR(ppc_state) = BRAWL_PAD_UPDATELOWGC_RETURN_ADDR;
   ppc_state.npc = BRAWL_PAD_UPDATELOWGC_ADDR;
+}
+
+void BrawlbackCapturePadThreadReadHook(const Core::CPUThreadGuard& guard)
+{
+  if (IsResimulationPass())
+    return;
+
+  NetPlay::CaptureGekkoPadInput(guard.GetSystem());
 }
 
 // Render dispatch branch in gfApplication::mainLoopSub (@ 0x80017404), run once per pass through
@@ -547,36 +554,6 @@ void BrawlbackSkipResimRenderHook(const Core::CPUThreadGuard& guard)
   const u8 flags = PowerPC::MMU::HostRead<u8>(guard, app_ptr + BRAWL_APP_FLAGS_OFFSET);
   ppc_state.npc = (flags & BRAWL_APP_ALT_RENDER_FLAG) ? BRAWL_RENDER_ALT_BRANCH_ADDR :
                                                         BRAWL_RENDER_NORMAL_BRANCH_ADDR;
-}
-
-// The two `bl gfTask::process` call sites in gfTaskScheduler::process. Used to skip ecMgr,
-// EffectManager and soEffectScreenManager's effect-only task callback on throwaway resimulation
-// iterations, but effect tasks can reach soAnimCmdInterpreter::systemCmdFuncWaitRnadi (a "wait a
-// random number of frames" anim command), which draws from the same global mt_prng stream as
-// everything else - including Luigi's Green Missile misfire roll
-// (ftLuigiStatusUniqProcessSpecialSRam::execFixPos). Skipping the call meant a peer that had to
-// resimulate consumed fewer mt_prng draws than one that didn't, desyncing every later random
-// roll between clients, so these hooks are no longer patched in HLE.cpp - kept only because
-// os_patches references them by name. Both are now plain passthroughs to the original call.
-static constexpr u32 BRAWL_TASK_PROCESS_ADDR = 0x8002dc74;
-static constexpr u32 BRAWL_TASK_PROCESS_FIRST_CALL_ADDR = 0x8002e614;
-static constexpr u32 BRAWL_TASK_PROCESS_SECOND_CALL_ADDR = 0x8002e63c;
-
-void BrawlbackSkipResimTaskProcess(const Core::CPUThreadGuard& guard, u32 call_addr)
-{
-  auto& ppc_state = guard.GetSystem().GetPPCState();
-  LR(ppc_state) = call_addr + 4;
-  ppc_state.npc = BRAWL_TASK_PROCESS_ADDR;
-}
-
-void BrawlbackSkipResimTaskProcessFirstHook(const Core::CPUThreadGuard& guard)
-{
-  BrawlbackSkipResimTaskProcess(guard, BRAWL_TASK_PROCESS_FIRST_CALL_ADDR);
-}
-
-void BrawlbackSkipResimTaskProcessSecondHook(const Core::CPUThreadGuard& guard)
-{
-  BrawlbackSkipResimTaskProcess(guard, BRAWL_TASK_PROCESS_SECOND_CALL_ADDR);
 }
 
 // The three `bl detail_AllocXXXSound` call sites inside

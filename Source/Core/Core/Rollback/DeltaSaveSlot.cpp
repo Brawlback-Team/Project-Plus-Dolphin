@@ -187,7 +187,7 @@ void enqueueSubsectionJobs(u32 first_page, u32 page_count, const uint8_t* region
   }
 
   // Capture pointers to the already-allocated buffers to avoid reference capture issues
-  uint16_t* page_indices_ptr = out.page_indices.data();
+  uint32_t* page_indices_ptr = out.page_indices.data();
   uint8_t* page_data_ptr = out.page_data.data();
 
   auto copySubsectionFn = [dirty_pages, entries, region_base, page_indices_ptr, page_data_ptr,
@@ -206,7 +206,7 @@ void enqueueSubsectionJobs(u32 first_page, u32 page_count, const uint8_t* region
 
       // pageidx is global; subtract first_page to get region-relative index
       u32 relative_page_idx = pageidx - first_page;
-      page_indices_ptr[dirtyPagesIndex] = static_cast<uint16_t>(relative_page_idx);
+      page_indices_ptr[dirtyPagesIndex] = relative_page_idx;
       std::memcpy(page_data_ptr + static_cast<size_t>(dirtyPagesIndex) * PAGE_SIZE,
                   region_base + static_cast<size_t>(relative_page_idx) * PAGE_SIZE, PAGE_SIZE);
       ++this_split_written;
@@ -242,6 +242,14 @@ void DeltaSaveSlot::Save(Core::System& system)
   auto* dt = rbm.m_dispatch_thread;
   ASSERT(dt);
 
+  // Serialize non-RAM state first so writes made by DoState are included in the dirty scan.
+  {
+    ROLLBACK_ZONE_N("DoState save");
+    rbm.BeginDoState();
+    State::SaveToBuffer(system, m_save_buffer);
+    rbm.EndDoState();
+  }
+
   job::Job* l1cachejob = job::KickRootJob(dt, [this](job::JobTaskThread&, job::Job&) {
     ROLLBACK_ZONE_N("L1 cache save");
     Rollback::DeltaSaveSlot* slot = this;
@@ -260,8 +268,8 @@ void DeltaSaveSlot::Save(Core::System& system)
         w.do_work_and_kick_jobs(jar.data(), (uint16_t)num_jobs);
       });
 
-  // do all mem1 copy jobs + l1 cache job. THEN do mem2 jobs.
-  // goal here is to try not to trash the cache too hard
+  // Do all mem1 copy jobs + l1 cache job. THEN do mem2 jobs.
+  // Goal here is to try not to trash the cache too hard.
   job::Job* root_mem2_job =
       job::KickRootJob(dt, [this, &bitmap](job::JobTaskThread& w, job::Job& root) {
         ROLLBACK_ZONE_N("root mem2 save dispatch");
@@ -272,14 +280,6 @@ void DeltaSaveSlot::Save(Core::System& system)
         ASSERT(num_jobs <= UINT16_MAX);
         w.do_work_and_kick_jobs(jar.data(), (uint16_t)num_jobs);
       });
-
-  // Run DoState on this thread while workers capture pages.
-  {
-    ROLLBACK_ZONE_N("DoState save");
-    rbm.BeginDoState();
-    State::SaveToBuffer(system, m_save_buffer);
-    rbm.EndDoState();
-  }
 
   job::DrainJobsUntilComplete(dt, root_mem1_job);
   job::DrainJobsUntilComplete(dt, root_mem2_job);

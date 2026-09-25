@@ -217,6 +217,8 @@ public:
   void OnFrameEnd(std::unique_lock<std::mutex>& lock);
   void OnFrameStart(std::unique_lock<std::mutex>& lock);
   void InjectPadsForIteration(int iteration_index);
+  void SetGekkoResimulationPass(bool is_resimulation_pass);
+  void CaptureGekkoPadInput(Core::System& system);
   void PauseForLocalAdvantage();
   void CheckForLocalAdvantage();
   bool IsRollingBack();
@@ -478,6 +480,8 @@ private:
   int m_gekko_connect_wait_ticks = 0;
   bool m_use_gekko_netplay = false;
   gfPadStatus m_gekko_last_local_input{};
+  std::array<gfPadStatus, MAX_NUM_PLAYERS> m_gekko_last_synced_pads{};
+  std::array<bool, MAX_NUM_PLAYERS> m_gekko_has_last_synced_pad{};
   bool m_is_rolling_back = false;
 
   // GekkoNet pending operations for current frame
@@ -522,6 +526,8 @@ bool NetPlay_GetWiimoteData(const std::span<NetPlayClient::WiimoteDataBatchEntry
 unsigned int NetPlay_GetLocalWiimoteForSlot(unsigned int slot);
 void OnFrameStart();
 void InjectPadsForIteration(int iteration_index);
+void SetGekkoResimulationPass(bool is_resimulation_pass);
+void CaptureGekkoPadInput(Core::System& system);
 bool HasPendingSave();
 void ClearPendingSave();
 bool ShouldSaveAfterIteration(int iteration_index);

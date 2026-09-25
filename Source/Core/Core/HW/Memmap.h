@@ -175,6 +175,8 @@ public:
 
     for (size_t i = 0; i < size / sizeof(T); i++)
       dest[i] = Common::FromBigEndian(data[i]);
+
+    MarkRangeDirty(address, size);
   }
 
 private:

@@ -32,4 +32,6 @@ void BrawlbackSkipResimWaveSoundAllocHook(const Core::CPUThreadGuard& guard);
 void BrawlbackSkipResimSeqSoundAllocHook(const Core::CPUThreadGuard& guard);
 void BrawlbackSkipResimStrmSoundAllocHook(const Core::CPUThreadGuard& guard);
 void BrawlbackSyncCharSelectRandomSeedHook(const Core::CPUThreadGuard& guard);
+void BrawlbackSkipResimPadThreadReadHook(const Core::CPUThreadGuard& guard);
+void BrawlbackCapturePadThreadReadHook(const Core::CPUThreadGuard& guard);
 }  // namespace HLE_Misc

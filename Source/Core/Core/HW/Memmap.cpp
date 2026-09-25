@@ -141,11 +141,11 @@ void MemoryManager::Init()
       continue;
     if (!fake_vmem && (region.flags & PhysicalMemoryRegion::FAKE_VMEM))
       continue;
-
     region.shm_position = mem_size;
     region.active = true;
     mem_size += region.size;
   }
+
   m_arena.GrabSHMSegment(mem_size, "dolphin-emu");
 
   m_physical_page_mappings.fill(nullptr);
@@ -817,9 +817,9 @@ void MemoryManager::MarkRangeDirty(u32 address, size_t size)
 
   const uint32_t phys_addr = address & 0x1FFFFFFFu;
 
-  auto& bitmap = Rollback::JITDirtyBitmap::Get();
-  const uint32_t first_page = phys_addr >> 12;
-  const uint32_t last_page = (phys_addr + static_cast<uint32_t>(size) - 1) >> 12;
+  uint8_t* const entries = Rollback::JITDirtyBitmap::Get().entries;
+  const uint32_t first_page = phys_addr >> ::PAGE_SHIFT;
+  const uint32_t last_page = (phys_addr + static_cast<uint32_t>(size) - 1) >> ::PAGE_SHIFT;
   for (uint32_t p = first_page; p <= last_page; ++p)
   {
     if (p >= static_cast<uint32_t>(Rollback::JITDirtyBitmap::ENTRY_COUNT))
@@ -828,7 +828,7 @@ void MemoryManager::MarkRangeDirty(u32 address, size_t size)
                     p, address);
       break;
     }
-    bitmap.entries[p] = 1;
+    entries[p] = 1;
   }
 }
 }  // namespace Memory

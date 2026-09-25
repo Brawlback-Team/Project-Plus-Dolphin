@@ -834,7 +834,10 @@ IPCReply ESDevice::ExportContentData(Context& context, const IOCtlVRequest& requ
   const u32 bytes_to_read = request.io_vectors[0].size;
   u8* data = memory.GetPointerForRange(request.io_vectors[0].address, bytes_to_read);
 
-  return IPCReply(m_core.ExportContentData(context, content_fd, data, bytes_to_read));
+  const ReturnCode ret = m_core.ExportContentData(context, content_fd, data, bytes_to_read);
+  if (ret == IPC_SUCCESS)
+    memory.MarkRangeDirty(request.io_vectors[0].address, bytes_to_read);
+  return IPCReply(ret);
 }
 
 ReturnCode ESCore::ExportContentEnd(Context& context, u32 content_fd)

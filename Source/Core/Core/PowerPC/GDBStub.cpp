@@ -859,6 +859,7 @@ static void WriteMemory(const Core::CPUThreadGuard& guard)
   auto& memory = system.GetMemory();
   u8* dst = memory.GetPointerForRange(addr, len);
   Hex2mem(dst, s_cmd_bfr + i + 1, len);
+  memory.MarkRangeDirty(addr, len);
   SendReply("OK");
 }
 

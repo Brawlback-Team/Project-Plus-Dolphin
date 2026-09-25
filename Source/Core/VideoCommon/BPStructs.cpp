@@ -359,7 +359,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         //       Might also clean up some issues with games doing XFB copies they don't intend to
         //       display.
 
-        if (g_ActiveConfig.bImmediateXFB && !NetPlay::IsRollingBack())
+        if (g_ActiveConfig.bImmediateXFB)
         {
           // below div two to convert from bytes to pixels - it expects width, not stride
           g_presenter->ImmediateSwap(destAddr, destStride / 2, destStride, height);
