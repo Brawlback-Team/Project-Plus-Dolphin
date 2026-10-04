@@ -21,7 +21,7 @@ jobs:
     - name: Setup Submodules
       run: git config --global --add safe.directory . && git submodule update --init --recursive
     - name: Configure CMake
-      run: cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=CMake/DolphinToolchain.cmake -DARCH=x86_64
+      run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=CMake/DolphinToolchain.cmake" -DARCH=x86_64
     - name: Build
       run: cmake --build build --config Release --parallel
     - name: Upload Build Artifact
