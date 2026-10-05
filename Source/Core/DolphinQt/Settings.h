@@ -176,6 +176,8 @@ public:
   bool IsJITVisible() const;
   void SetAssemblerVisible(bool enabled);
   bool IsAssemblerVisible() const;
+  void SetShowDemangledNames(bool enabled);
+  bool IsShowDemangledNames() const;
   QFont GetDebugFont() const;
   void SetDebugFont(const QFont& font);
 
@@ -220,6 +222,7 @@ signals:
   void WatchVisibilityChanged(bool visible);
   void BreakpointsVisibilityChanged(bool visible);
   void CodeVisibilityChanged(bool visible);
+  void ShowDemangledNamesChanged(bool enabled);
   void MemoryVisibilityChanged(bool visible);
   void NetworkVisibilityChanged(bool visible);
   void JITVisibilityChanged(bool visible);

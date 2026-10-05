@@ -177,10 +177,10 @@ public:
 
   inline u32 BufferSizeForPort(int pad) const
   {
-    if (m_pad_map[pad] <= 0)
+    if (m_net_settings.pad_map[pad] <= 0)
       return 0;
 
-    return std::max(m_minimum_buffer_size, m_players.at(m_pad_map.at(pad)).buffer);
+    return std::max(m_minimum_buffer_size, m_players.at(m_net_settings.pad_map.at(pad)).buffer);
   }
 
   // used for chat, not the best place for it
@@ -188,7 +188,7 @@ public:
   {
     for (int i = 0; i < 4; i++)
     {
-      if (m_pad_map[i] == player->pid)
+      if (m_net_settings.pad_map[i] == player->pid)
         return " (port " + std::to_string(i + 1) + ")";
     }
 
@@ -264,10 +264,6 @@ protected:
 
   u32 m_current_game = 0;
 
-  PadMappingArray m_pad_map{};
-  GBAConfigArray m_gba_config{};
-  PadMappingArray m_wiimote_map{};
-
   bool m_is_recording = false;
 
 private:
@@ -293,7 +289,6 @@ private:
   bool AddLocalWiimoteToBuffer(int local_wiimote, const WiimoteEmu::SerializedWiimoteState& state,
                                sf::Packet& packet);
 
-  void UpdateDevices();
   void AddPadStateToPacket(int in_game_pad, const GCPadStatus& np, sf::Packet& packet);
   void AddWiimoteStateToPacket(int in_game_pad, const WiimoteEmu::SerializedWiimoteState& np,
                                sf::Packet& packet);
