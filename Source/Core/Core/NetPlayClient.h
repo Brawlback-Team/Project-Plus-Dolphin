@@ -177,10 +177,10 @@ public:
 
   inline u32 BufferSizeForPort(int pad) const
   {
-    if (m_pad_map[pad] <= 0)
+    if (m_net_settings.pad_map[pad] <= 0)
       return 0;
 
-    return std::max(m_minimum_buffer_size, m_players.at(m_pad_map.at(pad)).buffer);
+    return std::max(m_minimum_buffer_size, m_players.at(m_net_settings.pad_map.at(pad)).buffer);
   }
 
   // used for chat, not the best place for it
@@ -188,7 +188,7 @@ public:
   {
     for (int i = 0; i < 4; i++)
     {
-      if (m_pad_map[i] == player->pid)
+      if (m_net_settings.pad_map[i] == player->pid)
         return " (port " + std::to_string(i + 1) + ")";
     }
 
