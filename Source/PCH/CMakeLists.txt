@@ -4,6 +4,7 @@
 
 # linking against this interface library will cause targets to enable PCH
 add_library(use_pch INTERFACE)
+target_include_directories(use_pch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Uncomment this return to disable PCH
 #return()
