@@ -481,14 +481,14 @@ PRIVATE
 )
 
 if(ENABLE_SDL)
-  target_link_libraries(dolphin-emu
+  target_link_libraries(project-plus-dolphin
   PRIVATE
     SDL3::SDL3
   )
 endif()
 
 if (NEED_QT_GUI_PRIVATE_COMPONENT)
-  target_link_libraries(dolphin-emu
+  target_link_libraries(project-plus-dolphin
   PRIVATE
     Qt6::GuiPrivate
   )
