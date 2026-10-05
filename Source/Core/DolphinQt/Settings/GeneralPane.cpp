@@ -291,26 +291,6 @@ void GeneralPane::LoadConfig()
     SignalBlocking(m_combobox_fallback_region)->setCurrentIndex(FALLBACK_REGION_NTSCJ_INDEX);
 }
 
-static QString UpdateTrackFromIndex(int index)
-{
-  QString value;
-
-  switch (index)
-  {
-  case AUTO_UPDATE_DISABLE_INDEX:
-    value = QString::fromStdString(AUTO_UPDATE_DISABLE_STRING);
-    break;
-  case AUTO_UPDATE_RELEASE_INDEX:
-    value = QString::fromStdString(AUTO_UPDATE_RELEASE_STRING);
-    break;
-  case AUTO_UPDATE_DEV_INDEX:
-    value = QString::fromStdString(AUTO_UPDATE_DEV_STRING);
-    break;
-  }
-
-  return value;
-}
-
 static DiscIO::Region UpdateFallbackRegionFromIndex(int index)
 {
   DiscIO::Region value = DiscIO::Region::Unknown;
