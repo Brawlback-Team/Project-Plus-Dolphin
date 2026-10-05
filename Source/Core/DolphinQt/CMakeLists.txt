@@ -554,7 +554,7 @@ if(WIN32)
 
   if (ENABLE_AUTOUPDATE)
     # Copy build_info.txt
-    add_custom_command(TARGET dolphin-emu POST_BUILD
+    add_custom_command(TARGET project-plus-dolphin POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/build_info.txt" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
     )
   endif()
