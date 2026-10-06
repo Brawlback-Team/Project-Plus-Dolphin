@@ -36,6 +36,7 @@
 #include "Core/HW/GCPad.h"
 #include "Core/HW/Memmap.h"
 #include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/Cow.h"
@@ -253,6 +254,7 @@ struct GekkoManager
   int simulated_peer_p2_handle = -1;
   int remote_handle = -1;
   bool native_adapter_active = false;
+  bool local_uses_gc_adapter = false;
   bool debug_p2_cstick = false;
   bool simulate_remote_p2 = false;
   u64 local_input_frame = 0;
@@ -438,6 +440,10 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
 
   g_manager.players = players;
   g_manager.local_player = local_player;
+  // Capture the first local device before NetPlay's boot layer remaps local SI devices to their
+  // in-game seats. This remains port 0 on every client regardless of its network player number.
+  g_manager.local_uses_gc_adapter =
+      Config::Get(Config::GetInfoForSIDevice(0)) == SerialInterface::SIDEVICE_WIIU_ADAPTER;
   g_manager.debug_p2_cstick = debug_p2_cstick;
   g_manager.simulate_remote_p2 = simulate_remote_p2;
   g_manager.local_input_frame = 0;
@@ -574,10 +580,11 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
 
   NOTICE_LOG_FMT(CORE,
                  "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, delay={}, "
-                 "rollback_window={}, debug_p2_cstick={}, simulate_remote_p2={}, "
+                 "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
                  "simulated_one_way_latency_ms={})",
                  game_name, players, local_player, session_id, clamped_delay,
-                 clamped_prediction, debug_p2_cstick, simulate_remote_p2,
+                 clamped_prediction, g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad",
+                 debug_p2_cstick, simulate_remote_p2,
                  simulate_remote_p2 ? SIMULATED_P2_LATENCY.count() : 0);
   return true;
 }
@@ -650,8 +657,7 @@ static void SubmitLocalInput()
   // Using local_player - 1 here made player 2 read GCPad2 even though its controller is GCPad1.
   constexpr int LOCAL_PAD = 0;
   GCPadStatus local_status;
-  if (Config::Get(Config::GetInfoForSIDevice(LOCAL_PAD)) ==
-      SerialInterface::SIDEVICE_WIIU_ADAPTER)
+  if (g_manager.local_uses_gc_adapter)
   {
     local_status = GCAdapter::Input(LOCAL_PAD);
   }
