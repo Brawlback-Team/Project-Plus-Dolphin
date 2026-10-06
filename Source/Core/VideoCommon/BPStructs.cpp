@@ -39,6 +39,7 @@
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/VideoState.h"
 #include "VideoCommon/XFStateManager.h"
 
 using namespace BPFunctions;
@@ -358,7 +359,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         //       Might also clean up some issues with games doing XFB copies they don't intend to
         //       display.
 
-        if (g_ActiveConfig.bImmediateXFB)
+        if (g_ActiveConfig.bImmediateXFB && !VideoCommon_IsSkippingRender())
         {
           // below div two to convert from bytes to pixels - it expects width, not stride
           g_presenter->ImmediateSwap(destAddr, destStride / 2, destStride, height);
@@ -375,7 +376,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     }
 
     // Clear the rectangular region after copying it.
-    if (PE_copy.clear)
+    if (PE_copy.clear && !VideoCommon_IsSkippingRender())
     {
       const bool color_enable = bpmem.blendmode.color_update != 0;
       const bool alpha_enable = bpmem.blendmode.alpha_update != 0;

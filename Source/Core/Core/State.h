@@ -7,9 +7,11 @@
 
 #include <cstddef>
 #include <functional>
+#include <span>
 #include <string>
 #include <type_traits>
 
+#include "Common/Buffer.h"
 #include "Common/CommonTypes.h"
 
 namespace Core
@@ -106,4 +108,9 @@ void UndoLoadState(Core::System& system);
 // for calling back into UI code without introducing a dependency on it in core
 using AfterLoadCallbackFunc = std::function<void()>;
 void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
+
+// In-memory save and load for the rollback core (Core/Rollback): no files, no compression, no
+// OSD. Call inside a Rollback::SnapshotScope.
+std::size_t SaveToBufferForRollback(Core::System& system, Common::UniqueBuffer<u8>& buffer);
+bool LoadFromBufferForRollback(Core::System& system, std::span<u8> buffer);
 }  // namespace State

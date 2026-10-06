@@ -66,6 +66,8 @@ public:
 
   u32 GetPollXLines();
 
+  void RelatchInputs();
+
   static constexpr u32 BUFFER_SIZE = 128;
 
 private:

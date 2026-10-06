@@ -1778,7 +1778,7 @@ bool MainWindow::NetPlayJoin()
   if (server)
   {
     server->SetHostInputAuthority(host_input_authority);
-    server->AdjustMinimumPadBufferSize(Config::Get(Config::NETPLAY_MINIMUM_BUFFER_SIZE));
+    server->AdjustMinimumPadBufferSize(Config::Get(Config::NETPLAY_ROLLBACK_FRAMES));
   }
 
   // Create Client
@@ -1793,6 +1793,11 @@ bool MainWindow::NetPlayJoin()
     NetPlayQuit();
     return false;
   }
+
+  // Publish this client's independent GekkoNet input-delay setting. Legacy fixed-delay NetPlay
+  // initialized this indirectly from the minimum buffer, but rollback has no such relationship.
+  Settings::Instance().GetNetPlayClient()->AdjustPlayerPadBufferSize(
+      Config::Get(Config::NETPLAY_ROLLBACK_INPUT_DELAY));
 
   m_netplay_setup_dialog->close();
   m_netplay_dialog->show(nickname, is_traversal);

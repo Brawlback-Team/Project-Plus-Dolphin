@@ -421,13 +421,12 @@ int ENET_CALLBACK TraversalClient::InterceptCallback(ENetHost* host, ENetEvent* 
 {
   auto traversalClient = g_TraversalClient.get();
   if (traversalClient->TestPacket(host->receivedData, host->receivedDataLength,
-                                  &host->receivedAddress) ||
-      (host->receivedDataLength == 1 && host->receivedData[0] == 0))
+                                  &host->receivedAddress))
   {
     event->type = static_cast<ENetEventType>(Common::ENet::SKIPPABLE_EVENT);
     return 1;
   }
-  return 0;
+  return Common::ENet::InterceptCallback(host, event);
 }
 
 std::unique_ptr<TraversalClient> g_TraversalClient;

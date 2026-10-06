@@ -28,6 +28,7 @@
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 namespace PowerPC
@@ -81,6 +82,17 @@ void PowerPCManager::DoState(PointerWrap& p)
 
   const std::array<u32, 16> old_sr = m_ppc_state.sr;
 
+  // The BAT registers and HID4 (which enables the extended BATs). Updating the BAT tables clears
+  // every JIT block, so an Orca rollback load skips the update when none of them changed.
+  const auto read_bats = [this] {
+    std::array<u32, 33> bats;
+    std::copy_n(&m_ppc_state.spr[SPR_IBAT0U], 16, bats.begin());
+    std::copy_n(&m_ppc_state.spr[SPR_IBAT4U], 16, bats.begin() + 16);
+    bats[32] = m_ppc_state.spr[SPR_HID4];
+    return bats;
+  };
+  const std::array<u32, 33> old_bats = read_bats();
+
   p.DoArray(m_ppc_state.gpr);
   p.Do(m_ppc_state.pc);
   p.Do(m_ppc_state.npc);
@@ -121,8 +133,11 @@ void PowerPCManager::DoState(PointerWrap& p)
     RoundingModeUpdated(m_ppc_state);
     RecalculateAllFeatureFlags(m_ppc_state);
 
-    mmu.IBATUpdated();
-    mmu.DBATUpdated();
+    if (!Rollback::InSnapshotDoState() || read_bats() != old_bats)
+    {
+      mmu.IBATUpdated();
+      mmu.DBATUpdated();
+    }
   }
   else
   {

@@ -553,6 +553,21 @@ void SerialInterfaceManager::UpdateDevices()
   NetPlay::SetSIPollBatching(false);
 }
 
+void SerialInterfaceManager::RelatchInputs()
+{
+  for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
+  {
+    u32 hi = 0, lo = 0;
+    if (m_channel[i].device->GetData(hi, lo) != DataResponse::Success)
+      continue;
+    const u32 errlatch = m_channel[i].in_hi.ERRLATCH.Value();
+    m_channel[i].in_hi.hex = hi;
+    m_channel[i].in_lo.hex = lo;
+    m_channel[i].in_hi.ERRLATCH = errlatch;
+  }
+}
+
+
 SIDevices SerialInterfaceManager::GetDeviceType(int channel) const
 {
   if (channel < 0 || channel >= MAX_SI_CHANNELS || !m_channel[channel].device)

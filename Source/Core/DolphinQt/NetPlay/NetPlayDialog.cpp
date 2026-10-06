@@ -132,9 +132,15 @@ void NetPlayDialog::CreateMainLayout()
   m_game_button = new QPushButton;
   m_start_button = new QPushButton(tr("Start"));
   m_minimum_buffer_size_box = new QSpinBox;
-  m_minimum_buffer_label = new QLabel(tr("Minimum Buffer:"));
+  m_minimum_buffer_size_box->setRange(1, 10);
+  m_minimum_buffer_size_box->setToolTip(
+      tr("GekkoNet prediction window and maximum rollback depth, in frames. Shared by the host."));
+  m_minimum_buffer_label = new QLabel(tr("Rollback Frames:"));
   m_player_buffer_size_box = new QSpinBox;
-  m_player_buffer_label = new QLabel(tr("Player Buffer:"));
+  m_player_buffer_size_box->setRange(0, 10);
+  m_player_buffer_size_box->setToolTip(
+      tr("GekkoNet local input delay for this player, in frames."));
+  m_player_buffer_label = new QLabel(tr("Input Delay:"));
   m_quit_button = new QPushButton(tr("Quit"));
   m_brawlmusic_off = new QCheckBox(tr("Client Side Music Off"));
   m_spectator_mode = new QCheckBox(tr("Spectator"));
@@ -241,6 +247,21 @@ void NetPlayDialog::CreateMainLayout()
   m_golf_mode_overlay_action->setCheckable(true);
   m_hide_remote_gbas_action = m_other_menu->addAction(tr("Hide Remote GBAs"));
   m_hide_remote_gbas_action->setCheckable(true);
+  m_other_menu->addSeparator();
+  m_rollback_debug_p2_cstick_action =
+      m_other_menu->addAction(tr("Rollback Debug: Step Player 2 C-Stick"));
+  m_rollback_debug_p2_cstick_action->setToolTip(
+      tr("On the player 2 client, hold each of eight C-stick directions for 10 frames, then "
+         "return to center for 30 frames. "
+         "This is a rollback testing aid and should be disabled for normal play."));
+  m_rollback_debug_p2_cstick_action->setCheckable(true);
+  m_rollback_simulate_remote_p2_action =
+      m_other_menu->addAction(tr("Rollback Debug: Simulate Remote Player 2 Inputs"));
+  m_rollback_simulate_remote_p2_action->setToolTip(
+      tr("In a host-alone lobby, create an in-process remote Player 2 GekkoNet peer with 40 ms "
+         "one-way packet latency. The peer uses the Player 2 C-stick test pattern so prediction "
+         "transitions trigger rollback."));
+  m_rollback_simulate_remote_p2_action->setCheckable(true);
 
   m_game_button->setDefault(false);
   m_game_button->setAutoDefault(false);
@@ -371,7 +392,7 @@ void NetPlayDialog::ConnectWidgets()
 
     const auto client = Settings::Instance().GetNetPlayClient();
     const auto server = Settings::Instance().GetNetPlayServer();
-    if (server && !m_host_input_authority)
+    if (server)
       server->AdjustMinimumPadBufferSize(value);
     else
       client->AdjustMinimumPadBufferSize(value);
@@ -447,6 +468,10 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_golf_mode_overlay_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_fixed_delay_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_hide_remote_gbas_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
+  connect(m_rollback_debug_p2_cstick_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
+  connect(m_rollback_simulate_remote_p2_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
 }
@@ -575,6 +600,7 @@ void NetPlayDialog::show(std::string nickname, bool use_traversal)
   m_data_menu->menuAction()->setVisible(is_hosting);
   m_network_menu->menuAction()->setVisible(is_hosting);
   m_game_digest_menu->menuAction()->setVisible(is_hosting);
+  m_rollback_simulate_remote_p2_action->setVisible(is_hosting);
 #ifdef HAS_LIBMGBA
   m_hide_remote_gbas_action->setVisible(is_hosting);
 #else
@@ -862,7 +888,7 @@ void NetPlayDialog::OnMsgChangeGame(const NetPlay::SyncIdentifier& sync_identifi
                                     const std::string& netplay_name)
 {
   QString qname = QString::fromStdString(netplay_name);
-  QueueOnObject(this, [this, qname, netplay_name, &sync_identifier] {
+  QueueOnObject(this, [this, qname, netplay_name, sync_identifier] {
     m_game_button->setText(qname);
     m_current_game_identifier = sync_identifier;
     m_current_game_name = netplay_name;
@@ -969,9 +995,7 @@ void NetPlayDialog::OnMinimumPadBufferChanged(u32 buffer)
     const QSignalBlocker blocker(m_minimum_buffer_size_box);
     m_minimum_buffer_size_box->setValue(buffer);
   });
-  DisplayMessage(m_host_input_authority ? tr("Max buffer size changed to %1").arg(buffer) :
-                                          tr("Minimum buffer size changed to %1").arg(buffer),
-                 "darkcyan");
+  DisplayMessage(tr("Rollback window changed to %1 frames").arg(buffer), "darkcyan");
 
   m_minimum_buffer_size = static_cast<int>(buffer);
 }
@@ -982,9 +1006,7 @@ void NetPlayDialog::OnPlayerPadBufferChanged(u32 buffer)
     const QSignalBlocker blocker(m_player_buffer_size_box);
     m_player_buffer_size_box->setValue(buffer);
   });
-  DisplayMessage(m_host_input_authority ? tr("Max buffer size changed to %1").arg(buffer) :
-                                          tr("Player buffer size changed to %1").arg(buffer),
-                 "darkcyan");
+  DisplayMessage(tr("Input delay changed to %1 frames").arg(buffer), "darkcyan");
 
   m_player_buffer_size = static_cast<int>(buffer);
 }
@@ -995,31 +1017,13 @@ void NetPlayDialog::OnHostInputAuthorityChanged(bool enabled)
   DisplayMessage(enabled ? tr("Host input authority enabled") : tr("Host input authority disabled"),
                  "");
 
-  QueueOnObject(this, [this, enabled] {
+  QueueOnObject(this, [this] {
     const bool is_hosting = IsHosting();
-    const bool enable_buffer = is_hosting != enabled;
-
-    if (is_hosting)
-    {
-      m_minimum_buffer_size_box->setEnabled(enable_buffer);
-      m_minimum_buffer_label->setEnabled(enable_buffer);
-      m_minimum_buffer_size_box->setHidden(false);
-      m_minimum_buffer_label->setHidden(false);
-    }
-    else
-    {
-      m_minimum_buffer_size_box->setEnabled(true);
-      m_minimum_buffer_label->setEnabled(true);
-      m_minimum_buffer_size_box->setHidden(!enable_buffer);
-      m_minimum_buffer_label->setHidden(!enable_buffer);
-    }
-
-    m_minimum_buffer_label->setText(enabled ? tr("Max Buffer:") : tr("Minimum Buffer:"));
-    if (enabled)
-    {
-      const QSignalBlocker blocker(m_minimum_buffer_size_box);
-      m_minimum_buffer_size_box->setValue(Config::Get(Config::NETPLAY_CLIENT_BUFFER_SIZE));
-    }
+    m_minimum_buffer_size_box->setEnabled(is_hosting);
+    m_minimum_buffer_label->setEnabled(is_hosting);
+    m_minimum_buffer_size_box->setHidden(!is_hosting);
+    m_minimum_buffer_label->setHidden(!is_hosting);
+    m_minimum_buffer_label->setText(tr("Rollback Frames:"));
   });
 }
 
@@ -1184,8 +1188,8 @@ std::string NetPlayDialog::FindGBARomPath(const std::array<u8, 20>& hash, std::s
 
 void NetPlayDialog::LoadSettings()
 {
-  const int minimum_buffer_size = Config::Get(Config::NETPLAY_MINIMUM_BUFFER_SIZE);
-  const int player_buffer_size = Config::Get(Config::NETPLAY_PLAYER_BUFFER_SIZE);
+  const int minimum_buffer_size = Config::Get(Config::NETPLAY_ROLLBACK_FRAMES);
+  const int player_buffer_size = Config::Get(Config::NETPLAY_ROLLBACK_INPUT_DELAY);
   const bool savedata_load = Config::Get(Config::NETPLAY_SAVEDATA_LOAD);
   const bool savedata_write = Config::Get(Config::NETPLAY_SAVEDATA_WRITE);
   const bool sync_all_wii_saves = Config::Get(Config::NETPLAY_SAVEDATA_SYNC_ALL_WII);
@@ -1196,6 +1200,10 @@ void NetPlayDialog::LoadSettings()
   const bool hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   const bool brawlmusic_off = Config::Get(Config::NETPLAY_BRAWL_MUSIC_OFF);
   const bool spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);
+  const bool rollback_debug_p2_cstick =
+      Config::Get(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK);
+  const bool rollback_simulate_remote_p2 =
+      Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2);
 
   m_minimum_buffer_size_box->setValue(minimum_buffer_size);
   m_player_buffer_size_box->setValue(player_buffer_size);
@@ -1216,6 +1224,8 @@ void NetPlayDialog::LoadSettings()
 
   m_brawlmusic_off->setChecked(brawlmusic_off);
   m_spectator_mode->setChecked(spectator_mode);
+  m_rollback_debug_p2_cstick_action->setChecked(rollback_debug_p2_cstick);
+  m_rollback_simulate_remote_p2_action->setChecked(rollback_simulate_remote_p2);
 
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
 
@@ -1242,10 +1252,8 @@ void NetPlayDialog::SaveSettings()
 {
   Config::ConfigChangeCallbackGuard config_guard;
 
-  if (m_host_input_authority)
-    Config::SetBase(Config::NETPLAY_CLIENT_BUFFER_SIZE, m_minimum_buffer_size_box->value());
-  else
-    (m_minimum_buffer_size_box->value());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_FRAMES, m_minimum_buffer_size_box->value());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_INPUT_DELAY, m_player_buffer_size_box->value());
 
   const bool write_savedata = m_savedata_load_and_write_action->isChecked();
   const bool load_savedata = write_savedata || m_savedata_load_only_action->isChecked();
@@ -1261,6 +1269,10 @@ void NetPlayDialog::SaveSettings()
   Config::SetBase(Config::NETPLAY_HIDE_REMOTE_GBAS, m_hide_remote_gbas_action->isChecked());
   Config::SetBase(Config::NETPLAY_BRAWL_MUSIC_OFF, m_brawlmusic_off->isChecked());
   Config::SetBase(Config::NETPLAY_SPECTATOR_MODE, m_spectator_mode->isChecked());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK,
+                  m_rollback_debug_p2_cstick_action->isChecked());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2,
+                  m_rollback_simulate_remote_p2_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())

@@ -25,6 +25,7 @@
 #include "Core/IOS/Device.h"
 #include "Core/IOS/IOS.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/Cow.h"
 #include "Core/System.h"
 #include "Core/WC24PatchEngine.h"
 
@@ -679,6 +680,8 @@ void WiiSocket::Update(bool read, bool write, bool except)
           socklen_t addrlen = sizeof(sockaddr_in);
           auto* from = BufferOutSize2 ? reinterpret_cast<sockaddr*>(&local_name) : nullptr;
           socklen_t* fromlen = BufferOutSize2 ? &addrlen : nullptr;
+          // Guest RAM, which recvfrom fills without faulting.
+          Rollback::Cow::PrepareHostWrite(data, static_cast<std::size_t>(std::max(data_len, 0)));
           const int ret = recvfrom(fd, data, data_len, flags, from, fromlen);
           ReturnValue = m_socket_manager.GetNetErrorCode(
               ret, BufferOutSize2 ? "SO_RECVFROM" : "SO_RECV", true);

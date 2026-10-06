@@ -23,6 +23,7 @@
 #include "Core/Core.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/Fifo.h"
@@ -390,13 +391,51 @@ void CoreTimingManager::Advance()
 TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)
 {
   const s64 elapsed_cycles = target_cycle - m_throttle_reference_cycle;
+  // Apply rollback timesync scale: scale > 1.0 speeds up (shorter wait), < 1.0 slows down.
+  const double effective_clock =
+      static_cast<double>(m_throttle_adj_clock_per_sec) * m_timesync_scale;
+  const auto scaled_duration =
+      Clock::duration{std::chrono::seconds{elapsed_cycles}} / effective_clock;
   return m_throttle_reference_time +
-         Clock::duration{std::chrono::seconds{elapsed_cycles}} / m_throttle_adj_clock_per_sec;
+         Clock::duration{static_cast<s64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             scaled_duration).count())};
 }
 
 bool CoreTimingManager::IsSpeedUnlimited() const
 {
-  return m_throttle_adj_clock_per_sec == 0 || Core::GetIsThrottlerTempDisabled();
+  // Orca: frames re-run after a rollback load catch up to the present as fast as possible.
+  return m_throttle_adj_clock_per_sec == 0 || Core::GetIsThrottlerTempDisabled() ||
+         Rollback::IsResimulating();
+}
+
+std::pair<s64, TimePoint> CoreTimingManager::GetThrottleReference() const
+{
+  return {m_throttle_reference_cycle, m_throttle_reference_time};
+}
+
+void CoreTimingManager::SetThrottleReference(const std::pair<s64, TimePoint>& reference)
+{
+  m_throttle_reference_cycle = reference.first;
+  m_throttle_reference_time = reference.second;
+}
+
+void CoreTimingManager::ResetThrottleToNow()
+{
+  ResetThrottle(static_cast<s64>(GetTicks()));
+}
+
+void CoreTimingManager::SetTimesyncScale(float scale)
+{
+  const float clamped_scale = std::clamp(scale, 0.97f, 1.03f);
+  if (clamped_scale == m_timesync_scale)
+    return;
+
+  // Re-anchor before changing the divisor. Otherwise the new scale retroactively shifts the
+  // target for every cycle since the old reference and creates an increasing timing jump.
+  const s64 current_cycle = static_cast<s64>(GetTicks());
+  m_throttle_reference_time = CalculateTargetHostTimeInternal(current_cycle);
+  m_throttle_reference_cycle = current_cycle;
+  m_timesync_scale = clamped_scale;
 }
 
 TimePoint CoreTimingManager::GetTargetHostTime(s64 target_cycle)
@@ -469,8 +508,12 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
     const s64 sec_adj = (target_cycle - m_throttle_reference_cycle) / m_throttle_adj_clock_per_sec;
     const s64 cycle_adj = sec_adj * m_throttle_adj_clock_per_sec;
 
+    // Carry the scaled target forward. Advancing host time by an unscaled second here erases the
+    // accumulated GekkoNet pacing correction at every reference rollover.
+    const TimePoint adjusted_reference_time =
+        CalculateTargetHostTimeInternal(m_throttle_reference_cycle + cycle_adj);
     m_throttle_reference_cycle += cycle_adj;
-    m_throttle_reference_time += std::chrono::seconds{sec_adj};
+    m_throttle_reference_time = adjusted_reference_time;
   }
 
   TimePoint target_time = CalculateTargetHostTimeInternal(target_cycle);

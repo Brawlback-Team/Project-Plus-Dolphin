@@ -4,9 +4,11 @@
 #include "Core/NetPlayServer.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -97,6 +99,7 @@ NetPlayServer::~NetPlayServer()
     if (m_chunked_data_thread.joinable())
       m_chunked_data_thread.join();
     m_thread.join();
+    Common::ENet::UnregisterRollbackSocket(m_server);
     enet_host_destroy(m_server);
 
     if (Common::g_MainNetHost.get() == m_server)
@@ -164,10 +167,12 @@ NetPlayServer::NetPlayServer(const u16 port, const bool forward_port, NetPlayUI*
   }
   if (m_server != nullptr)
   {
+    Common::ENet::RegisterRollbackSocket(m_server, true);
     is_connected = true;
     m_do_loop = true;
     m_thread = std::thread(&NetPlayServer::ThreadFunc, this);
-    m_minimum_buffer_size = 3;
+    // Shared GekkoNet prediction/maximum rollback window.
+    m_minimum_buffer_size = Config::Get(Config::NETPLAY_ROLLBACK_FRAMES);
     m_chunked_data_thread = std::thread(&NetPlayServer::ChunkedDataThreadFunc, this);
 
 #ifdef USE_UPNP
@@ -448,7 +453,9 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
   Client new_player{};
   new_player.pid = GiveFirstAvailableIDTo(incoming_connection);
   new_player.socket = incoming_connection;
-  new_player.buffer = m_minimum_buffer_size;
+  // Input delay is per player and independent of the shared rollback window. The player sends its
+  // configured value through PadBufferPlayer after joining.
+  new_player.buffer = 0;
 
   received_packet >> new_player.revision;
   received_packet >> new_player.name;
@@ -482,8 +489,7 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
     Send(new_player.socket, send_packet);
   }
 
-  if (!m_host_input_authority)
-    SendResponseToPlayer(new_player, MessageID::PadBufferMinimum, m_minimum_buffer_size);
+  SendResponseToPlayer(new_player, MessageID::PadBufferMinimum, m_minimum_buffer_size);
 
   SendResponseToPlayer(new_player, MessageID::HostInputAuthority, m_host_input_authority);
 
@@ -692,16 +698,12 @@ void NetPlayServer::AdjustMinimumPadBufferSize(unsigned int size)
 
   m_minimum_buffer_size = size;
 
-  // not needed on clients with host input authority
-  if (!m_host_input_authority)
-  {
-    // tell clients to change buffer size
-    sf::Packet spac;
-    spac << MessageID::PadBufferMinimum;
-    spac << m_minimum_buffer_size;
-
-    SendAsyncToClients(std::move(spac));
-  }
+  // This packet now carries the shared GekkoNet rollback window and is independent of Dolphin's
+  // legacy host-input-authority mode.
+  sf::Packet spac;
+  spac << MessageID::PadBufferMinimum;
+  spac << m_minimum_buffer_size;
+  SendAsyncToClients(std::move(spac));
 }
 
 void NetPlayServer::SetHostInputAuthority(const bool enable)
@@ -1754,6 +1756,19 @@ bool NetPlayServer::StartGame()
   for (size_t i = 0; i < sizeof(m_settings.sram); ++i)
     spac << m_settings.sram[i];
 
+  // GekkoNet shares the existing ENet UDP socket. These are the exact peer endpoints observed by
+  // that socket, including the NAT-mapped port established by Dolphin traversal.
+  spac << static_cast<u8>(m_players.size());
+  for (const Client& client : std::views::values(m_players))
+  {
+    std::array<char, 64> address{};
+    if (enet_address_get_host_ip(&client.socket->address, address.data(), address.size()) != 0)
+    {
+      ERROR_LOG_FMT(NETPLAY, "GekkoNet: failed to resolve native address for player {}", client.pid);
+    }
+    spac << client.pid << std::string(address.data()) << client.socket->address.port;
+  }
+
   SendAsyncToClients(std::move(spac));
 
   m_start_pending = false;
@@ -2336,15 +2351,8 @@ void NetPlayServer::AssignNewUserAPad(const Client& player)
       break;
     }
   }
-  for (PlayerId& mapping : m_wiimote_map)
-  {
-    // 0 means unmapped
-    if (mapping == 0)
-    {
-      mapping = player.pid;
-      break;
-    }
-  }
+  // Do not auto-assign a Wii Remote slot. Rollback carries GC pads only, and an implicit Wiimote
+  // mapping forced emulated Wii Remotes on even when the user's input config had none.
 }
 
 PlayerId NetPlayServer::GiveFirstAvailableIDTo(ENetPeer* player)

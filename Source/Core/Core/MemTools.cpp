@@ -10,6 +10,7 @@
 
 #include "Core/MachineContext.h"
 #include "Core/PowerPC/JitInterface.h"
+#include "Core/Rollback/Cow.h"
 #include "Core/System.h"
 
 #if defined(__FreeBSD__) || defined(__NetBSD__)
@@ -61,6 +62,11 @@ static LONG NTAPI Handler(PEXCEPTION_POINTERS pPtrs)
     // virtual address of the inaccessible data
     uintptr_t fault_address = (uintptr_t)pPtrs->ExceptionRecord->ExceptionInformation[1];
     SContext* ctx = pPtrs->ContextRecord;
+
+    // A write to guest RAM that a rollback snapshot protected: the page is writable again and the
+    // write runs again. Before the JIT, which would backpatch a fastmem write it doesn't own.
+    if (access_type == 1 && Rollback::Cow::HandleFault(fault_address))
+      return EXCEPTION_CONTINUE_EXECUTION;
 
     if (Core::System::GetInstance().GetJitInterface().HandleFault(fault_address, ctx))
     {
@@ -118,6 +124,11 @@ void UninstallExceptionHandler()
 bool IsExceptionHandlerSupported()
 {
   return true;
+}
+
+void InstallCowFallbackHandler()
+{
+  // The vectored handler sees every thread's faults.
 }
 
 #elif defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
@@ -361,6 +372,10 @@ void UninstallExceptionHandler()
 bool IsExceptionHandlerSupported()
 {
   return false;
+}
+
+void InstallCowFallbackHandler()
+{
 }
 
 #endif
