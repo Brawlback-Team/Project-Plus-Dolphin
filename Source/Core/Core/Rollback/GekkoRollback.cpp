@@ -42,12 +42,14 @@
 #include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
+#include "InputCommon/GCAdapter.h"
 
 namespace Rollback
 {
 namespace
 {
-constexpr u16 PAD_WIRE_BUTTONS = 0x1F7F;
+// All physical controller buttons plus the adapter's synchronized calibration event.
+constexpr u16 PAD_WIRE_BUTTONS = 0x1F7F | PAD_GET_ORIGIN;
 constexpr int MAX_PORTS = 4;
 // Gekko exposes up to 10 rollback frames in the lobby. Keep two additional snapshots so the
 // current and confirmed boundary states cannot alias the oldest rollback state in the ring.
@@ -647,7 +649,16 @@ static void SubmitLocalInput()
   // Like Dolphin NetPlay, each client maps its first configured local pad to its assigned slot.
   // Using local_player - 1 here made player 2 read GCPad2 even though its controller is GCPad1.
   constexpr int LOCAL_PAD = 0;
-  GCPadStatus local_status = Pad::GetStatus(LOCAL_PAD);
+  GCPadStatus local_status;
+  if (Config::Get(Config::GetInfoForSIDevice(LOCAL_PAD)) ==
+      SerialInterface::SIDEVICE_WIIU_ADAPTER)
+  {
+    local_status = GCAdapter::Input(LOCAL_PAD);
+  }
+  else
+  {
+    local_status = Pad::GetStatus(LOCAL_PAD);
+  }
   if (g_manager.debug_p2_cstick && g_manager.local_player == 2)
     ApplyDebugCStickPattern(&local_status, g_manager.local_input_frame);
   WirePad wire = EncodePad(local_status);
