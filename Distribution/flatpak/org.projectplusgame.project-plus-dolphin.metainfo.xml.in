@@ -20,6 +20,7 @@
 		<id>org.projectplusgame.project-plus-dolphin.desktop</id>
 	</provides>
 	<releases>
+		<release version="3.2.0" date="2026-8-5"/>
 		<release version="3.1.5" date="2025-10-12"/>
 		<release version="3.1.2" date="2025-05-02"/>
 		<release version="3.1.1" date="2025-05-02"/>

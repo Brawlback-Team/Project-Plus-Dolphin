@@ -3,16 +3,16 @@
 
 #include "VideoCommon/ShaderCompileUtils.h"
 
-#include <fstream>
 #include <ranges>
+#include <utility>
 
 #include "Common/FileUtil.h"
 #include "Common/StringUtil.h"
 
 namespace VideoCommon
 {
-ShaderIncluder::ShaderIncluder(const std::string& user_path, const std::string& system_path)
-    : m_root_user_path(user_path), m_root_system_path(system_path)
+ShaderIncluder::ShaderIncluder(std::string user_path, std::string system_path)
+    : m_root_user_path(std::move(user_path)), m_root_system_path(std::move(system_path))
 {
 }
 

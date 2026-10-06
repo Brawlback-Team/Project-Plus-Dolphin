@@ -5,10 +5,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
-#include "Common/Thread.h"
 
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
@@ -19,7 +19,6 @@
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/XFMemory.h"
-#include "VideoCommon/XFStructs.h"
 
 class FifoRecorder::FifoRecordAnalyzer : public OpcodeDecoder::Callback
 {
@@ -248,7 +247,7 @@ void FifoRecorder::StartRecording(s32 numFrames, CallbackFunc finishedCb)
   }
 
   m_RequestedRecordingEnd = false;
-  m_FinishedCb = finishedCb;
+  m_FinishedCb = std::move(finishedCb);
 
   m_end_of_frame_event =
       m_system.GetVideoEvents().after_frame_event.Register([this](const Core::System& system) {

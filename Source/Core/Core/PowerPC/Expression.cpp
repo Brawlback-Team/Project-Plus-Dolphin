@@ -5,8 +5,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
-#include <fmt/format.h>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -101,8 +100,7 @@ static double CallstackFunc(expr_func* f, vec_expr_t* args, void* c)
   const char* cstr = expr_get_str(&vec_nth(args, 0));
   if (cstr != nullptr)
   {
-    return std::ranges::any_of(
-        stack, [cstr](const auto& s) { return s.Name.find(cstr) != std::string::npos; });
+    return std::ranges::any_of(stack, [cstr](const auto& s) { return s.Name.contains(cstr); });
   }
 
   return 0;

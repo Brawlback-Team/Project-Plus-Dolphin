@@ -333,7 +333,6 @@ void OnScreenUI::DrawDebugText()
   if (!profile_output.empty())
     ImGui::TextUnformatted(profile_output.c_str());
 
-  // P+ change: warn if adapter is being read at reduced rate
   if (GCAdapter::IsReadingAtReducedRate() && Config::Get(Config::MAIN_SHOW_ADAPTER_WARNING))
   {
     ImGui::TextWrapped(
@@ -437,7 +436,8 @@ void OnScreenUI::Finalize()
 {
   auto lock = GetImGuiLock();
 
-  g_perf_metrics.DrawImGuiStats(m_backbuffer_scale);
+  auto& perf_metrics = Core::System::GetInstance().GetPerfMetrics();
+  perf_metrics.DrawImGuiStats(m_backbuffer_scale);
   DrawDebugText();
   OSD::DrawMessages();
   DrawChallengesAndLeaderboards();

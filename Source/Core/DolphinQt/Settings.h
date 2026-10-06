@@ -11,9 +11,9 @@
 #include <QSettings>
 
 #include "Common/Config/Config.h"
+#include "Common/HookableEvent.h"
 #include "Core/Config/MainSettings.h"
 #include "DiscIO/Enums.h"
-#include "InputCommon/ControllerInterface/ControllerInterface.h"
 
 namespace Core
 {
@@ -102,7 +102,7 @@ public:
   bool GetPreferredView() const;
   void SetPreferredView(bool list);
   QString GetDefaultGame() const;
-  void SetDefaultGame(QString path);
+  void SetDefaultGame(const QString& path);
   QString GetLauncherPath() const;
   void SetLauncherPath(QString path);
   void RefreshGameList();
@@ -112,6 +112,8 @@ public:
   void ReloadTitleDB();
   bool IsAutoRefreshEnabled() const;
   void SetAutoRefreshEnabled(bool enabled);
+  bool IsGameCountVisible() const;
+  void SetGameCountVisible(bool visible);
 
   // Emulation
   int GetStateSlot() const;
@@ -174,8 +176,10 @@ public:
   bool IsJITVisible() const;
   void SetAssemblerVisible(bool enabled);
   bool IsAssemblerVisible() const;
+  void SetShowDemangledNames(bool enabled);
+  bool IsShowDemangledNames() const;
   QFont GetDebugFont() const;
-  void SetDebugFont(QFont font);
+  void SetDebugFont(const QFont& font);
 
   // Auto-Update
   QString GetAutoUpdateTrack() const;
@@ -218,6 +222,7 @@ signals:
   void WatchVisibilityChanged(bool visible);
   void BreakpointsVisibilityChanged(bool visible);
   void CodeVisibilityChanged(bool visible);
+  void ShowDemangledNamesChanged(bool enabled);
   void MemoryVisibilityChanged(bool visible);
   void NetworkVisibilityChanged(bool visible);
   void JITVisibilityChanged(bool visible);
@@ -231,6 +236,7 @@ signals:
   void DevicesChanged();
   void WiiSpeakMuteChanged(bool muted);
   void EnableGfxModsChanged(bool enabled);
+  void GameCountVisibilityChanged(bool visible);
 
 private:
   Settings();

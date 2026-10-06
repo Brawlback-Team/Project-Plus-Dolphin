@@ -7,7 +7,7 @@ if(GIT_FOUND)
       OUTPUT_VARIABLE DOLPHIN_WC_REVISION
       OUTPUT_STRIP_TRAILING_WHITESPACE)
   # defines DOLPHIN_WC_DESCRIBE
-  execute_process(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} describe --always --long # --dirty # removed from here while we're using a patch for SDL; will likely be fixed in the future 
+  execute_process(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} describe --always --long --dirty
       OUTPUT_VARIABLE DOLPHIN_WC_DESCRIBE
       OUTPUT_STRIP_TRAILING_WHITESPACE)
 
@@ -33,7 +33,7 @@ endif()
 string(TIMESTAMP DOLPHIN_WC_BUILD_DATE "%Y-%m-%d" UTC)
 
 # version number
-set(DOLPHIN_VERSION_MAJOR "v3.1.5")
+set(DOLPHIN_VERSION_MAJOR "v3.2.1")
 set(DOLPHIN_VERSION_MINOR "0")
 set(DOLPHIN_VERSION_PATCH ${DOLPHIN_WC_REVISION})
 

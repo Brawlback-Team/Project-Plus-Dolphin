@@ -1,22 +1,9 @@
 ########################################
 # General setup
 #
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.20...4.2.1)
 
-cmake_policy(SET CMP0079 NEW) # let target_link_libraries() link to a target defined in a different directory
 cmake_policy(SET CMP0080 OLD) # allow using BundleUtilities at configure time
-
-if (POLICY CMP0099)
-  cmake_policy(SET CMP0099 NEW) # Propagate INTERFACE_LINK_OPTIONS from private dependencies, used by MacOS framework builds of SDL
-endif()
-
-# Weird chicken-and-egg problem: We can't check the compiler before the project() call, but we have to set the policies before it.
-# So we do this in two steps: Set the policies if they exist, then error out afterwards if we end up being MSVC and they don't exist.
-if (POLICY CMP0117)
-  cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction.
-  cmake_policy(SET CMP0092 NEW) # MSVC warning flags are not in CMAKE_{C,CXX}_FLAGS by default.
-  cmake_policy(SET CMP0117 NEW) # MSVC RTTI flag will not be added by default.
-endif()
 
 if (POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW) # MSVC debug information format flags are selected by an abstraction.
@@ -35,12 +22,6 @@ if (CMAKE_VERSION VERSION_LESS "3.25" AND CMAKE_SYSTEM_NAME MATCHES "Linux")
 endif()
 
 if (MSVC)
-  if (POLICY CMP0117)
-    # cmake is a weird language. You can't do if(not POLICY)
-  else()
-    message(FATAL_ERROR "Please update to CMake 3.20 or higher.")
-  endif()
-
   set(CMAKE_C_STANDARD 99)
   set(CMAKE_CXX_STANDARD 23)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,12 +32,12 @@ if (COMPILER STREQUAL "GNU")
   set(COMPILER "GCC") # prefer printing GCC instead of GNU
 endif()
 
-# Enforce minimum compiler versions that support the c++20 features we use
-set (GCC_min_version 11)
-set (Clang_min_version 14)
+# Enforce minimum compiler versions that support the c++23 features we use
+set (GCC_min_version 12)
+set (Clang_min_version 15)
 set (AppleClang_min_version 14.0.3)
-set (min_xcode_version "14.0") # corresponding xcode version for AppleClang_min_version
-set (MSVC_min_version 14.32)
+set (min_xcode_version "14.3") # corresponding xcode version for AppleClang_min_version
+set (MSVC_min_version 19.32)
 set (min_vs_version "2022 17.2.3") # corresponding Visual Studio version for MSVC_min_version
 
 message(STATUS "Using ${COMPILER} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -143,7 +124,7 @@ if(APPLE)
   enable_language(OBJC)
   enable_language(OBJCXX)
   option(MACOS_USE_DEFAULT_SEARCH_PATH "Don't prioritize system library paths" OFF)
-  option(SKIP_POSTPROCESS_BUNDLE "Skip postprocessing bundle for redistributability" OFF)
+  option(POSTPROCESS_BUNDLE "Postprocess bundle for redistributability" OFF)
   # Enable adhoc code signing by default (otherwise makefile builds on ARM will not work)
   option(MACOS_CODE_SIGNING "Enable codesigning" ON)
   option(USE_BUNDLED_MOLTENVK "Build MoltenVK from Externals with Dolphin-specific patches" ON)
@@ -229,11 +210,11 @@ if(ENABLE_GENERIC)
   message(STATUS "Warning! Building generic build!")
   set(_M_GENERIC 1)
   add_definitions(-D_M_GENERIC=1)
-elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x64|x86_64|amd64|AMD64")
   set(_M_X86_64 1)
   add_definitions(-D_M_X86_64=1)
   check_and_add_flag(HAVE_SSE2 -msse2)
-elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+elseif(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
   set(_M_ARM_64 1)
   add_definitions(-D_M_ARM_64=1)
   # CRC instruction set is used in the CRC32 hash function
@@ -363,7 +344,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   set(CMAKE_XCODE_ATTRIBUTE_GCC_STRICT_ALIASING NO)
 
   # Specify target CPUs.
-  if(_ARCH_64 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+  if(_ARCH_64 AND _M_X86_64)
     check_and_add_flag(HAVE_MSSSE3 -mssse3)
     check_and_add_flag(HAVE_ARCH_CORE2 -march=core2)
   endif()
@@ -390,15 +371,13 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
 endif()
 
 if(ENABLE_LTO)
-  if(CMAKE_C_COMPILER_ID MATCHES "MSVC")
-    add_compile_options(/GL)
-    string(APPEND CMAKE_EXE_LINKER_FLAGS " /LTCG")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT supported OUTPUT error)
+
+  if(supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
   else()
-    check_and_add_flag(LTO -flto)
-    if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-      set(CMAKE_AR gcc-ar)
-      set(CMAKE_RANLIB gcc-ranlib)
-    endif()
+    message(STATUS "IPO / LTO not supported: <${error}>")
   endif()
 endif()
 
@@ -597,10 +576,6 @@ if(UNIX)
   add_definitions(-DUSE_MEMORYWATCHER=1)
 endif()
 
-if(ENABLE_SDL)
-  dolphin_find_optional_system_library(SDL3 Externals/SDL 3.2.0)
-endif()
-
 if(ENABLE_ANALYTICS)
   message(STATUS "Enabling analytics collection (subject to end-user opt-in)")
   add_definitions(-DUSE_ANALYTICS=1)
@@ -668,9 +643,16 @@ if(ENABLE_VULKAN)
   endif()
 endif()
 
-if(NOT WIN32 OR (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")))
+if(NOT (WIN32 AND _M_ARM_64))
   # OpenGL is available on all platforms except windows-arm64
   add_definitions(-DHAS_OPENGL)
+endif()
+
+if(NOT WIN32)
+  if(ANDROID)
+    set(USE_SYSTEM_Iconv OFF)
+  endif()
+  dolphin_find_optional_system_library(Iconv Externals/libiconv 1.14)
 endif()
 
 dolphin_find_optional_system_library(pugixml Externals/pugixml)
@@ -690,14 +672,14 @@ dolphin_find_optional_system_library_pkgconfig(ZSTD libzstd>=1.4.0 zstd::zstd Ex
 dolphin_find_optional_system_library_pkgconfig(ZLIB zlib>=1.3.1 ZLIB::ZLIB Externals/zlib-ng)
 
 dolphin_find_optional_system_library_pkgconfig(minizip-ng
-  "minizip-ng>=4.0.4" minizip-ng::minizip-ng Externals/minizip-ng
+  "minizip-ng>=4.0.4" MINIZIP::minizip-ng Externals/minizip-ng
 )
 
 dolphin_find_optional_system_library(LZO Externals/LZO)
 
 dolphin_find_optional_system_library_pkgconfig(lz4 liblz4>=1.8 LZ4::LZ4 Externals/lz4)
 
-dolphin_find_optional_system_library_pkgconfig(SPNG spng spng::spng Externals/libspng)
+dolphin_add_bundled_library(SPNG AUTO Externals/libspng)
 
 # Using static FreeSurround from Externals
 # There is no system FreeSurround library.
@@ -716,10 +698,12 @@ if(ENABLE_CUBEB)
 endif()
 
 if(NOT ANDROID)
-  dolphin_find_optional_system_library_pkgconfig(
-    LibUSB libusb-1.0 LibUSB::LibUSB Externals/libusb
-  )
+  dolphin_find_optional_system_library(LibUSB Externals/libusb)
   add_definitions(-D__LIBUSB__)
+endif()
+
+if(ENABLE_SDL)
+  dolphin_find_optional_system_library(SDL3 Externals/SDL 3.2.0)
 endif()
 
 dolphin_find_optional_system_library(SFML Externals/SFML 3.0 COMPONENTS Network System)
@@ -733,15 +717,6 @@ dolphin_find_optional_system_library(MBEDTLS Externals/mbedtls 2.28)
 
 dolphin_find_optional_system_library(CURL Externals/curl)
 
-if(NOT WIN32)
-  if(NOT ANDROID)
-    dolphin_find_optional_system_library(Iconv Externals/libiconv 1.14)
-  else()
-    message(STATUS "Using static iconv from Externals")
-    add_subdirectory(Externals/libiconv EXCLUDE_FROM_ALL)
-  endif()
-endif()
-
 if(NOT ANDROID)
   dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
 endif()
@@ -752,9 +727,6 @@ if(USE_DISCORD_PRESENCE)
   include_directories(Externals/discord-rpc/include)
 endif()
 
-if(NOT ENABLE_QT)
-  set(USE_MGBA 0)
-endif()
 if(USE_MGBA)
   dolphin_find_optional_system_library(LIBMGBA Externals/mGBA 0.11)
 endif()
@@ -768,7 +740,7 @@ else()
 endif()
 
 if (WIN32)
-  include_directories(Externals/WIL/include)
+  include_directories(Externals/wil/include)
   include_directories(Externals/OpenAL/include)
 endif()
 
@@ -776,18 +748,18 @@ include_directories(Externals/picojson)
 
 add_subdirectory(Externals/expr)
 
-add_subdirectory(Externals/rangeset)
-
 add_subdirectory(Externals/FatFs)
 
 if (USE_RETRO_ACHIEVEMENTS)
-	add_subdirectory(Externals/rcheevos)
+  add_subdirectory(Externals/rcheevos)
 endif()
 
 add_subdirectory(Externals/watcher)
 
-if(WIN32 OR LINUX)
+# Any other platform or BSD is currently unsupported by cpp-ipc
+if(WIN32 OR LINUX OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "QNX")
   add_subdirectory(Externals/cpp-ipc)
+  add_definitions(-DHAVE_CPPIPC)
 endif()
 
 ########################################
@@ -800,7 +772,7 @@ file(REMOVE "${PROJECT_SOURCE_DIR}/Source/Core/Common/scmrev.h")
 
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Source/Core/Common)
 if (NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/Source/Core/Common/scmrev.h)
-	file(TOUCH ${CMAKE_CURRENT_BINARY_DIR}/Source/Core/Common/scmrev.h)
+  file(TOUCH ${CMAKE_CURRENT_BINARY_DIR}/Source/Core/Common/scmrev.h)
 endif()
 
 if(APPLE)
@@ -812,7 +784,7 @@ endif()
 
 find_package(Git)
 if(NOT GIT_FOUND)
-	set(GIT_EXECUTABLE "")
+  set(GIT_EXECUTABLE "")
 endif()
 add_custom_target(
 	dolphin_scmrev
@@ -856,7 +828,8 @@ if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|Windows")
   install(DIRECTORY Data/user/ DESTINATION ${datadir}/user PATTERN)
 endif()
 if(NOT CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD|Darwin")
-  install(FILES Data/license.txt DESTINATION ${datadir})
+  install(FILES COPYING DESTINATION ${datadir})
+  install(DIRECTORY LICENSES DESTINATION ${datadir}/LICENSES PATTERN)
 endif()
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD")
   # Install the application icon and menu item

@@ -1,14 +1,22 @@
-if(POLICY CMP0084)
-  # Disable trying to search for Qt3/4 if what we actually want is not found
-  cmake_policy(SET CMP0084 NEW)
-endif()
+if (WIN32)
+  set(DOLPHIN_QT_X64_ROOT "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.8.3/x64")
+  set(DOLPHIN_QT_ARM64_ROOT "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.8.3/ARM64")
 
-if (MSVC)
   if(_M_ARM_64)
-    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.5.1/ARM64")
+    set(DOLPHIN_QT_ROOT "${DOLPHIN_QT_ARM64_ROOT}")
+    set(DOLPHIN_QT_TARGET_SPEC "win32-arm64-msvc")
   else()
-    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/Externals/Qt/Qt6.5.1/x64")
+    set(DOLPHIN_QT_ROOT "${DOLPHIN_QT_X64_ROOT}")
+    set(DOLPHIN_QT_TARGET_SPEC "win32-msvc")
   endif()
+
+  if(DOLPHIN_HOST STREQUAL "ARM64")
+    set(DOLPHIN_QT_HOST_ROOT "${DOLPHIN_QT_ARM64_ROOT}")
+  else()
+    set(DOLPHIN_QT_HOST_ROOT "${DOLPHIN_QT_X64_ROOT}")
+  endif()
+
+  list(APPEND CMAKE_PREFIX_PATH "${DOLPHIN_QT_ROOT}")
 endif()
 
 set(CMAKE_AUTOMOC ON)
@@ -74,10 +82,14 @@ add_executable(project-plus-dolphin
   Config/ConfigControls/ConfigUserPath.h
   Config/ControllerInterface/ControllerInterfaceWindow.cpp
   Config/ControllerInterface/ControllerInterfaceWindow.h
-  Config/ControllerInterface/DualShockUDPClientAddServerDialog.cpp
-  Config/ControllerInterface/DualShockUDPClientAddServerDialog.h
+  Config/SDLHints/SDLHintsWindow.cpp
+  Config/SDLHints/SDLHintsWindow.h
+  Config/ControllerInterface/DualShockUDPClientEditServerDialog.cpp
+  Config/ControllerInterface/DualShockUDPClientEditServerDialog.h
   Config/ControllerInterface/DualShockUDPClientWidget.cpp
   Config/ControllerInterface/DualShockUDPClientWidget.h
+  Config/ControllerInterface/DualShockUDPSettings.cpp
+  Config/ControllerInterface/DualShockUDPSettings.h
   Config/ControllerInterface/ServerStringValidator.cpp
   Config/ControllerInterface/ServerStringValidator.h
   Config/ControllersPane.cpp
@@ -268,6 +280,8 @@ add_executable(project-plus-dolphin
   FIFO/FIFOAnalyzer.h
   FIFO/FIFOPlayerWindow.cpp
   FIFO/FIFOPlayerWindow.h
+  GameCount.cpp
+  GameCount.h
   GameList/GameList.cpp
   GameList/GameList.h
   GameList/GameListModel.cpp
@@ -383,10 +397,12 @@ add_executable(project-plus-dolphin
   Settings/GeneralPane.h
   Settings/InterfacePane.cpp
   Settings/InterfacePane.h
-	Settings/OnScreenDisplayPane.cpp
-	Settings/OnScreenDisplayPane.h
+  Settings/OnScreenDisplayPane.cpp
+  Settings/OnScreenDisplayPane.h
   Settings/PathPane.cpp
   Settings/PathPane.h
+  Settings/TriforcePane.cpp
+  Settings/TriforcePane.h
   Settings/USBDevicePicker.cpp
   Settings/USBDevicePicker.h
   Settings/WiiPane.cpp
@@ -446,6 +462,7 @@ PRIVATE
   # This Qt version should match Externals/Qt.
   # It disables deprecation warnings we can't fix yet.
   -DQT_WARN_DEPRECATED_UP_TO=0x060501
+  -DSHOW_UPDATER
 )
 
 target_include_directories(project-plus-dolphin
@@ -463,8 +480,15 @@ PRIVATE
   implot
 )
 
+if(ENABLE_SDL)
+  target_link_libraries(project-plus-dolphin
+  PRIVATE
+    SDL3::SDL3
+  )
+endif()
+
 if (NEED_QT_GUI_PRIVATE_COMPONENT)
-  target_link_libraries(dolphin-emu
+  target_link_libraries(project-plus-dolphin
   PRIVATE
     Qt6::GuiPrivate
   )
@@ -528,10 +552,31 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/qt.conf"
   )
 
+  if (ENABLE_AUTOUPDATE)
+    # Copy build_info.txt
+    add_custom_command(TARGET project-plus-dolphin POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/build_info.txt" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
+    )
+  endif()
+
   # Delegate to Qt's official deployment binary on Windows to copy over the necessary Qt-specific libraries, etc.
   get_target_property(MOC_EXECUTABLE_LOCATION Qt6::moc IMPORTED_LOCATION)
   get_filename_component(QT_BINARY_DIRECTORY "${MOC_EXECUTABLE_LOCATION}" DIRECTORY)
-  find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BINARY_DIRECTORY}")
+  find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
+  find_program(QTPATHS_EXE NAMES qtpaths6 qtpaths HINTS "${QT_BINARY_DIRECTORY}" REQUIRED)
+
+  # We don't use target_qt.conf/qtpaths.bat from a Qt build because they use absolute paths.
+  configure_file(
+    "target_qt.conf.in"
+    "${CMAKE_BINARY_DIR}/target_qt.conf"
+    @ONLY
+  )
+  configure_file(
+    "qtpaths.bat.in"
+    "${CMAKE_BINARY_DIR}/qtpaths.bat"
+    @ONLY
+  )
+  set(QTPATHS_SHIM "${CMAKE_BINARY_DIR}/qtpaths.bat")
 
   # Note: We set the PATH for the duration of this command so that the
   #       deployment application is able to locate the Qt libraries to copy.
@@ -549,12 +594,14 @@ if(WIN32)
   #
   add_custom_command(TARGET project-plus-dolphin POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E env PATH="${QT_BINARY_DIRECTORY}"
-            "${WINDEPLOYQT_EXE}" --libdir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+            "${WINDEPLOYQT_EXE}" --qtpaths="${QTPATHS_SHIM}"
+                                 --libdir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
                                  --plugindir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/QtPlugins"
                                  $<IF:$<CONFIG:Debug>,--debug,--release>
                                  --no-translations
                                  --no-compiler-runtime
                                  --no-system-d3d-compiler
+                                 --no-system-dxc-compiler
                                  --no-opengl-sw
                                  "$<TARGET_FILE:project-plus-dolphin>"
   )
@@ -595,20 +642,11 @@ if(GETTEXT_MSGFMT_EXECUTABLE)
       install(FILES ${mo} DESTINATION share/locale/${lang}/LC_MESSAGES)
     endif()
 
-    if(WIN32)
-      add_custom_command(OUTPUT ${mo}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${mo_dir}
-        COMMAND ${GETTEXT_MSGFMT_EXECUTABLE} -o ${mo} ${po}
-        DEPENDS ${po}
-      )
-    else()
-      add_custom_command(OUTPUT ${mo}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${mo_dir}
-        COMMAND ${GETTEXT_MSGMERGE_EXECUTABLE} --quiet --update --backup=none ${po} ${pot_file}
-        COMMAND ${GETTEXT_MSGFMT_EXECUTABLE} -o ${mo} ${po}
-        DEPENDS ${po}
-      )
-    endif()
+    add_custom_command(OUTPUT ${mo}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${mo_dir}
+      COMMAND ${GETTEXT_MSGFMT_EXECUTABLE} -o ${mo} ${po}
+      DEPENDS ${po}
+    )
   endforeach()
 endif()
 
@@ -675,7 +713,7 @@ if(APPLE)
     endif()
   endif()
 
-  if(NOT SKIP_POSTPROCESS_BUNDLE)
+  if(POSTPROCESS_BUNDLE)
     # Update library references to make the bundle portable
     include(DolphinPostprocessBundle)
     dolphin_postprocess_bundle(project-plus-dolphin)

@@ -62,6 +62,8 @@ signals:
   void ChangeDisc();
   void EjectDisc();
   void OpenUserFolder();
+  void OpenConfigFolder();
+  void OpenCacheFolder();
 
   // Emulation
   void Play();
@@ -93,7 +95,9 @@ signals:
   void BootGameCubeIPL(DiscIO::Region region);
   void ShowFIFOPlayer();
   void ShowAboutDialog();
+#ifdef SHOW_UPDATER
   void ShowUpdateDialog();
+#endif  // SHOW_UPDATER
   void ShowCheatsManager();
   void ShowResourcePackManager();
   void ShowSkylanderPortal();
@@ -130,7 +134,7 @@ signals:
   void ExportRecording();
   void ShowTASInput();
 
-  void SelectionChanged(std::shared_ptr<const UICommon::GameFile> game_file);
+  void SelectionChanged(const std::shared_ptr<const UICommon::GameFile>& game_file);
   void RecordingStatusChanged(bool recording);
   void ReadOnlyModeChanged(bool read_only);
 
@@ -194,7 +198,7 @@ private:
   void LogInstructions();
   void SearchInstruction();
 
-  void OnSelectionChanged(std::shared_ptr<const UICommon::GameFile> game_file);
+  void OnSelectionChanged(const std::shared_ptr<const UICommon::GameFile>& game_file);
   void OnRecordingStatusChanged(bool recording);
   void OnReadOnlyModeChanged(bool read_only);
   void OnDebugModeToggled(bool enabled);
@@ -212,6 +216,8 @@ private:
   QAction* m_eject_disc;
   QMenu* m_backup_menu;
   QAction* m_open_user_folder;
+  QAction* m_open_config_folder;
+  QAction* m_open_cache_folder;
 
   // Tools
   QAction* m_wad_install_action;
@@ -224,6 +230,7 @@ private:
   QAction* m_ntscj_ipl;
   QAction* m_ntscu_ipl;
   QAction* m_pal_ipl;
+  QAction* m_dev_ipl;
   QMenu* m_manage_nand_menu;
   QAction* m_import_backup;
   QAction* m_check_nand;
@@ -284,6 +291,7 @@ private:
   QAction* m_jit_block_linking;
   QAction* m_jit_disable_cache;
   QAction* m_jit_disable_fastmem;
+  QAction* m_jit_disable_page_table_fastmem;
   QAction* m_jit_disable_fastmem_arena;
   QAction* m_jit_disable_large_entry_points_map;
   QAction* m_jit_clear_cache;
@@ -305,6 +313,7 @@ private:
   QAction* m_jit_systemregisters_off;
   QAction* m_jit_branch_off;
   QAction* m_jit_register_cache_off;
+  QAction* m_debugger_show_demangled_names;
 
   bool m_game_selected = false;
 

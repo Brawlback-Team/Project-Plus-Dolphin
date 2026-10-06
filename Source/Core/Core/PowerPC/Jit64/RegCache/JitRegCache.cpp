@@ -12,14 +12,11 @@
 #include "Common/Assert.h"
 #include "Common/BitSet.h"
 #include "Common/CommonTypes.h"
-#include "Common/EnumUtils.h"
-#include "Common/MsgHandler.h"
 #include "Common/VariantUtil.h"
 #include "Common/x64Emitter.h"
 #include "Core/PowerPC/Jit64/Jit.h"
 #include "Core/PowerPC/Jit64/RegCache/CachedReg.h"
 #include "Core/PowerPC/Jit64/RegCache/RCMode.h"
-#include "Core/PowerPC/PowerPC.h"
 
 using namespace Gen;
 using namespace PowerPC;
@@ -132,47 +129,6 @@ void RCOpArg::Unlock()
   contents = std::monostate{};
 }
 
-bool RCOpArg::IsImm() const
-{
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
-  {
-    return rc->IsImm(*preg);
-  }
-  else if (std::holds_alternative<u32>(contents))
-  {
-    return true;
-  }
-  return false;
-}
-
-s32 RCOpArg::SImm32() const
-{
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
-  {
-    return rc->SImm32(*preg);
-  }
-  else if (const u32* imm = std::get_if<u32>(&contents))
-  {
-    return static_cast<s32>(*imm);
-  }
-  ASSERT(false);
-  return 0;
-}
-
-u32 RCOpArg::Imm32() const
-{
-  if (const preg_t* preg = std::get_if<preg_t>(&contents))
-  {
-    return rc->Imm32(*preg);
-  }
-  else if (const u32* imm = std::get_if<u32>(&contents))
-  {
-    return *imm;
-  }
-  ASSERT(false);
-  return 0;
-}
-
 RCX64Reg::RCX64Reg() = default;
 
 RCX64Reg::RCX64Reg(RegCache* rc_, preg_t preg) : rc(rc_), contents(preg)
@@ -259,7 +215,7 @@ RCForkGuard::RCForkGuard(RegCache& rc_) : rc(&rc_), m_regs(rc_.m_regs), m_xregs(
 }
 
 RCForkGuard::RCForkGuard(RCForkGuard&& other) noexcept
-    : rc(other.rc), m_regs(std::move(other.m_regs)), m_xregs(std::move(other.m_xregs))
+    : rc(other.rc), m_regs(other.m_regs), m_xregs(other.m_xregs)
 {
   other.rc = nullptr;
 }
@@ -366,7 +322,7 @@ void RegCache::Discard(BitSet32 pregs)
   for (preg_t i : pregs)
   {
     ASSERT_MSG(DYNA_REC, !m_regs[i].IsLocked(), "Someone forgot to unlock PPC reg {} (X64 reg {}).",
-               i, Common::ToUnderlying(RX(i)));
+               i, std::to_underlying(RX(i)));
     ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Register transaction is in progress for {}!",
                i);
 
@@ -374,19 +330,20 @@ void RegCache::Discard(BitSet32 pregs)
   }
 }
 
-void RegCache::Flush(BitSet32 pregs, IgnoreDiscardedRegisters ignore_discarded_registers)
+void RegCache::Flush(BitSet32 pregs, FlushMode mode,
+                     IgnoreDiscardedRegisters ignore_discarded_registers)
 {
   ASSERT_MSG(DYNA_REC, std::ranges::none_of(m_xregs, &X64CachedReg::IsLocked),
              "Someone forgot to unlock a X64 reg");
 
   for (preg_t i : pregs)
   {
-    ASSERT_MSG(DYNA_REC, !m_regs[i].IsLocked(), "Someone forgot to unlock PPC reg {} (X64 reg {}).",
-               i, Common::ToUnderlying(RX(i)));
+    ASSERT_MSG(DYNA_REC, mode != FlushMode::Full || !m_regs[i].IsLocked(),
+               "Someone forgot to unlock PPC reg {} (X64 reg {}).", i, std::to_underlying(RX(i)));
     ASSERT_MSG(DYNA_REC, !m_regs[i].IsRevertable(), "Register transaction is in progress for {}!",
                i);
 
-    StoreFromRegister(i, FlushMode::Full, ignore_discarded_registers);
+    StoreFromRegister(i, mode, ignore_discarded_registers);
   }
 }
 
@@ -451,7 +408,7 @@ BitSet32 RegCache::RegistersInUse() const
 void RegCache::FlushX(X64Reg reg)
 {
   ASSERT_MSG(DYNA_REC, reg < m_xregs.size(), "Flushing non-existent reg {}",
-             Common::ToUnderlying(reg));
+             std::to_underlying(reg));
   ASSERT(!m_xregs[reg].IsLocked());
   if (!m_xregs[reg].IsFree())
   {
@@ -489,7 +446,7 @@ void RegCache::BindToRegister(preg_t i, bool doLoad, bool makeDirty)
                                     [xr](const auto& r) {
                                       return r.IsInHostRegister() && r.GetHostRegister() == xr;
                                     }),
-               "Xreg {} already bound", Common::ToUnderlying(xr));
+               "Xreg {} already bound", std::to_underlying(xr));
 
     m_regs[i].SetInHostRegister(xr, makeDirty);
   }
@@ -505,7 +462,7 @@ void RegCache::BindToRegister(preg_t i, bool doLoad, bool makeDirty)
     DiscardImm(i);
 
   ASSERT_MSG(DYNA_REC, !m_xregs[RX(i)].IsLocked(),
-             "WTF, this reg ({} -> {}) should have been flushed", i, Common::ToUnderlying(RX(i)));
+             "WTF, this reg ({} -> {}) should have been flushed", i, std::to_underlying(RX(i)));
 }
 
 void RegCache::StoreFromRegister(preg_t i, FlushMode mode,
@@ -659,7 +616,7 @@ void RegCache::Realize(preg_t preg)
 
   if (m_constraints[preg].ShouldBeRevertable())
   {
-    StoreFromRegister(preg, FlushMode::MaintainState);
+    StoreFromRegister(preg, FlushMode::Undirty);
     do_bind();
     m_regs[preg].SetRevertable();
     return;

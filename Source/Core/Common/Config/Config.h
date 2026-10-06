@@ -5,7 +5,6 @@
 
 #include <functional>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,6 +59,14 @@ T Get(LayerType layer, const Info<T>& info)
   if (layer == LayerType::Meta)
     return Get(info);
   return GetLayer(layer)->Get(info);
+}
+
+template <typename T>
+T Get(const Layer* game_layer, const Info<T>& setting)
+{
+  if (game_layer != nullptr)
+    return game_layer->Get(setting);
+  return Get(setting);
 }
 
 template <typename T>
@@ -134,6 +141,12 @@ void DeleteKey(LayerType layer, const Info<T>& info)
 {
   if (GetLayer(layer)->DeleteKey(info.GetLocation()))
     OnConfigChanged();
+}
+
+template <typename T>
+bool IsDefaultValue(const Info<T>& info)
+{
+  return Get(info) == info.GetDefaultValue();
 }
 
 // Used to defer OnConfigChanged until after the completion of many config changes.

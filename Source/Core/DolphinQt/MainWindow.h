@@ -31,6 +31,7 @@ class CodeWidget;
 class DiscordHandler;
 class DragEnterEvent;
 class FreeLookWindow;
+class GameCount;
 class GameList;
 class GBATASInputWindow;
 class GCTASInputWindow;
@@ -91,6 +92,8 @@ public:
 
   bool eventFilter(QObject* object, QEvent* event) override;
   QMenu* createPopupMenu() override;
+
+  void ShowTriforceWindow();
 
 signals:
   void ReadOnlyModeChanged(bool read_only);
@@ -171,8 +174,10 @@ private:
   void ShowGraphicsWindow();
   void ShowFreeLookWindow();
   void ShowAboutDialog();
+  #ifdef SHOW_UPDATER
   void ShowUpdateDialog();
   void CheckForUpdatesAuto();
+#endif  // SHOW_UPDATER
   void ShowHotkeyDialog();
   void ShowNetPlaySetupDialog();
   void ShowNetPlayBrowser();
@@ -220,6 +225,8 @@ private:
   void EjectDisc();
 
   void OpenUserFolder();
+  void OpenConfigFolder();
+  void OpenCacheFolder();
 
   QStringList PromptFileNames();
 
@@ -241,6 +248,7 @@ private:
   MenuBar* m_menu_bar;
   SearchBar* m_search_bar;
   GameList* m_game_list;
+  GameCount* m_game_count;
   RenderWidget* m_render_widget = nullptr;
   bool m_rendering_to_main;
   bool m_stop_confirm_showing = false;

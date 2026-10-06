@@ -33,19 +33,19 @@ constexpr Arm64Gen::ARM64Reg DISPATCHER_PC = Arm64Gen::ARM64Reg::W26;
             PowerPC::PowerPCState, elem);                                                          \
     _Pragma("GCC diagnostic pop")                                                                  \
   }())
+#else
+#define PPCSTATE_OFF(elem) (offsetof(PowerPC::PowerPCState, elem))
+#endif
 
 #define PPCSTATE_OFF_ARRAY(elem, i)                                                                \
   (PPCSTATE_OFF(elem[0]) + sizeof(PowerPC::PowerPCState::elem[0]) * (i))
-#else
-#define PPCSTATE_OFF(elem) (offsetof(PowerPC::PowerPCState, elem))
 
-#define PPCSTATE_OFF_ARRAY(elem, i)                                                                \
-  (offsetof(PowerPC::PowerPCState, elem[0]) + sizeof(PowerPC::PowerPCState::elem[0]) * (i))
-#endif
+#define PPCSTATE_OFF_STD_ARRAY(elem, i)                                                            \
+  (PPCSTATE_OFF(elem) + sizeof(PowerPC::PowerPCState::elem[0]) * (i))
 
 #define PPCSTATE_OFF_GPR(i) PPCSTATE_OFF_ARRAY(gpr, i)
 #define PPCSTATE_OFF_CR(i) PPCSTATE_OFF_ARRAY(cr.fields, i)
-#define PPCSTATE_OFF_SR(i) PPCSTATE_OFF_ARRAY(sr, i)
+#define PPCSTATE_OFF_SR(i) PPCSTATE_OFF_STD_ARRAY(sr, i)
 #define PPCSTATE_OFF_SPR(i) PPCSTATE_OFF_ARRAY(spr, i)
 
 static_assert(std::is_same_v<decltype(PowerPC::PowerPCState::ps[0]), PowerPC::PairedSingle&>);
@@ -68,13 +68,17 @@ enum class RegType
   DuplicatedSingle,  // PS0 and PS1 are identical, host register only stores one lane (32-bit)
 };
 
-enum class FlushMode : bool
+enum class FlushMode
 {
-  // Flushes all registers, no exceptions
-  All,
-  // Flushes registers in a conditional branch
-  // Doesn't wipe the state of the registers from the cache
+  // All dirty registers get written back, and all registers get removed from the cache.
+  Full,
+  // All dirty registers get written back, but the state of the cache is untouched.
+  // The host registers may get clobbered. This is intended for use when doing a block exit
+  // after a conditional branch.
   MaintainState,
+  // Most dirty registers get written back and get set as no longer dirty.
+  // No registers are removed from the cache.
+  Undirty,
 };
 
 enum class IgnoreDiscardedRegisters
@@ -379,17 +383,15 @@ public:
 
   BitSet32 GetDirtyGPRs() const;
 
-  void StoreRegisters(BitSet32 regs, Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG,
-                      FlushMode flush_mode = FlushMode::All)
-  {
-    FlushRegisters(regs, flush_mode, tmp_reg, IgnoreDiscardedRegisters::No);
-  }
+  void FlushRegisters(
+      BitSet32 regs, FlushMode flush_mode = FlushMode::Full,
+      Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG,
+      IgnoreDiscardedRegisters ignore_discarded_registers = IgnoreDiscardedRegisters::No);
 
-  void StoreCRRegisters(BitSet8 regs, Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG,
-                        FlushMode flush_mode = FlushMode::All)
-  {
-    FlushCRRegisters(regs, flush_mode, tmp_reg, IgnoreDiscardedRegisters::No);
-  }
+  void FlushCRRegisters(
+      BitSet8 regs, FlushMode flush_mode = FlushMode::Full,
+      Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG,
+      IgnoreDiscardedRegisters ignore_discarded_registers = IgnoreDiscardedRegisters::No);
 
   void DiscardCRRegisters(BitSet8 regs);
   void ResetCRRegisters(BitSet8 regs);
@@ -419,14 +421,22 @@ private:
   GuestRegInfo GetGuestCR(size_t preg);
   GuestRegInfo GetGuestByIndex(size_t index);
 
+  constexpr bool IsIndexGPR(size_t index)
+  {
+    // We do not need to test for `index >= GUEST_GPR_OFFSET` because
+    // GUEST_GPR_OFFSET is always 0. This otherwise raises a warning.
+    static_assert(GUEST_GPR_OFFSET == 0);
+    return index < GUEST_GPR_OFFSET + GUEST_GPR_COUNT;
+  }
+
+  constexpr bool IsIndexCR(size_t index)
+  {
+    return index >= GUEST_CR_OFFSET && index < GUEST_CR_OFFSET + GUEST_CR_COUNT;
+  }
+
   Arm64Gen::ARM64Reg BindForRead(size_t index);
   void SetImmediateInternal(size_t index, u32 imm, bool dirty);
   void BindForWrite(size_t index, bool will_read, bool will_write = true);
-
-  void FlushRegisters(BitSet32 regs, FlushMode mode, Arm64Gen::ARM64Reg tmp_reg,
-                      IgnoreDiscardedRegisters ignore_discarded_registers);
-  void FlushCRRegisters(BitSet8 regs, FlushMode mode, Arm64Gen::ARM64Reg tmp_reg,
-                        IgnoreDiscardedRegisters ignore_discarded_registers);
 
   static constexpr size_t GUEST_GPR_COUNT = 32;
   static constexpr size_t GUEST_CR_COUNT = 8;
@@ -457,11 +467,8 @@ public:
 
   void FixSinglePrecision(size_t preg);
 
-  void StoreRegisters(BitSet32 regs, Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG,
-                      FlushMode flush_mode = FlushMode::All)
-  {
-    FlushRegisters(regs, flush_mode, tmp_reg);
-  }
+  void FlushRegisters(BitSet32 regs, FlushMode flush_mode = FlushMode::Full,
+                      Arm64Gen::ARM64Reg tmp_reg = Arm64Gen::ARM64Reg::INVALID_REG);
 
 protected:
   // Get the order of the host registers
@@ -476,6 +483,4 @@ protected:
 private:
   bool IsCallerSaved(Arm64Gen::ARM64Reg reg) const;
   bool IsTopHalfUsed(Arm64Gen::ARM64Reg reg) const;
-
-  void FlushRegisters(BitSet32 regs, FlushMode mode, Arm64Gen::ARM64Reg tmp_reg);
 };

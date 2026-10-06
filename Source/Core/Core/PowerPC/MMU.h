@@ -5,12 +5,18 @@
 
 #include <array>
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <set>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "Common/BitField.h"
 #include "Common/CommonTypes.h"
 #include "Common/TypeUtils.h"
+
+class PointerWrap;
 
 namespace Core
 {
@@ -73,6 +79,8 @@ constexpr size_t HW_PAGE_MASK = HW_PAGE_SIZE - 1;
 constexpr u32 HW_PAGE_INDEX_SHIFT = 12;
 constexpr u32 HW_PAGE_INDEX_MASK = 0x3f;
 
+constexpr u32 PAGE_TABLE_MIN_SIZE = 0x10000;
+
 // Return value of MMU::TryReadInstruction().
 struct TryReadInstResult
 {
@@ -117,6 +125,9 @@ public:
   MMU& operator=(MMU&& other) = delete;
   ~MMU();
 
+  void Reset();
+  void DoState(PointerWrap& p, bool sr_changed);
+
   // Routines for debugger UI, cheats, etc. to access emulated memory from the
   // perspective of the CPU.  Not for use by core emulation routines.
   // Use "Host" prefix.
@@ -126,7 +137,7 @@ public:
   // space), a PanicAlert will be shown to the user and zero (or an empty string for the string
   // case) will be returned.
   template <std::unsigned_integral T>
-  static T HostRead(const Core::CPUThreadGuard& guard, const u32 address);
+  static T HostRead(const Core::CPUThreadGuard& guard, u32 address);
   template <typename T>
   requires(!std::unsigned_integral<T>)
   static T HostRead(const Core::CPUThreadGuard& guard, const u32 address)
@@ -156,7 +167,7 @@ public:
       requires(!std::unsigned_integral<T>)
   {
     using U = Common::MakeUnsignedSameSize<T>;
-    std::optional<ReadResult<U>> result = HostTryRead<U>(guard, address);
+    std::optional<ReadResult<U>> result = HostTryRead<U>(guard, address, space);
     return std::bit_cast<std::optional<ReadResult<T>>>(result);
   }
   static std::optional<ReadResult<u32>>
@@ -187,8 +198,8 @@ public:
   // user-visible alert on failure.
   template <std::unsigned_integral T>
   static std::optional<WriteResult>
-  HostTryWrite(const Core::CPUThreadGuard& guard, const Common::MakeAtLeastU32<T> var,
-               const u32 address, RequestedAddressSpace space = RequestedAddressSpace::Effective);
+  HostTryWrite(const Core::CPUThreadGuard& guard, Common::MakeAtLeastU32<T> var, u32 address,
+               RequestedAddressSpace space = RequestedAddressSpace::Effective);
   template <typename T>
   static std::optional<WriteResult>
   HostTryWrite(const Core::CPUThreadGuard& guard, const T var, const u32 address,
@@ -217,10 +228,10 @@ public:
   TryReadInstResult TryReadInstruction(u32 address);
 
   template <std::unsigned_integral T>
-  T Read(const u32 address);
+  T Read(u32 address);
 
   template <std::unsigned_integral T>
-  void Write(const Common::MakeAtLeastU32<T> var, const u32 address);
+  void Write(Common::MakeAtLeastU32<T> var, u32 address);
 
   void Write_U16_Swap(u32 var, u32 address);
   void Write_U32_Swap(u32 var, u32 address);
@@ -237,7 +248,10 @@ public:
 
   // TLB functions
   void SDRUpdated();
+  void SRUpdated();
   void InvalidateTLBEntry(u32 address);
+  void PageTableUpdated();
+  static void PageTableUpdatedFromJit(MMU* mmu);
   void DBATUpdated();
   void IBATUpdated();
 
@@ -290,16 +304,40 @@ private:
     explicit EffectiveAddress(u32 address) : Hex{address} {}
   };
 
+  union PageMapping
+  {
+    // A small priority number wins over a larger priority number.
+    BitField<0, 11, u32> priority;
+    // Whether we're allowed to create a host mapping for this mapping.
+    BitField<11, 1, u32> host_mapping;
+    // The physical address of the page.
+    BitField<12, 20, u32> RPN;
+
+    u32 Hex = 0;
+
+    PageMapping() = default;
+    PageMapping(u32 RPN_, bool host_mapping_, u32 priority_)
+    {
+      RPN = RPN_;
+      host_mapping = host_mapping_;
+      priority = priority_;
+    }
+  };
+
   template <const XCheckTLBFlag flag>
   TranslateAddressResult TranslateAddress(u32 address);
 
   template <const XCheckTLBFlag flag>
-  TranslateAddressResult TranslatePageAddress(const EffectiveAddress address, bool* wi);
+  TranslateAddressResult TranslatePageAddress(EffectiveAddress address, bool* wi);
 
   void GenerateDSIException(u32 effective_address, bool write);
   void GenerateISIException(u32 effective_address);
 
   void Memcheck(u32 address, u64 var, bool write, size_t size);
+
+  void ClearPageTable();
+  void ReloadPageTable();
+  void PageTableUpdated(std::span<const u8> page_table);
 
   void UpdateBATs(BatTable& bat_table, u32 base_spr);
   void UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr);
@@ -307,7 +345,7 @@ private:
   template <XCheckTLBFlag flag, std::unsigned_integral T, bool never_translate = false>
   T ReadFromHardware(u32 em_address);
   template <XCheckTLBFlag flag, bool never_translate = false>
-  void WriteToHardware(u32 em_address, const u32 data, const u32 size);
+  void WriteToHardware(u32 em_address, u32 data, u32 size);
   template <XCheckTLBFlag flag>
   bool IsEffectiveRAMAddress(u32 address);
   bool IsPhysicalRAMAddress(u32 address) const;
@@ -316,6 +354,20 @@ private:
   Memory::MemoryManager& m_memory;
   PowerPC::PowerPCManager& m_power_pc;
   PowerPC::PowerPCState& m_ppc_state;
+
+  // STATE_TO_SAVE
+  std::vector<u8> m_page_table;
+  // END STATE_TO_SAVE
+
+  // This keeps track of all valid page table mappings in m_page_table.
+  // The key is the logical address.
+  std::map<u32, PageMapping> m_page_mappings;
+
+  // These are kept around just for their memory allocations. They are always cleared before use.
+  std::vector<u8> m_temp_page_table;
+  std::set<u32> m_removed_mappings;
+  std::map<u32, u32> m_added_readonly_mappings;
+  std::map<u32, u32> m_added_readwrite_mappings;
 
   BatTable m_ibat_table;
   BatTable m_dbat_table;

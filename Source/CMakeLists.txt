@@ -12,11 +12,11 @@ if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   add_definitions(-D_CRT_SECURE_NO_WARNINGS)
   add_definitions(-D_CRT_SECURE_NO_DEPRECATE)
   add_definitions(-D_CRT_NONSTDC_NO_WARNINGS)
-  add_definitions(-D_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING)
+  add_definitions(-D_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING) 
 endif()
 
 if (NOT MSVC)
-  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD 23)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
@@ -45,6 +45,7 @@ else()
   check_and_add_flag(INIT_SELF -Winit-self)
   check_and_add_flag(MISSING_DECLARATIONS -Wmissing-declarations)
   check_and_add_flag(MISSING_VARIABLE_DECLARATIONS -Wmissing-variable-declarations)
+  check_and_add_flag(IMPLICIT_FALLTHROUGH -Wimplicit-fallthrough)
 
   # Disable -Wstringop-truncation warnings as they result in many false positives.
   # In most (all?) cases where std::strncpy is used, we want to fill the entire buffer
@@ -76,7 +77,7 @@ add_definitions(-D__STDC_CONSTANT_MACROS)
 
 check_symbol_exists(elf_aux_info sys/auxv.h HAVE_ELF_AUX_INFO)
 if(HAVE_ELF_AUX_INFO)
-    add_definitions(-DHAVE_ELF_AUX_INFO)
+  add_definitions(-DHAVE_ELF_AUX_INFO)
 endif()
 
 add_subdirectory(Core)

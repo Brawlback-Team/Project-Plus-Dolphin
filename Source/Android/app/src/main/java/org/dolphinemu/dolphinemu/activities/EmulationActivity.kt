@@ -43,6 +43,7 @@ import org.dolphinemu.dolphinemu.features.infinitybase.ui.FigureSlotAdapter
 import org.dolphinemu.dolphinemu.features.input.model.ControllerInterface
 import org.dolphinemu.dolphinemu.features.input.model.DolphinSensorEventListener
 import org.dolphinemu.dolphinemu.features.settings.model.BooleanSetting
+import org.dolphinemu.dolphinemu.utils.ContentHandler
 import org.dolphinemu.dolphinemu.features.settings.model.IntSetting
 import org.dolphinemu.dolphinemu.features.settings.model.Settings
 import org.dolphinemu.dolphinemu.features.settings.model.StringSetting
@@ -104,17 +105,21 @@ class EmulationActivity : AppCompatActivity(), ThemeProvider {
     }
 
     val requestSkylanderFile = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             val slot = SkylanderConfig.loadSkylander(
                 skylanderSlots[skylanderSlot].portalSlot,
                 uri.toString()
-            )!!
-            clearSkylander(skylanderSlot)
-            skylanderSlots[skylanderSlot].portalSlot = slot.first!!
-            skylanderSlots[skylanderSlot].label = slot.second!!
-            skylandersBinding.figureManager.adapter!!.notifyItemChanged(skylanderSlot)
+            )
+            if (slot != null && slot.first != null && slot.second != null) {
+                clearSkylander(skylanderSlot)
+                skylanderSlots[skylanderSlot].portalSlot = slot.first!!
+                skylanderSlots[skylanderSlot].label = slot.second!!
+                skylandersBinding.figureManager.adapter?.notifyItemChanged(skylanderSlot)
+            } else {
+                Toast.makeText(this, R.string.skylander_load_failed, Toast.LENGTH_SHORT).show()
+            }
             skylanderSlot = -1
             skylanderData = Skylander.BLANK_SKYLANDER
         }
@@ -131,10 +136,12 @@ class EmulationActivity : AppCompatActivity(), ThemeProvider {
                     uri.toString(),
                     skylanderSlots[skylanderSlot].portalSlot
                 )
-                clearSkylander(skylanderSlot)
-                skylanderSlots[skylanderSlot].portalSlot = slot.first
-                skylanderSlots[skylanderSlot].label = slot.second
-                skylandersBinding.figureManager.adapter?.notifyItemChanged(skylanderSlot)
+                if (slot.first != -1) {
+                    clearSkylander(skylanderSlot)
+                    skylanderSlots[skylanderSlot].portalSlot = slot.first
+                    skylanderSlots[skylanderSlot].label = slot.second
+                    skylandersBinding.figureManager.adapter?.notifyItemChanged(skylanderSlot)
+                }
                 skylanderSlot = -1
                 skylanderData = Skylander.BLANK_SKYLANDER
             }
@@ -142,7 +149,7 @@ class EmulationActivity : AppCompatActivity(), ThemeProvider {
     }
 
     val requestInfinityFigureFile = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             val label = InfinityConfig.loadFigure(infinityPosition, uri.toString())
@@ -494,16 +501,16 @@ class EmulationActivity : AppCompatActivity(), ThemeProvider {
             }
 
             MENU_ACTION_TAKE_SCREENSHOT -> NativeLibrary.SaveScreenShot()
-            MENU_ACTION_QUICK_SAVE -> NativeLibrary.SaveState(9, false)
+            MENU_ACTION_QUICK_SAVE -> NativeLibrary.SaveState(9)
             MENU_ACTION_QUICK_LOAD -> NativeLibrary.LoadState(9)
             MENU_ACTION_SAVE_ROOT -> showSubMenu(SaveOrLoad.SAVE)
             MENU_ACTION_LOAD_ROOT -> showSubMenu(SaveOrLoad.LOAD)
-            MENU_ACTION_SAVE_SLOT1 -> NativeLibrary.SaveState(0, false)
-            MENU_ACTION_SAVE_SLOT2 -> NativeLibrary.SaveState(1, false)
-            MENU_ACTION_SAVE_SLOT3 -> NativeLibrary.SaveState(2, false)
-            MENU_ACTION_SAVE_SLOT4 -> NativeLibrary.SaveState(3, false)
-            MENU_ACTION_SAVE_SLOT5 -> NativeLibrary.SaveState(4, false)
-            MENU_ACTION_SAVE_SLOT6 -> NativeLibrary.SaveState(5, false)
+            MENU_ACTION_SAVE_SLOT1 -> NativeLibrary.SaveState(0)
+            MENU_ACTION_SAVE_SLOT2 -> NativeLibrary.SaveState(1)
+            MENU_ACTION_SAVE_SLOT3 -> NativeLibrary.SaveState(2)
+            MENU_ACTION_SAVE_SLOT4 -> NativeLibrary.SaveState(3)
+            MENU_ACTION_SAVE_SLOT5 -> NativeLibrary.SaveState(4)
+            MENU_ACTION_SAVE_SLOT6 -> NativeLibrary.SaveState(5)
             MENU_ACTION_LOAD_SLOT1 -> NativeLibrary.LoadState(0)
             MENU_ACTION_LOAD_SLOT2 -> NativeLibrary.LoadState(1)
             MENU_ACTION_LOAD_SLOT3 -> NativeLibrary.LoadState(2)
