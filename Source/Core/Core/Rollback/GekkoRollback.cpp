@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -305,6 +306,9 @@ struct GekkoManager
   std::deque<QueuedEvent> pending_events;
   std::deque<SampledLocalInput> sampled_local_inputs;
   std::map<int, std::vector<unsigned char>> diagnostic_inputs;
+  // Direct MEM1+MEM2 hashes captured when checkpoint snapshots are saved. Comparing these with
+  // the later UndoLog reconstruction distinguishes real RAM differences from a diagnostic bug.
+  std::map<int, u64> diagnostic_live_ram_hashes;
   int last_confirmed_diagnostic_frame = -1;
   bool dumped_frame_zero_mem1 = false;
 
@@ -553,6 +557,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.pending_events.clear();
   g_manager.sampled_local_inputs.clear();
   g_manager.diagnostic_inputs.clear();
+  g_manager.diagnostic_live_ram_hashes.clear();
   g_manager.last_confirmed_diagnostic_frame = -1;
   g_manager.dumped_frame_zero_mem1 = false;
   g_manager.perf_window_start = {};
@@ -733,6 +738,7 @@ void StopGekkoSession()
   ResetSimulatedLink();
   g_manager.pending_events.clear();
   g_manager.diagnostic_inputs.clear();
+  g_manager.diagnostic_live_ram_hashes.clear();
   g_manager.last_confirmed_diagnostic_frame = -1;
   g_manager.dumped_frame_zero_mem1 = false;
   g_manager.throttle_reference_before_load.reset();
@@ -1027,6 +1033,15 @@ static double ElapsedMs(std::chrono::steady_clock::time_point start)
       .count();
 }
 
+static u64 DirectRamChecksum(Core::System& system)
+{
+  auto& memory = system.GetMemory();
+  const std::span<const u8> mem1(memory.GetRAM(), memory.GetRamSize());
+  const std::span<const u8> mem2(memory.GetEXRAM(),
+                                 memory.GetEXRAM() ? memory.GetExRamSize() : 0);
+  return Rollback::RamChecksum(mem1, mem2);
+}
+
 // Native GekkoNet uses frame -1 for the snapshot immediately before frame 0. SnapshotRing uses
 // -1 as its empty-slot sentinel, so offset every Gekko frame by one without changing what Orca
 // saves or restores.
@@ -1131,6 +1146,11 @@ static void MaybeLogConfirmedDiagnostic()
   if (!snapshot)
     return;
 
+  const auto direct = g_manager.diagnostic_live_ram_hashes.find(diagnostic_frame);
+  const bool has_direct = direct != g_manager.diagnostic_live_ram_hashes.end();
+  const u64 direct_ram = has_direct ? direct->second : 0;
+  const bool local_ram_match = has_direct && direct_ram == snapshot->ram;
+
   const u64 input_digest = XXH3_64bits(input_bytes.data(), input_bytes.size());
   const double hash_ms = ElapsedMs(start);
   if (diagnostic_frame == 0)
@@ -1138,14 +1158,19 @@ static void MaybeLogConfirmedDiagnostic()
   NOTICE_LOG_FMT(
       CORE,
       "GekkoNet confirmed_diag: frame={} inputs={:016x} snapshot={:016x} ram={:016x} "
-      "state={:016x} l1={:016x} current={} last_received=[{},{},{},{}] hash_ms={:.3f}",
-      diagnostic_frame, input_digest, snapshot->combined, snapshot->ram, snapshot->state,
-      snapshot->l1_cache, gekko_current_frame(g_manager.session), last_received[0],
-      last_received[1], last_received[2], last_received[3], hash_ms);
+      "ram_direct={:016x} ram_local_match={} state={:016x} l1={:016x} current={} "
+      "last_received=[{},{},{},{}] hash_ms={:.3f}",
+      diagnostic_frame, input_digest, snapshot->combined, snapshot->ram, direct_ram,
+      local_ram_match, snapshot->state, snapshot->l1_cache,
+      gekko_current_frame(g_manager.session),
+      last_received[0], last_received[1], last_received[2], last_received[3], hash_ms);
 
   g_manager.last_confirmed_diagnostic_frame = diagnostic_frame;
   g_manager.diagnostic_inputs.erase(g_manager.diagnostic_inputs.begin(),
                                     g_manager.diagnostic_inputs.upper_bound(diagnostic_frame));
+  g_manager.diagnostic_live_ram_hashes.erase(
+      g_manager.diagnostic_live_ram_hashes.begin(),
+      g_manager.diagnostic_live_ram_hashes.upper_bound(diagnostic_frame));
 }
 
 static void RecordPumpTime(std::chrono::steady_clock::time_point start)
@@ -1273,6 +1298,8 @@ static bool PrepareQueuedFrame(Core::System& system)
         ++g_manager.perf_save_count;
         g_manager.perf_save_ms += elapsed;
         g_manager.perf_save_max_ms = std::max(g_manager.perf_save_max_ms, elapsed);
+        if (event.frame >= 0 && event.frame % 60 == 0)
+          g_manager.diagnostic_live_ram_hashes[event.frame] = DirectRamChecksum(system);
         if (event.checksum)
           *event.checksum = 0;
         if (event.state_len)
