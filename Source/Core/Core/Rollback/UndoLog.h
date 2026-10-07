@@ -107,10 +107,14 @@ private:
   u32 NextMark() const;
   u8* TakeBuffer();
   void FreeEntries(Log* log);
+  void RecycleEntryStorage(Log* log);
 
   std::size_t m_page_size;
   std::size_t m_page_count;
   std::deque<Log> m_logs;
+  // Dropped logs donate their entry vectors to later snapshots. This keeps the per-frame Open()
+  // path from allocating a fresh multi-thousand-entry vector.
+  std::vector<std::vector<Entry>> m_spare_entry_storage;
   u64 m_next_id = 1;
   // Per page: the id of the newest log that recorded it, and that pre-image.
   std::vector<u64> m_recorded_in;

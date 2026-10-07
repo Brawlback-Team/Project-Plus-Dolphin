@@ -275,6 +275,13 @@ void NetPlayDialog::CreateMainLayout()
          "and whose GekkoNet packets arrive exactly 3 emulated frames late. GekkoNet remains "
          "responsible for detecting and requesting every rollback."));
   m_rollback_stress_test_action->setCheckable(true);
+  m_rollback_tracked_bitmap_clear_action =
+      m_other_menu->addAction(tr("Rollback Benchmark: Clear Only Tracked RAM Bitmap"));
+  m_rollback_tracked_bitmap_clear_action->setToolTip(
+      tr("On restore, clear only the bitmap entries for MEM1 and MEM2 instead of the entire "
+         "512 MB address-indexed bitmap. No other restore behavior changes. The selection is "
+         "locked when a session starts and applies to the next session."));
+  m_rollback_tracked_bitmap_clear_action->setCheckable(true);
 
   m_game_button->setDefault(false);
   m_game_button->setAutoDefault(false);
@@ -504,6 +511,8 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_rollback_simulate_remote_p2_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_rollback_stress_test_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
+  connect(m_rollback_tracked_bitmap_clear_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
@@ -1246,6 +1255,8 @@ void NetPlayDialog::LoadSettings()
   const bool rollback_simulate_remote_p2 =
       Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2);
   const bool rollback_stress_test = Config::Get(Config::NETPLAY_ROLLBACK_STRESS_TEST);
+  const bool rollback_tracked_bitmap_clear =
+      Config::Get(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR);
 
   m_minimum_buffer_size_box->setValue(minimum_buffer_size);
   m_player_buffer_size_box->setValue(player_buffer_size);
@@ -1269,6 +1280,7 @@ void NetPlayDialog::LoadSettings()
   m_rollback_debug_p2_cstick_action->setChecked(rollback_debug_p2_cstick);
   m_rollback_simulate_remote_p2_action->setChecked(rollback_simulate_remote_p2);
   m_rollback_stress_test_action->setChecked(rollback_stress_test);
+  m_rollback_tracked_bitmap_clear_action->setChecked(rollback_tracked_bitmap_clear);
 
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
 
@@ -1318,6 +1330,10 @@ void NetPlayDialog::SaveSettings()
                   m_rollback_simulate_remote_p2_action->isChecked());
   Config::SetBase(Config::NETPLAY_ROLLBACK_STRESS_TEST,
                   m_rollback_stress_test_action->isChecked());
+  // NetPlay can have a CurrentRun layer active while the lobby remains open. Update whichever
+  // layer currently supplies the value so the next session observes the menu state immediately.
+  Config::SetBaseOrCurrent(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR,
+                           m_rollback_tracked_bitmap_clear_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())

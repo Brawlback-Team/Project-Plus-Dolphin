@@ -56,7 +56,8 @@ bool Has(u64 id);
 // Puts RAM back as it was at snapshot `id`, calling changed() for each 4 KB block that differed.
 // Newer snapshots are dropped and `id` becomes the newest, with an empty log. False if `id` is
 // not held.
-bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed);
+bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed,
+             bool tracked_bitmap_clear);
 // Forgets snapshot `id`; its saved pages merge into the next older snapshot's log.
 void Drop(u64 id);
 // RamChecksum (Rollback.h) of RAM as it was at snapshot `id`, rebuilt from the mirror and the logs.

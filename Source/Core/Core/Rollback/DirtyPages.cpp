@@ -14,6 +14,7 @@
 #include "Common/Buffer.h"
 #include "Common/Logging/Log.h"
 #include "Core/HW/Memmap.h"
+#include "Core/PowerPC/JitInterface.h"
 #include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/UndoLog.h"
 #include "Core/System.h"
@@ -25,7 +26,7 @@ namespace
 constexpr std::size_t PAGE = DIRTY_PAGE_SIZE;
 constexpr u32 MEM2_PHYSICAL = 0x10000000u;
 // Spare page buffers kept ready at each snapshot.
-constexpr std::size_t RESERVE_PAGES = 512;
+constexpr std::size_t RESERVE_PAGES = 2048;
 
 // The JIT's inline bitmap stores exist only in the x86-64 backend. Other hosts keep full copies.
 #if defined(_M_X86_64) || defined(__x86_64__)
@@ -38,12 +39,16 @@ struct Tracker
 {
   std::mutex lock;
   const void* owner = nullptr;
+  Core::System* system = nullptr;
   std::vector<Area> areas;
   std::vector<std::size_t> area_first_page;  // global index of each area's first page
   std::size_t page_count = 0;
   // RAM as it was at the newest snapshot, per area. Pages the bitmap marks are compared with it.
   std::vector<Common::UniqueBuffer<u8>> mirrors;
   std::unique_ptr<UndoLog> log;
+  // Generation marks replace a freshly allocated and zeroed page array on every restore.
+  std::vector<u32> restore_marks;
+  u32 restore_mark = 0;
   Counters counters;
   // Ids stay unique across arms, so a stale id never names another ring's snapshot.
   u64 next_id = 1;
@@ -92,7 +97,10 @@ void CommitDirtyPages(Tracker& t)
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      if (!bitmap.Consume(first_bitmap_page + i))
+      const std::size_t bitmap_page = first_bitmap_page + i;
+      // Clean pages dominate. Avoid an atomic read-modify-write unless the cheap load observes a
+      // mark; a mark racing after a clean load remains set for the next snapshot.
+      if (!bitmap.Load(bitmap_page) || !bitmap.Consume(bitmap_page))
         continue;
       ++t.counters.dirty_pages;
       u8* const live = area.alias + i * PAGE;
@@ -109,13 +117,20 @@ void CommitDirtyPages(Tracker& t)
 void ResetLocked(Tracker& t)
 {
   JITDirtyBitmap::Get().SetEnabled(false);
+  // Active-session blocks omit the per-store enabled test. Stop dispatching them before the
+  // tracker is used again in its guarded state. ClearSafe is valid from inside a JIT block.
+  if (t.system)
+    t.system->GetJitInterface().ClearSafe();
   if (t.log)
     t.next_id = t.log->NextId();
   t.owner = nullptr;
+  t.system = nullptr;
   t.areas.clear();
   t.area_first_page.clear();
   t.page_count = 0;
   t.mirrors.clear();
+  t.restore_marks.clear();
+  t.restore_mark = 0;
   t.log.reset();
 }
 }  // namespace
@@ -150,6 +165,8 @@ bool Arm(const void* owner, const std::vector<Area>& areas)
     std::memcpy(t.mirrors.back().data(), area.alias, area.size);
   }
   t.log = std::make_unique<UndoLog>(PAGE, t.page_count, t.next_id);
+  t.restore_marks.assign(t.page_count, 0);
+  t.restore_mark = 0;
   t.log->Reserve(RESERVE_PAGES);
   t.owner = owner;
   // Everything written before this point is already in the mirror.
@@ -190,7 +207,16 @@ bool ArmForSystem(Core::System& system, const void* owner)
     }
     areas.push_back(Area{exram_alias, MEM2_PHYSICAL, memory.GetExRamSize()});
   }
-  return Arm(owner, areas);
+  if (!Arm(owner, areas))
+    return false;
+
+  Tracker& t = T();
+  std::lock_guard lock(t.lock);
+  t.system = &system;
+  // Existing blocks retain the guarded bitmap update and are safe for the remainder of the block
+  // that armed tracking. Newly dispatched blocks are recompiled with the active-session fast path.
+  system.GetJitInterface().ClearSafe();
+  return true;
 }
 
 void Disarm(const void* owner)
@@ -229,16 +255,22 @@ bool Has(u64 id)
   return t.log && t.log->Has(id);
 }
 
-bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed)
+bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed,
+             bool tracked_bitmap_clear)
 {
   Tracker& t = T();
   std::lock_guard lock(t.lock);
   if (!t.log || !t.log->Has(id))
     return false;
   // Pages with a pre-image in the logs from `id` on hold their bytes at `id` there.
-  std::vector<u8> logged(t.page_count, 0);
+  if (++t.restore_mark == 0)
+  {
+    std::fill(t.restore_marks.begin(), t.restore_marks.end(), 0);
+    t.restore_mark = 1;
+  }
+  const u32 restore_mark = t.restore_mark;
   t.log->ForEachPreImage(id, [&](std::size_t page, const u8* pre_image) {
-    logged[page] = 1;
+    t.restore_marks[page] = restore_mark;
     const std::size_t a = AreaOf(t, page);
     const Area& area = t.areas[a];
     const std::size_t i = page - t.area_first_page[a];
@@ -255,14 +287,24 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      if (!bitmap.Load(first_bitmap_page + i) || logged[t.area_first_page[a] + i])
+      if (!bitmap.Load(first_bitmap_page + i) ||
+          t.restore_marks[t.area_first_page[a] + i] == restore_mark)
         continue;
       ReplacePage(area.alias + i * PAGE, t.mirrors[a].data() + i * PAGE, PhysicalOf(area, i),
                   changed);
     }
   }
-  // Live RAM now matches the mirror again, so nothing is dirty.
-  bitmap.Clear();
+  // Live RAM now matches the mirror again, so nothing is dirty. The benchmark path clears only
+  // MEM1/MEM2 instead of all 512 MB represented by the address-indexed bitmap.
+  if (tracked_bitmap_clear)
+  {
+    for (const Area& area : t.areas)
+      bitmap.ClearRange(area.physical_address / PAGE, area.size / PAGE);
+  }
+  else
+  {
+    bitmap.Clear();
+  }
   t.log->RewindTo(id);
   return true;
 }

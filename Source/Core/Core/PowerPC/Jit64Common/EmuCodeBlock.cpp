@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 
 #include "Common/Assert.h"
 #include "Common/CPUDetect.h"
@@ -158,11 +159,19 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
 
   auto& bitmap = Rollback::JITDirtyBitmap::Get();
   MOV(64, R(RSCRATCH2), Imm64(reinterpret_cast<u64>(&bitmap)));
-  CMP(8,
-      MDisp(RSCRATCH2,
-            static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, tracking_enabled))),
-      Imm8(0));
-  const FixupBranch tracking_disabled = J_CC(CC_E, Jump::Near);
+  // DirtyPages clears the JIT block lookup cache whenever tracking changes. Blocks compiled while
+  // tracking is active can therefore omit this test. A block that is executing when tracking is
+  // armed was compiled with the guarded path and observes the atomic flag immediately, so stores
+  // later in that same block are still captured.
+  std::optional<FixupBranch> tracking_disabled;
+  if (!bitmap.IsEnabled())
+  {
+    CMP(8,
+        MDisp(RSCRATCH2,
+              static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, tracking_enabled))),
+        Imm8(0));
+    tracking_disabled = J_CC(CC_E, Jump::Near);
+  }
 
   AND(32, R(RSCRATCH), Imm32(0x1FFFFFFFu));
   SHR(32, R(RSCRATCH), Imm8(12));
@@ -183,7 +192,8 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
     SetJumpTarget(same_page);
   }
 
-  SetJumpTarget(tracking_disabled);
+  if (tracking_disabled)
+    SetJumpTarget(*tracking_disabled);
 
   if (size > 1)
     POP(RSCRATCH_EXTRA);

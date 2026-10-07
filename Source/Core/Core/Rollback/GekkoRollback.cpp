@@ -33,6 +33,7 @@
 #include <fmt/format.h>
 
 #include "Common/CommonPaths.h"
+#include "Common/Config/Config.h"
 #include "Common/ENet.h"
 #include "Common/FileUtil.h"
 #include "Common/FPURoundMode.h"
@@ -40,6 +41,7 @@
 #include "Common/Logging/Log.h"
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/Config/NetplaySettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/GCPad.h"
@@ -299,6 +301,7 @@ struct GekkoManager
   bool debug_p2_cstick = false;
   bool simulate_remote_p2 = false;
   bool stress_test = false;
+  bool tracked_bitmap_clear = false;
   int configured_local_delay = 0;
   u32 session_id = 0;
   u64 local_input_frame = 0;
@@ -355,10 +358,24 @@ struct GekkoManager
   u64 perf_replay_exec_count = 0;
   double perf_replay_exec_ms = 0.0;
   double perf_replay_exec_max_ms = 0.0;
+  u64 perf_replay_save_count = 0;
+  double perf_replay_save_ms = 0.0;
+  double perf_replay_save_max_ms = 0.0;
   std::optional<std::chrono::steady_clock::time_point> rollback_burst_start;
   u64 perf_rollback_burst_count = 0;
   double perf_rollback_burst_ms = 0.0;
   double perf_rollback_burst_max_ms = 0.0;
+  double perf_burst_load_ms = 0.0;
+  double perf_burst_load_max_ms = 0.0;
+  double perf_burst_exec_ms = 0.0;
+  double perf_burst_exec_max_ms = 0.0;
+  double perf_burst_save_ms = 0.0;
+  double perf_burst_save_max_ms = 0.0;
+  double perf_burst_other_ms = 0.0;
+  double perf_burst_other_max_ms = 0.0;
+  double current_burst_load_ms = 0.0;
+  double current_burst_exec_ms = 0.0;
+  double current_burst_save_ms = 0.0;
   u64 current_rollback_replays = 0;
   u64 perf_rollback_depth_total = 0;
   u64 perf_rollback_depth_max = 0;
@@ -589,10 +606,24 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
+  g_manager.perf_replay_save_count = 0;
+  g_manager.perf_replay_save_ms = 0.0;
+  g_manager.perf_replay_save_max_ms = 0.0;
   g_manager.rollback_burst_start.reset();
   g_manager.perf_rollback_burst_count = 0;
   g_manager.perf_rollback_burst_ms = 0.0;
   g_manager.perf_rollback_burst_max_ms = 0.0;
+  g_manager.perf_burst_load_ms = 0.0;
+  g_manager.perf_burst_load_max_ms = 0.0;
+  g_manager.perf_burst_exec_ms = 0.0;
+  g_manager.perf_burst_exec_max_ms = 0.0;
+  g_manager.perf_burst_save_ms = 0.0;
+  g_manager.perf_burst_save_max_ms = 0.0;
+  g_manager.perf_burst_other_ms = 0.0;
+  g_manager.perf_burst_other_max_ms = 0.0;
+  g_manager.current_burst_load_ms = 0.0;
+  g_manager.current_burst_exec_ms = 0.0;
+  g_manager.current_burst_save_ms = 0.0;
   g_manager.current_rollback_replays = 0;
   g_manager.perf_rollback_depth_total = 0;
   g_manager.perf_rollback_depth_max = 0;
@@ -694,7 +725,9 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
                           static_cast<unsigned char>(stress_test ? 0 : clamped_delay));
   }
 
-  g_manager.ring = std::make_unique<SnapshotRing>(RING_SNAPSHOT_SLOTS);
+  g_manager.tracked_bitmap_clear = Config::Get(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR);
+  g_manager.ring =
+      std::make_unique<SnapshotRing>(RING_SNAPSHOT_SLOTS, g_manager.tracked_bitmap_clear);
   g_manager.stop_requested.store(false, std::memory_order_relaxed);
   g_manager.active.store(true, std::memory_order_release);
 
@@ -703,11 +736,11 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
       "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, "
       "delay={}, "
       "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-      "simulated_one_way_latency_ms={}, stress_3f_every_10f={})",
+      "simulated_one_way_latency_ms={}, stress_3f_every_10f={}, tracked_bitmap_clear={})",
       game_name, players, local_player, session_id, clamped_delay, clamped_prediction,
       g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad", debug_p2_cstick,
       simulate_remote_p2, simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
-      stress_test);
+      stress_test, g_manager.tracked_bitmap_clear);
   return true;
 }
 
@@ -1152,6 +1185,7 @@ static void MaybeLogConfirmedDiagnostic()
   const bool local_ram_match = has_direct && direct_ram == snapshot->ram;
 
   const u64 input_digest = XXH3_64bits(input_bytes.data(), input_bytes.size());
+  // Digest() performs the expensive RAM reconstruction; include that time in the diagnostic cost.
   const double hash_ms = ElapsedMs(start);
   if (diagnostic_frame == 0)
     DumpFrameZeroPageChecksums();
@@ -1199,12 +1233,15 @@ static void MaybeLogPerformance()
       CORE,
       "GekkoNet perf: {:.1f} fps over {} real frames; save {:.3f}/{:.3f} ms avg/max ({}); "
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
-      "replay_exec {:.3f}/{:.3f} ms ({}); burst {:.3f}/{:.3f} ms ({}); "
+      "replay_exec {:.3f}/{:.3f} ms ({}); replay_save {:.3f}/{:.3f} ms ({}); "
+      "burst {:.3f}/{:.3f} ms ({}); burst_parts load {:.3f}/{:.3f} exec {:.3f}/{:.3f} "
+      "save {:.3f}/{:.3f} other {:.3f}/{:.3f} ms avg/max; "
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
       "delay_measure cfg={} verified={}/{} mismatch={} missing={} observed "
       "{:.2f}/{}/{} frames avg/min/max ({} transitions); "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
-      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}",
+      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}; "
+      "tracked_bitmap_clear={}",
       fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
       g_manager.perf_save_max_ms, g_manager.perf_save_count,
       average(g_manager.perf_pump_ms, g_manager.perf_pump_count), g_manager.perf_pump_max_ms,
@@ -1212,8 +1249,18 @@ static void MaybeLogPerformance()
       g_manager.perf_load_max_ms, g_manager.perf_load_count, g_manager.perf_replay_frames,
       average(g_manager.perf_replay_exec_ms, g_manager.perf_replay_exec_count),
       g_manager.perf_replay_exec_max_ms, g_manager.perf_replay_exec_count,
+      average(g_manager.perf_replay_save_ms, g_manager.perf_replay_save_count),
+      g_manager.perf_replay_save_max_ms, g_manager.perf_replay_save_count,
       average(g_manager.perf_rollback_burst_ms, g_manager.perf_rollback_burst_count),
       g_manager.perf_rollback_burst_max_ms, g_manager.perf_rollback_burst_count,
+      average(g_manager.perf_burst_load_ms, g_manager.perf_rollback_burst_count),
+      g_manager.perf_burst_load_max_ms,
+      average(g_manager.perf_burst_exec_ms, g_manager.perf_rollback_burst_count),
+      g_manager.perf_burst_exec_max_ms,
+      average(g_manager.perf_burst_save_ms, g_manager.perf_rollback_burst_count),
+      g_manager.perf_burst_save_max_ms,
+      average(g_manager.perf_burst_other_ms, g_manager.perf_rollback_burst_count),
+      g_manager.perf_burst_other_max_ms,
       average(g_manager.perf_real_interval_ms, g_manager.perf_real_interval_count),
       g_manager.perf_real_interval_max_ms, g_manager.perf_real_interval_count,
       g_manager.perf_local_input_changes, g_manager.perf_local_byte_changes[0],
@@ -1236,7 +1283,7 @@ static void MaybeLogPerformance()
       (dirty_pages.dirty_pages - g_manager.perf_dirty_pages_start.dirty_pages) -
           (dirty_pages.pages_recorded - g_manager.perf_dirty_pages_start.pages_recorded),
       udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session),
-      g_manager.stress_test);
+      g_manager.stress_test, g_manager.tracked_bitmap_clear);
 
   g_manager.perf_window_start = now;
   g_manager.perf_dirty_pages_start = dirty_pages;
@@ -1264,9 +1311,20 @@ static void MaybeLogPerformance()
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
+  g_manager.perf_replay_save_count = 0;
+  g_manager.perf_replay_save_ms = 0.0;
+  g_manager.perf_replay_save_max_ms = 0.0;
   g_manager.perf_rollback_burst_count = 0;
   g_manager.perf_rollback_burst_ms = 0.0;
   g_manager.perf_rollback_burst_max_ms = 0.0;
+  g_manager.perf_burst_load_ms = 0.0;
+  g_manager.perf_burst_load_max_ms = 0.0;
+  g_manager.perf_burst_exec_ms = 0.0;
+  g_manager.perf_burst_exec_max_ms = 0.0;
+  g_manager.perf_burst_save_ms = 0.0;
+  g_manager.perf_burst_save_max_ms = 0.0;
+  g_manager.perf_burst_other_ms = 0.0;
+  g_manager.perf_burst_other_max_ms = 0.0;
   g_manager.perf_rollback_depth_total = 0;
   g_manager.perf_rollback_depth_max = 0;
   g_manager.perf_real_interval_count = 0;
@@ -1300,6 +1358,14 @@ static bool PrepareQueuedFrame(Core::System& system)
         g_manager.perf_save_max_ms = std::max(g_manager.perf_save_max_ms, elapsed);
         if (event.frame >= 0 && event.frame % 60 == 0)
           g_manager.diagnostic_live_ram_hashes[event.frame] = DirectRamChecksum(system);
+        if (Rollback::IsResimulating() && g_manager.rollback_burst_start)
+        {
+          ++g_manager.perf_replay_save_count;
+          g_manager.perf_replay_save_ms += elapsed;
+          g_manager.perf_replay_save_max_ms =
+              std::max(g_manager.perf_replay_save_max_ms, elapsed);
+          g_manager.current_burst_save_ms += elapsed;
+        }
         if (event.checksum)
           *event.checksum = 0;
         if (event.state_len)
@@ -1320,6 +1386,9 @@ static bool PrepareQueuedFrame(Core::System& system)
         {
           g_manager.rollback_burst_start = std::chrono::steady_clock::now();
           g_manager.current_rollback_replays = 0;
+          g_manager.current_burst_load_ms = 0.0;
+          g_manager.current_burst_exec_ms = 0.0;
+          g_manager.current_burst_save_ms = 0.0;
         }
         const auto start = std::chrono::steady_clock::now();
         if (!g_manager.ring->Load(system, SnapshotFrameKey(event.frame)))
@@ -1332,6 +1401,7 @@ static bool PrepareQueuedFrame(Core::System& system)
         ++g_manager.perf_load_count;
         g_manager.perf_load_ms += elapsed;
         g_manager.perf_load_max_ms = std::max(g_manager.perf_load_max_ms, elapsed);
+        g_manager.current_burst_load_ms += elapsed;
       }
       break;
 
@@ -1358,6 +1428,21 @@ static bool PrepareQueuedFrame(Core::System& system)
         g_manager.perf_rollback_burst_ms += elapsed;
         g_manager.perf_rollback_burst_max_ms =
             std::max(g_manager.perf_rollback_burst_max_ms, elapsed);
+        const double other_ms =
+            std::max(0.0, elapsed - g_manager.current_burst_load_ms -
+                              g_manager.current_burst_exec_ms - g_manager.current_burst_save_ms);
+        g_manager.perf_burst_load_ms += g_manager.current_burst_load_ms;
+        g_manager.perf_burst_load_max_ms =
+            std::max(g_manager.perf_burst_load_max_ms, g_manager.current_burst_load_ms);
+        g_manager.perf_burst_exec_ms += g_manager.current_burst_exec_ms;
+        g_manager.perf_burst_exec_max_ms =
+            std::max(g_manager.perf_burst_exec_max_ms, g_manager.current_burst_exec_ms);
+        g_manager.perf_burst_save_ms += g_manager.current_burst_save_ms;
+        g_manager.perf_burst_save_max_ms =
+            std::max(g_manager.perf_burst_save_max_ms, g_manager.current_burst_save_ms);
+        g_manager.perf_burst_other_ms += other_ms;
+        g_manager.perf_burst_other_max_ms =
+            std::max(g_manager.perf_burst_other_max_ms, other_ms);
         g_manager.perf_rollback_depth_total += g_manager.current_rollback_replays;
         g_manager.perf_rollback_depth_max =
             std::max(g_manager.perf_rollback_depth_max, g_manager.current_rollback_replays);
@@ -1436,6 +1521,8 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
       ++g_manager.perf_replay_exec_count;
       g_manager.perf_replay_exec_ms += elapsed;
       g_manager.perf_replay_exec_max_ms = std::max(g_manager.perf_replay_exec_max_ms, elapsed);
+      if (g_manager.rollback_burst_start)
+        g_manager.current_burst_exec_ms += elapsed;
     }
     g_manager.frame_execution_start.reset();
   }

@@ -73,7 +73,7 @@ struct SnapshotDigest
 class SnapshotRing
 {
 public:
-  explicit SnapshotRing(std::size_t slots);
+  explicit SnapshotRing(std::size_t slots, bool tracked_bitmap_clear = false);
   ~SnapshotRing();
   SnapshotRing(const SnapshotRing&) = delete;
   SnapshotRing& operator=(const SnapshotRing&) = delete;
@@ -131,7 +131,10 @@ private:
   std::vector<Slot> m_slots;
   std::size_t m_next = 0;
   std::size_t m_last = 0;
+  // Reused by loads to avoid allocating page vectors and unordered-set nodes every rollback.
+  std::vector<u32> m_changed_blocks;
   std::optional<bool> m_dirty_page_tracking;
+  const bool m_tracked_bitmap_clear;
 };
 
 // XXH3 of MEM1 then MEM2: the checksum players compare to detect a desync.

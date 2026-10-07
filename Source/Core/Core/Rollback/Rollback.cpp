@@ -10,7 +10,6 @@
 #include <cstring>
 #include <span>
 #include <tuple>
-#include <unordered_set>
 
 #include <xxh3.h>
 
@@ -45,10 +44,9 @@ constexpr u32 PHYSICAL_MASK = 0x1FFFFFFFu;
 // Copies saved RAM back one page at a time, skipping pages that already match. Only changed pages
 // have their JIT blocks invalidated; clearing the whole JIT (as a normal state load does) would
 // recompile the hot code after every rollback. Changed pages are collected by physical address.
-void RestoreRam(Core::System& system, u8* live, const std::vector<u8>& saved, u32 virtual_base,
-                std::unordered_set<u32>* changed_pages)
+void RestoreRam(u8* live, const std::vector<u8>& saved, u32 virtual_base,
+                std::vector<u32>* changed_pages)
 {
-  auto& jit = system.GetJitInterface();
   const std::size_t size = saved.size();
   for (std::size_t offset = 0; offset < size; offset += RESTORE_PAGE)
   {
@@ -57,15 +55,14 @@ void RestoreRam(Core::System& system, u8* live, const std::vector<u8>& saved, u3
       continue;
     std::memcpy(live + offset, saved.data() + offset, length);
     const u32 address = virtual_base + static_cast<u32>(offset);
-    jit.InvalidateICache(address, static_cast<u32>(length), true);
-    changed_pages->insert(address & PHYSICAL_MASK);
+    changed_pages->push_back(address & PHYSICAL_MASK);
   }
 }
 
 // The JIT also remembers per-instruction facts (GPU FIFO writes, paired quantization, no
 // speculative constants). A restored page may hold different instructions, so forget its entries.
 // Done here in bulk because the JIT's own per-word invalidation is too slow for thousands of pages.
-void ForgetLearnedJitAddresses(Core::System& system, const std::unordered_set<u32>& changed_pages)
+void ForgetLearnedJitAddresses(Core::System& system, const std::vector<u32>& changed_pages)
 {
   // JitInterface only holds a JitBase (null for the interpreter). static_cast because MSVC builds
   // have RTTI off.
@@ -73,7 +70,8 @@ void ForgetLearnedJitAddresses(Core::System& system, const std::unordered_set<u3
   if (!jit || changed_pages.empty())
     return;
   const auto in_changed_page = [&changed_pages](u32 address) {
-    return changed_pages.contains(address & PHYSICAL_MASK & ~static_cast<u32>(RESTORE_PAGE - 1));
+    const u32 page = address & PHYSICAL_MASK & ~static_cast<u32>(RESTORE_PAGE - 1);
+    return std::binary_search(changed_pages.begin(), changed_pages.end(), page);
   };
   std::erase_if(jit->js.fifoWriteAddresses, in_changed_page);
   std::erase_if(jit->js.pairedQuantizeAddresses, in_changed_page);
@@ -147,8 +145,10 @@ SnapshotScope::~SnapshotScope()
   s_in_snapshot.store(false, std::memory_order_relaxed);
 }
 
-SnapshotRing::SnapshotRing(std::size_t slots) : m_slots(std::max<std::size_t>(slots, 2))
+SnapshotRing::SnapshotRing(std::size_t slots, bool tracked_bitmap_clear)
+    : m_slots(std::max<std::size_t>(slots, 2)), m_tracked_bitmap_clear(tracked_bitmap_clear)
 {
+  m_changed_blocks.reserve(4096);
 }
 
 SnapshotRing::~SnapshotRing()
@@ -304,35 +304,34 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   // requests from RAM while loading, and live RAM may already hold a newer reply. The device-state
   // load writes no RAM in a session, since EFB copies stay on the GPU.
   auto& memory = system.GetMemory();
-  std::unordered_set<u32> changed_pages;
+  m_changed_blocks.clear();
   if (slot->page_snapshot_id != 0)
   {
     // The undo logs of this snapshot and every newer one list exactly the pages written since.
-    std::vector<u32> changed_blocks;
-    if (!DirtyPages::Restore(slot->page_snapshot_id, [&changed_blocks](u32 physical, u32 length) {
+    if (!DirtyPages::Restore(slot->page_snapshot_id, [this](u32 physical, u32 length) {
           for (u32 offset = 0; offset < length; offset += static_cast<u32>(RESTORE_PAGE))
-            changed_blocks.push_back(physical + offset);
-        }))
+            m_changed_blocks.push_back(physical + offset);
+        }, m_tracked_bitmap_clear))
     {
       ERROR_LOG_FMT(CORE, "Rollback: the dirty-page snapshot for frame {} is gone", frame);
       return false;
     }
-    // MEM1 is at 0x80000000 and MEM2 at 0x90000000: both are physical | 0x80000000.
-    auto& jit = system.GetJitInterface();
-    for (const u32 physical : changed_blocks)
-    {
-      jit.InvalidateICache(physical | MEM1_VIRTUAL, static_cast<u32>(RESTORE_PAGE), true);
-      changed_pages.insert(physical);
-    }
   }
   else
   {
-    RestoreRam(system, memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &changed_pages);
+    RestoreRam(memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &m_changed_blocks);
     if (memory.GetEXRAM() && !slot->mem2.empty())
-      RestoreRam(system, memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &changed_pages);
+      RestoreRam(memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &m_changed_blocks);
   }
+  std::sort(m_changed_blocks.begin(), m_changed_blocks.end());
+  m_changed_blocks.erase(std::unique(m_changed_blocks.begin(), m_changed_blocks.end()),
+                         m_changed_blocks.end());
+  // MEM1 is at 0x80000000 and MEM2 at 0x90000000: both are physical | 0x80000000.
+  auto& jit = system.GetJitInterface();
+  for (const u32 physical : m_changed_blocks)
+    jit.InvalidateICache(physical | MEM1_VIRTUAL, static_cast<u32>(RESTORE_PAGE), true);
   std::memcpy(memory.GetL1Cache(), slot->l1_cache.data(), slot->l1_cache.size());
-  ForgetLearnedJitAddresses(system, changed_pages);
+  ForgetLearnedJitAddresses(system, m_changed_blocks);
 
   bool ok;
   {
