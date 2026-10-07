@@ -150,6 +150,7 @@ private:
   QSpinBox* m_minimum_buffer_size_box;
   QLabel* m_player_buffer_label;
   QSpinBox* m_player_buffer_size_box;
+  QPushButton* m_auto_delay_button;
 
   QActionGroup* m_savedata_style_group;
   QAction* m_savedata_none_action;

@@ -23,6 +23,7 @@
 #include <QTextBrowser>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 #ifdef HAS_LIBMGBA
@@ -141,6 +142,11 @@ void NetPlayDialog::CreateMainLayout()
   m_player_buffer_size_box->setToolTip(
       tr("GekkoNet local input delay for this player, in frames."));
   m_player_buffer_label = new QLabel(tr("Input Delay:"));
+  m_auto_delay_button = new QPushButton(tr("Auto"));
+  m_auto_delay_button->setAutoDefault(false);
+  m_auto_delay_button->setToolTip(
+      tr("Set Input Delay to round(ping / 33.3333333 ms - 2). The host also sets Rollback "
+         "Frames to 7."));
   m_quit_button = new QPushButton(tr("Quit"));
   m_brawlmusic_off = new QCheckBox(tr("Client Side Music Off"));
   m_spectator_mode = new QCheckBox(tr("Spectator"));
@@ -291,10 +297,11 @@ void NetPlayDialog::CreateMainLayout()
   options_widget->addWidget(m_minimum_buffer_size_box, 0, 2, Qt::AlignVCenter);
   options_widget->addWidget(m_player_buffer_label, 0, 3, Qt::AlignVCenter);
   options_widget->addWidget(m_player_buffer_size_box, 0, 4, Qt::AlignVCenter);
-  options_widget->addWidget(m_brawlmusic_off, 0, 5, Qt::AlignVCenter);
-  options_widget->addWidget(m_spectator_mode, 0, 6, Qt::AlignVCenter);
-  options_widget->addWidget(m_quit_button, 0, 8, Qt::AlignVCenter | Qt::AlignRight);
-  options_widget->setColumnStretch(7, 1000);
+  options_widget->addWidget(m_auto_delay_button, 0, 5, Qt::AlignVCenter);
+  options_widget->addWidget(m_brawlmusic_off, 0, 6, Qt::AlignVCenter);
+  options_widget->addWidget(m_spectator_mode, 0, 7, Qt::AlignVCenter);
+  options_widget->addWidget(m_quit_button, 0, 9, Qt::AlignVCenter | Qt::AlignRight);
+  options_widget->setColumnStretch(8, 1000);
 
   m_main_layout->addLayout(options_widget, 2, 0, 1, -1, Qt::AlignRight);
   m_main_layout->setRowStretch(1, 1000);
@@ -408,8 +415,22 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_player_buffer_size_box, &QSpinBox::valueChanged, [this](int value) {
     if (value == m_player_buffer_size)
       return;
-    auto client = Settings::Instance().GetNetPlayClient();
+    const auto client = Settings::Instance().GetNetPlayClient();
+    if (client)
       client->AdjustPlayerPadBufferSize(value);
+  });
+  connect(m_auto_delay_button, &QPushButton::clicked, [this] {
+    const auto client = Settings::Instance().GetNetPlayClient();
+    if (!client)
+      return;
+
+    constexpr double FRAME_PAIR_MS = 1000.0 / 60.0 * 2.0;
+    const int delay = std::clamp(
+        static_cast<int>(std::lround(client->GetPlayersMaxPing() / FRAME_PAIR_MS - 2.0)), 0, 60);
+    m_player_buffer_size_box->setValue(delay);
+
+    if (Settings::Instance().GetNetPlayServer())
+      m_minimum_buffer_size_box->setValue(7);
   });
   const auto hia_function = [this](bool enable) {
     if (m_host_input_authority != enable)
@@ -950,6 +971,7 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
 
   m_player_buffer_size_box->setEnabled(enabled);
   m_player_buffer_label->setEnabled(enabled);
+  m_auto_delay_button->setEnabled(enabled);
   m_record_input_action->setEnabled(enabled);
 }
 
@@ -1013,8 +1035,6 @@ void NetPlayDialog::OnMinimumPadBufferChanged(u32 buffer)
     const QSignalBlocker blocker(m_minimum_buffer_size_box);
     m_minimum_buffer_size_box->setValue(buffer);
   });
-  DisplayMessage(tr("Rollback window changed to %1 frames").arg(buffer), "darkcyan");
-
   m_minimum_buffer_size = static_cast<int>(buffer);
 }
 
@@ -1024,8 +1044,6 @@ void NetPlayDialog::OnPlayerPadBufferChanged(u32 buffer)
     const QSignalBlocker blocker(m_player_buffer_size_box);
     m_player_buffer_size_box->setValue(buffer);
   });
-  DisplayMessage(tr("Input delay changed to %1 frames").arg(buffer), "darkcyan");
-
   m_player_buffer_size = static_cast<int>(buffer);
 }
 

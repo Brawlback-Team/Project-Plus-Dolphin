@@ -121,6 +121,7 @@ public:
   ~NetPlayClient() override;
 
   std::vector<const Player*> GetPlayers();
+  u32 GetPlayersMaxPing();
   const NetSettings& GetNetSettings() const;
 
   // Called from the GUI thread.
@@ -298,7 +299,6 @@ private:
   void SendGameStatus();
   void ComputeGameDigest(const SyncIdentifier& sync_identifier);
   void DisplayPlayersPing();
-  u32 GetPlayersMaxPing() const;
 
   void OnData(sf::Packet& packet);
   void OnPlayerJoin(sf::Packet& packet);

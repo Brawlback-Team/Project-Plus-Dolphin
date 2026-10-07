@@ -1064,6 +1064,11 @@ void NetPlayClient::OnDesyncDetected(sf::Packet& packet)
   packet >> pid_to_blame;
   packet >> frame;
 
+  // Legacy timebase comparisons are not meaningful while GekkoNet rollback is resimulating
+  // frames. Consume the server packet without presenting a false desync warning.
+  if (Rollback::IsGekkoSessionActive())
+    return;
+
   std::string player = "??";
   std::lock_guard lkp(m_crit.players);
   {
@@ -1612,8 +1617,12 @@ void NetPlayClient::DisplayPlayersPing()
                        OSD::Duration::SHORT, OSD::Color::CYAN);
 }
 
-u32 NetPlayClient::GetPlayersMaxPing() const
+u32 NetPlayClient::GetPlayersMaxPing()
 {
+  std::lock_guard lkp(m_crit.players);
+  if (m_players.empty())
+    return 0;
+
   return std::ranges::max_element(m_players, {}, [](const auto& kv) { return kv.second.ping; })
       ->second.ping;
 }

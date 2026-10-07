@@ -478,7 +478,9 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   // more expensive than a small game's state copy. Keep per-frame snapshots until GekkoNet has an
   // Orca-style sparse forward-snapshot policy.
   config.limited_saving = false;
-  config.desync_detection = true;
+  // Dolphin's rollback snapshots deliberately do not provide hashes to GekkoNet, so its checksum
+  // comparison cannot produce meaningful desync results.
+  config.desync_detection = false;
   config.check_distance = 10;
 
   gekko_start(g_manager.session, &config);
@@ -1353,10 +1355,6 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
           NOTICE_LOG_FMT(CORE, "GekkoNet benchmark: deterministic 3-frame packets active; Player 2 "
                                "changes input every 10 frames");
         }
-        break;
-      case GekkoDesyncDetected:
-        ERROR_LOG_FMT(CORE, "GekkoNet: Desync detected at frame {} (remote handle {})!",
-                      sev->data.desynced.frame, sev->data.desynced.remote_handle);
         break;
       default:
         break;
