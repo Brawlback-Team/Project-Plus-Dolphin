@@ -23,8 +23,6 @@
 #include "Common/Assert.h"
 #endif
 #if defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
-#include <mutex>
-
 #include <signal.h>
 
 #include "Common/Thread.h"
@@ -196,11 +194,7 @@ static void ExceptionThread(mach_port_t port)
 
     thread_state64_t* state = (thread_state64_t*)msg_in.old_state;
 
-    // A write to guest RAM that a rollback snapshot protected: the page is writable again and the
-    // thread runs the write again with its state unchanged. Before the JIT, which would backpatch
-    // a fastmem write it doesn't own.
-    bool ok = Rollback::Cow::HandleFault((uintptr_t)msg_in.code[1]) ||
-              Core::System::GetInstance().GetJitInterface().HandleFault((uintptr_t)msg_in.code[1],
+    bool ok = Core::System::GetInstance().GetJitInterface().HandleFault((uintptr_t)msg_in.code[1],
                                                                         state);
 
     // Set up the reply.
@@ -264,48 +258,6 @@ bool IsExceptionHandlerSupported()
   return true;
 }
 
-// Faults on threads without the Mach thread port (only the CPU thread has it) reach the task's
-// and host's ports, which nothing here claims, and then become SIGBUS (a write to a read-only page)
-// or SIGSEGV.
-static struct sigaction s_cow_old_segv;
-static struct sigaction s_cow_old_bus;
-
-static void CowSignalHandler(int sig, siginfo_t* info, void* raw_context)
-{
-  if (Rollback::Cow::HandleFault(reinterpret_cast<uintptr_t>(info->si_addr)))
-    return;
-  struct sigaction& old_sa = sig == SIGBUS ? s_cow_old_bus : s_cow_old_segv;
-  if ((old_sa.sa_flags & SA_SIGINFO) && old_sa.sa_sigaction)
-  {
-    old_sa.sa_sigaction(sig, info, raw_context);
-    return;
-  }
-  if (!(old_sa.sa_flags & SA_SIGINFO) && old_sa.sa_handler != SIG_DFL &&
-      old_sa.sa_handler != SIG_IGN)
-  {
-    old_sa.sa_handler(sig);
-    return;
-  }
-  // The default action: put it back and let the faulting instruction run again.
-  struct sigaction default_sa{};
-  default_sa.sa_handler = SIG_DFL;
-  sigemptyset(&default_sa.sa_mask);
-  sigaction(sig, &default_sa, nullptr);
-}
-
-void InstallCowFallbackHandler()
-{
-  static std::once_flag s_installed;
-  std::call_once(s_installed, [] {
-    struct sigaction sa{};
-    sa.sa_sigaction = &CowSignalHandler;
-    sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &s_cow_old_segv);
-    sigaction(SIGBUS, &sa, &s_cow_old_bus);
-  });
-}
-
 #elif defined(_POSIX_VERSION) && !defined(_M_GENERIC)
 
 static struct sigaction old_sa_segv;
@@ -342,10 +294,6 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 #else
   SContext* const ctx = &context->uc_mcontext;
 #endif
-  // A write to guest RAM that a rollback snapshot protected: the page is writable again and the
-  // write runs again. Before the JIT, which would backpatch a fastmem write it doesn't own.
-  if (sicode == SEGV_ACCERR && Rollback::Cow::HandleFault(bad_address))
-    return;
   if (Core::System::GetInstance().GetJitInterface().HandleFault(bad_address, ctx))
     return;
 
@@ -400,11 +348,6 @@ void UninstallExceptionHandler()
 bool IsExceptionHandlerSupported()
 {
   return true;
-}
-
-void InstallCowFallbackHandler()
-{
-  // The signal handler is process-wide.
 }
 
 #else  // _M_GENERIC or unsupported platform
