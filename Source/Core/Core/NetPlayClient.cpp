@@ -1136,6 +1136,13 @@ void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
   packet >> m_sync_save_data_count;
   m_sync_save_data_success_count = 0;
 
+  // A save sync notification starts a new boot generation. Discard anything left by an aborted
+  // start so only Wii data received for this generation can be passed to BootSessionData.
+  m_wii_sync_fs.reset();
+  m_wii_sync_titles.clear();
+  m_wii_sync_redirect_folder.clear();
+  m_wii_sync_data_ready = false;
+
   INFO_LOG_FMT(NETPLAY, "Initializing wait for {} savegame chunks.", m_sync_save_data_count);
 
   if (m_sync_save_data_count == 0)
@@ -1839,6 +1846,18 @@ void NetPlayClient::SendStopGamePacket()
 bool NetPlayClient::StartGame(const std::string& path)
 {
   std::lock_guard lkg(m_crit.game);
+
+  if (m_net_settings.savedata_load && !m_wii_sync_data_ready)
+  {
+    ERROR_LOG_FMT(NETPLAY,
+                  "Refusing to start: fresh Wii save synchronization data was not received for "
+                  "this boot");
+    PanicAlertFmtT("Fresh Wii save synchronization data was not received for this boot. The game "
+                   "was not started to prevent a NetPlay desync.");
+    SendStopGamePacket();
+    return false;
+  }
+
   SendStartGamePacket();
 
   if (m_is_running.IsSet())
@@ -1900,6 +1919,7 @@ bool NetPlayClient::StartGame(const std::string& path)
                                       if (File::Exists(redirect_path))
                                         File::DeleteDirRecursively(redirect_path);
                                     });
+  m_wii_sync_data_ready = false;
 
   const bool rollback_stress_test =
       m_local_player->IsHost() && m_players.size() == 1 &&
@@ -2721,6 +2741,7 @@ void NetPlayClient::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
   m_wii_sync_fs = std::move(fs);
   m_wii_sync_titles = std::move(titles);
   m_wii_sync_redirect_folder = std::move(redirect_folder);
+  m_wii_sync_data_ready = true;
 }
 
 SyncIdentifier NetPlayClient::GetSDCardIdentifier()

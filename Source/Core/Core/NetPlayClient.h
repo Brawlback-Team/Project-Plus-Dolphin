@@ -379,6 +379,9 @@ private:
   std::unique_ptr<IOS::HLE::FS::FileSystem> m_wii_sync_fs;
   std::vector<u64> m_wii_sync_titles;
   std::string m_wii_sync_redirect_folder;
+  // Wii sync data is consumed by BootSessionData. Require SetWiiSyncData to run again before
+  // every subsequent boot instead of silently falling back to each peer's configured NAND.
+  bool m_wii_sync_data_ready = false;
 };
 
 void NetPlay_Enable(NetPlayClient* const np);

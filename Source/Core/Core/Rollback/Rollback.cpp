@@ -4,6 +4,7 @@
 #include "Core/Rollback/Rollback.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/DirtyPages.h"
 #include "Core/State.h"
 #include "Core/System.h"
@@ -32,6 +34,7 @@ namespace
 {
 std::atomic<bool> s_in_snapshot{false};
 std::atomic<bool> s_resimulating{false};
+std::atomic<u64> s_boot_diagnostic_sequence{0};
 
 constexpr std::size_t RESTORE_PAGE = 4096;
 constexpr u32 MEM1_VIRTUAL = 0x80000000u;
@@ -111,6 +114,23 @@ void SetResimulating(bool resimulating)
 {
   s_resimulating.store(resimulating, std::memory_order_relaxed);
   VideoCommon_SetSkipRender(resimulating);
+}
+
+void LogBootMemoryDigest(Core::System& system, std::string_view stage)
+{
+  if (stage == "memory_clear")
+    s_boot_diagnostic_sequence.fetch_add(1, std::memory_order_relaxed);
+
+  auto& memory = system.GetMemory();
+  const std::span<const u8> mem1(memory.GetRAM(), memory.GetRamSize());
+  const std::span<const u8> mem2(memory.GetEXRAM(),
+                                 memory.GetEXRAM() ? memory.GetExRamSize() : 0);
+  const std::span<const u8> l1(memory.GetL1Cache(), memory.GetL1CacheSize());
+  NOTICE_LOG_FMT(CORE,
+                 "Rollback boot_diag: boot={} stage={} mem1={:016x} mem2={:016x} l1={:016x}",
+                 s_boot_diagnostic_sequence.load(std::memory_order_relaxed), stage,
+                 XXH3_64bits(mem1.data(), mem1.size()), XXH3_64bits(mem2.data(), mem2.size()),
+                 XXH3_64bits(l1.data(), l1.size()));
 }
 
 SnapshotScope::SnapshotScope()
@@ -354,6 +374,48 @@ std::optional<u64> SnapshotRing::RamChecksum(s64 frame) const
   if (slot->page_snapshot_id != 0)
     return DirtyPages::Checksum(slot->page_snapshot_id);
   return Rollback::RamChecksum(slot->mem1, slot->mem2);
+}
+
+std::optional<SnapshotDigest> SnapshotRing::Digest(s64 frame) const
+{
+  const Slot* slot = Find(frame);
+  if (!slot || slot->state_size == 0)
+    return std::nullopt;
+
+  const std::optional<u64> ram = RamChecksum(frame);
+  if (!ram)
+    return std::nullopt;
+
+  SnapshotDigest digest;
+  digest.ram = *ram;
+  digest.state = XXH3_64bits(slot->state.data(), slot->state_size);
+  digest.l1_cache = XXH3_64bits(slot->l1_cache.data(), slot->l1_cache.size());
+  const std::array<u64, 4> components = {digest.ram, digest.state, digest.l1_cache,
+                                         slot->nand_journal_mark};
+  digest.combined = XXH3_64bits(components.data(), sizeof(components));
+  return digest;
+}
+
+std::optional<std::vector<u64>> SnapshotRing::PageChecksums(s64 frame) const
+{
+  const Slot* slot = Find(frame);
+  if (!slot)
+    return std::nullopt;
+  if (slot->page_snapshot_id != 0)
+    return DirtyPages::PageChecksums(slot->page_snapshot_id);
+
+  std::vector<u64> hashes;
+  hashes.reserve((slot->mem1.size() + slot->mem2.size()) / DIRTY_PAGE_SIZE);
+  const auto append = [&hashes](const std::vector<u8>& memory) {
+    for (std::size_t offset = 0; offset < memory.size(); offset += DIRTY_PAGE_SIZE)
+    {
+      const std::size_t size = std::min(DIRTY_PAGE_SIZE, memory.size() - offset);
+      hashes.push_back(XXH3_64bits(memory.data() + offset, size));
+    }
+  };
+  append(slot->mem1);
+  append(slot->mem2);
+  return hashes;
 }
 
 std::span<const u8> SnapshotRing::LastState() const

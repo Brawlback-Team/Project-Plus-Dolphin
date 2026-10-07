@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -25,9 +27,15 @@
 #endif
 
 #include <gekkonet.h>
+#include <xxh3.h>
 
+#include <fmt/format.h>
+
+#include "Common/CommonPaths.h"
 #include "Common/ENet.h"
+#include "Common/FileUtil.h"
 #include "Common/FPURoundMode.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
@@ -39,6 +47,7 @@
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/DirtyPages.h"
 #include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
@@ -290,10 +299,14 @@ struct GekkoManager
   bool simulate_remote_p2 = false;
   bool stress_test = false;
   int configured_local_delay = 0;
+  u32 session_id = 0;
   u64 local_input_frame = 0;
   std::vector<int> player_handles;
   std::deque<QueuedEvent> pending_events;
   std::deque<SampledLocalInput> sampled_local_inputs;
+  std::map<int, std::vector<unsigned char>> diagnostic_inputs;
+  int last_confirmed_diagnostic_frame = -1;
+  bool dumped_frame_zero_mem1 = false;
 
   std::array<GCPadStatus, MAX_PORTS> latched_pads{};
   std::atomic<bool> active{false};
@@ -528,13 +541,20 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.simulate_remote_p2 = simulate_remote_p2;
   g_manager.stress_test = stress_test;
   g_manager.configured_local_delay = clamped_delay;
+  g_manager.session_id = session_id;
   g_manager.local_input_frame = 0;
+  // GetRollbackPad is active throughout boot, before Gekko emits the first Advance event. Never
+  // expose pads left latched at the end of the previous session to the next game's SI startup.
+  g_manager.latched_pads.fill(GCPadStatus{});
   g_manager.local_handle = -1;
   g_manager.simulated_peer_p2_handle = -1;
   g_manager.remote_handle = -1;
   g_manager.player_handles.assign(players, -1);
   g_manager.pending_events.clear();
   g_manager.sampled_local_inputs.clear();
+  g_manager.diagnostic_inputs.clear();
+  g_manager.last_confirmed_diagnostic_frame = -1;
+  g_manager.dumped_frame_zero_mem1 = false;
   g_manager.perf_window_start = {};
   g_manager.perf_dirty_pages_start = DirtyPages::GetCounters();
   g_manager.perf_real_frames = 0;
@@ -712,6 +732,9 @@ void StopGekkoSession()
   }
   ResetSimulatedLink();
   g_manager.pending_events.clear();
+  g_manager.diagnostic_inputs.clear();
+  g_manager.last_confirmed_diagnostic_frame = -1;
+  g_manager.dumped_frame_zero_mem1 = false;
   g_manager.throttle_reference_before_load.reset();
   if (g_manager.ring)
     g_manager.ring->Reset(Core::System::GetInstance());
@@ -1012,6 +1035,119 @@ static s64 SnapshotFrameKey(int gekko_frame)
   return static_cast<s64>(gekko_frame) + 1;
 }
 
+static void DumpFrameZeroPageChecksums()
+{
+  const std::optional<std::vector<u64>> hashes =
+      g_manager.ring->PageChecksums(SnapshotFrameKey(0));
+  if (!hashes)
+    return;
+
+  auto& memory = Core::System::GetInstance().GetMemory();
+  const u32 mem1_pages = static_cast<u32>(memory.GetRamSize() / DIRTY_PAGE_SIZE);
+  const u32 mem2_pages = memory.GetEXRAM() ?
+                             static_cast<u32>(memory.GetExRamSize() / DIRTY_PAGE_SIZE) :
+                             0;
+  constexpr u32 PAGE_DIGEST_MAGIC = 0x48475052;  // "RPGH" in little-endian files.
+  const std::array<u32, 5> header = {PAGE_DIGEST_MAGIC, 1,
+                                     static_cast<u32>(DIRTY_PAGE_SIZE), mem1_pages, mem2_pages};
+  const std::string path =
+      fmt::format("{}rollback_pages_{}_p{}_f0.bin", File::GetUserPath(D_LOGS_IDX),
+                  g_manager.session_id, g_manager.local_player);
+  File::IOFile file(path, "wb");
+  if (!file.WriteArray(header) || !file.WriteArray(hashes->data(), hashes->size()))
+  {
+    ERROR_LOG_FMT(CORE, "GekkoNet boot_diag: failed to write frame-0 page hashes to {}", path);
+    return;
+  }
+  NOTICE_LOG_FMT(CORE,
+                 "GekkoNet boot_diag: wrote frame-0 page hashes path={} pages={} mem1_pages={} "
+                 "mem2_pages={}",
+                 path, hashes->size(), mem1_pages, mem2_pages);
+}
+
+static void DumpFrameZeroMem1(Core::System& system)
+{
+  if (g_manager.dumped_frame_zero_mem1)
+    return;
+
+  auto& memory = system.GetMemory();
+  const std::string path =
+      fmt::format("{}rollback_mem1_{}_p{}_f0.bin", File::GetUserPath(D_LOGS_IDX),
+                  g_manager.session_id, g_manager.local_player);
+  File::IOFile file(path, "wb");
+  if (!file.WriteBytes(memory.GetRAM(), memory.GetRamSize()))
+  {
+    ERROR_LOG_FMT(CORE, "GekkoNet boot_diag: failed to write frame-0 MEM1 to {}", path);
+    return;
+  }
+
+  g_manager.dumped_frame_zero_mem1 = true;
+  NOTICE_LOG_FMT(CORE, "GekkoNet boot_diag: wrote frame-0 MEM1 path={} bytes={}", path,
+                 memory.GetRamSize());
+}
+
+static void MaybeLogConfirmedDiagnostic()
+{
+  constexpr int DIAGNOSTIC_INTERVAL = 60;
+  if (!g_manager.session || !g_manager.ring)
+    return;
+
+  std::array<int, MAX_PORTS> last_received;
+  last_received.fill(-1);
+  int confirmed_frame = std::numeric_limits<int>::max();
+  for (int player = 0; player < g_manager.players; ++player)
+  {
+    const int handle = g_manager.player_handles[player];
+    if (handle < 0)
+      return;
+    last_received[player] = gekko_last_received_frame(g_manager.session, handle);
+    if (last_received[player] < 0)
+      return;
+    confirmed_frame = std::min(confirmed_frame, last_received[player]);
+  }
+
+  const int diagnostic_frame = confirmed_frame - (confirmed_frame % DIAGNOSTIC_INTERVAL);
+  if (diagnostic_frame <= g_manager.last_confirmed_diagnostic_frame)
+    return;
+
+  std::vector<unsigned char> input_bytes;
+  input_bytes.reserve(static_cast<std::size_t>(diagnostic_frame -
+                                               g_manager.last_confirmed_diagnostic_frame) *
+                      (sizeof(int) + sizeof(WirePad) * g_manager.players));
+  for (int frame = g_manager.last_confirmed_diagnostic_frame + 1; frame <= diagnostic_frame;
+       ++frame)
+  {
+    const auto input = g_manager.diagnostic_inputs.find(frame);
+    if (input == g_manager.diagnostic_inputs.end())
+      return;
+    const auto* frame_bytes = reinterpret_cast<const unsigned char*>(&frame);
+    input_bytes.insert(input_bytes.end(), frame_bytes, frame_bytes + sizeof(frame));
+    input_bytes.insert(input_bytes.end(), input->second.begin(), input->second.end());
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  const std::optional<SnapshotDigest> snapshot =
+      g_manager.ring->Digest(SnapshotFrameKey(diagnostic_frame));
+  if (!snapshot)
+    return;
+
+  const u64 input_digest = XXH3_64bits(input_bytes.data(), input_bytes.size());
+  const double hash_ms = ElapsedMs(start);
+  if (diagnostic_frame == 0)
+    DumpFrameZeroPageChecksums();
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet confirmed_diag: frame={} inputs={:016x} snapshot={:016x} ram={:016x} "
+      "state={:016x} l1={:016x} current={} last_received=[{},{},{},{}] hash_ms={:.3f}",
+      diagnostic_frame, input_digest, snapshot->combined, snapshot->ram, snapshot->state,
+      snapshot->l1_cache, gekko_current_frame(g_manager.session), last_received[0],
+      last_received[1], last_received[2], last_received[3], hash_ms);
+
+  g_manager.last_confirmed_diagnostic_frame = diagnostic_frame;
+  g_manager.diagnostic_inputs.erase(g_manager.diagnostic_inputs.begin(),
+                                    g_manager.diagnostic_inputs.upper_bound(diagnostic_frame));
+}
+
 static void RecordPumpTime(std::chrono::steady_clock::time_point start)
 {
   const double elapsed = ElapsedMs(start);
@@ -1131,6 +1267,8 @@ static bool PrepareQueuedFrame(Core::System& system)
       {
         const auto start = std::chrono::steady_clock::now();
         g_manager.ring->Save(system, SnapshotFrameKey(event.frame));
+        if (event.frame == 0)
+          DumpFrameZeroMem1(system);
         const double elapsed = ElapsedMs(start);
         ++g_manager.perf_save_count;
         g_manager.perf_save_ms += elapsed;
@@ -1139,6 +1277,7 @@ static bool PrepareQueuedFrame(Core::System& system)
           *event.checksum = 0;
         if (event.state_len)
           *event.state_len = 0;
+        MaybeLogConfirmedDiagnostic();
       }
       break;
 
@@ -1172,6 +1311,7 @@ static bool PrepareQueuedFrame(Core::System& system)
     case GekkoAdvanceEvent:
     {
       const bool resimulating = event.rolling_back || event.running_ahead;
+      g_manager.diagnostic_inputs[event.frame] = event.inputs;
       if (!resimulating)
         MeasureLocalInputDelay(event.frame, event.inputs);
       LatchInputs(event.inputs.data());

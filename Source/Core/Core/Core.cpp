@@ -54,6 +54,7 @@
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/Rollback/GekkoRollback.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/HW.h"
@@ -582,6 +583,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   HW::Init(system,
            NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
+  Rollback::LogBootMemoryDigest(system, "hardware_init");
 
   Common::ScopeGuard hw_guard{[&system] {
     INFO_LOG_FMT(CONSOLE, "{}", StopMessage(false, "Shutting down HW"));
