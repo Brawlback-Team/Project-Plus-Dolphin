@@ -4,8 +4,9 @@
 // Orca rollback core: exact whole-machine snapshots, saved and restored at the frame boundary.
 //
 // A snapshot is RAM (MEM1, MEM2, the locked L1 cache) plus everything else through Dolphin's
-// DoState with RAM skipped. RAM is kept copy-on-write (Cow.h). Because saves and loads happen at
-// the same instruction, CPU, DSP, timing and device state all come back exactly. Subsystems check
+// DoState with RAM skipped. RAM is kept as undo logs over a dirty page bitmap (Cow.h). Because
+// saves and loads happen at the same instruction, CPU, DSP, timing and device state all come back
+// exactly. Subsystems check
 // InSnapshotDoState() to skip what a rollback must not touch: RAM inside DoState, JIT clears on
 // load, and NAND file contents.
 

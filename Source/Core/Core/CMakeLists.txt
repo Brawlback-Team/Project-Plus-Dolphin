@@ -574,6 +574,7 @@ add_library(core
   State.h
   Rollback/Cow.cpp
   Rollback/Cow.h
+  Rollback/DirtyBitmap.h
   Rollback/GekkoRollback.cpp
   Rollback/GekkoRollback.h
   Rollback/Rollback.cpp

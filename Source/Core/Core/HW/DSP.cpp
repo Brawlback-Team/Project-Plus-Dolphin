@@ -38,6 +38,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/System.h"
 
 namespace DSP
@@ -611,6 +612,9 @@ void DSPManager::WriteARAM(u8 value, u32 address)
 {
   // TODO: verify this on Wii
   m_aram.ptr[address & m_aram.mask] = value;
+  // On the Wii, ARAM is MEM2.
+  if (m_aram.wii_mode)
+    Rollback::MarkPhysicalRangeDirty(0x10000000u + (address & m_aram.mask), 1);
 }
 
 u8* DSPManager::GetARAMPtr() const

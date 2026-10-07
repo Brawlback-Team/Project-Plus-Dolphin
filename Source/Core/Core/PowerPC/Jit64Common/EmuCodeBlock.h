@@ -57,6 +57,9 @@ public:
 
   Gen::FixupBranch CheckIfSafeAddress(const Gen::OpArg& reg_value, Gen::X64Reg reg_addr,
                                       BitSet32 registers_in_use);
+  // Marks the guest page of reg_addr + offset dirty for rollback (Core/Rollback/DirtyBitmap.h).
+  // Every guest RAM store the JIT emits must call this.
+  void EmitJITDirtyBitmapUpdate(Gen::X64Reg reg_addr, s32 offset);
   // these return the address of the MOV, for backpatching
   void UnsafeWriteRegToReg(Gen::OpArg reg_value, Gen::X64Reg reg_addr, int accessSize,
                            s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr);

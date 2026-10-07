@@ -149,7 +149,7 @@ bool SnapshotRing::UseCow(Core::System& system, bool* armed_now)
 {
   *armed_now = false;
   // If tracking stopped under us (emulation stopped, or an unsupported RAM mapping), the
-  // copy-on-write snapshots are gone.
+  // undo-log snapshots are gone.
   if (m_cow.value_or(false) && !Cow::IsArmedFor(this))
   {
     for (Slot& slot : m_slots)
@@ -235,8 +235,8 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
   }
 
   auto& memory = system.GetMemory();
-  // Copy-on-write: write-protect RAM again and open this snapshot's undo log. A 0 id means
-  // tracking stopped, so fall back to a full copy.
+  // Dirty-page tracking: commit the RAM written since the last snapshot and open this snapshot's
+  // undo log. A 0 id means tracking stopped, so fall back to a full copy.
   if (cow)
     slot->cow_id = Cow::Snapshot();
   if (slot->cow_id == 0)

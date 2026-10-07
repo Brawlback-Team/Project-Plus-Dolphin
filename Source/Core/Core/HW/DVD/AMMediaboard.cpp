@@ -27,6 +27,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/Network/Socket.h"
 #include "Core/Movie.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/System.h"
 
 #include "DiscIO/CachedBlob.h"
@@ -1364,6 +1365,7 @@ static void FileReadData(Memory::MemoryManager& memory, File::IOFile* file, u32 
   if (length <= span.size())
   {
     file->Seek(seek_pos, File::SeekOrigin::Begin);
+    Rollback::MarkPhysicalRangeDirty(address, length);
     file->ReadBytes(span.data(), length);
   }
   else
@@ -1843,14 +1845,19 @@ u32 ExecuteCommand(std::array<u32, 3>& dicmd_buf, u32* diimm_buf, u32 address, u
       return 0;
     }
 
-    if (const auto span = memory.GetSpanForAddress(address); span.size() < length)
     {
-      ERROR_LOG_FMT(AMMEDIABOARD, "GC-AM: Invalid DIMM Disc read from: offset={}, length={}",
-                    offset, length);
-    }
-    else if (s_dimm_disc->Read(offset, length, span.data()))
-    {
-      return 0;
+      // The disc read below fills the span.
+      const auto span = memory.GetSpanForAddress(address);
+      Rollback::MarkPhysicalRangeDirty(address, length);
+      if (span.size() < length)
+      {
+        ERROR_LOG_FMT(AMMEDIABOARD, "GC-AM: Invalid DIMM Disc read from: offset={}, length={}",
+                      offset, length);
+      }
+      else if (s_dimm_disc->Read(offset, length, span.data()))
+      {
+        return 0;
+      }
     }
 
     return 1;

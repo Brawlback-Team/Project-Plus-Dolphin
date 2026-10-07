@@ -53,6 +53,7 @@
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/System.h"
 
 #include "VideoCommon/EFBInterface.h"
@@ -469,7 +470,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
       m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
 
     if (!m_ppc_state.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+    {
       std::memcpy(&m_memory.GetRAM()[em_address], &swapped_data, size);
+      Rollback::MarkPhysicalRangeDirty(em_address, size);
+    }
 
     return;
   }
@@ -486,7 +490,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
     }
 
     if (!m_ppc_state.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+    {
       std::memcpy(&m_memory.GetEXRAM()[em_address], &swapped_data, size);
+      Rollback::MarkPhysicalRangeDirty(0x10000000u + em_address, size);  // MEM2
+    }
 
     return;
   }

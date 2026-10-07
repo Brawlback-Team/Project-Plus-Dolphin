@@ -18,6 +18,7 @@
 #include "Core/PowerPC/Jit64Common/Jit64PowerPCState.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/System.h"
 
 using namespace Gen;
@@ -137,9 +138,36 @@ FixupBranch EmuCodeBlock::CheckIfSafeAddress(const OpArg& reg_value, X64Reg reg_
   return J_CC(CC_Z, m_far_code.Enabled() ? Jump::Near : Jump::Short);
 }
 
+void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset)
+{
+  // dirty_bitmap[((reg_addr + offset) & 0x1FFFFFFF) >> 12] = 1
+  // Only RSCRATCH and RSCRATCH2 are used, and both are restored. The address is read before
+  // RSCRATCH2 is overwritten, so reg_addr may be either one.
+  PUSH(RSCRATCH);
+  PUSH(RSCRATCH2);
+
+  if (reg_addr != RSCRATCH)
+    MOV(32, R(RSCRATCH), R(reg_addr));
+  if (offset != 0)
+    ADD(32, R(RSCRATCH), Imm32(static_cast<u32>(offset)));
+
+  AND(32, R(RSCRATCH), Imm32(0x1FFFFFFFu));
+  SHR(32, R(RSCRATCH), Imm8(12));
+
+  MOV(64, R(RSCRATCH2), Imm64(reinterpret_cast<u64>(Rollback::JITDirtyBitmap::Get().entries)));
+  MOV(8, MComplex(RSCRATCH2, RSCRATCH, SCALE_1, 0), Imm8(1));
+
+  POP(RSCRATCH2);
+  POP(RSCRATCH);
+}
+
 void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int accessSize, s32 offset,
                                        bool swap, MovInfo* info)
 {
+  // Before info is taken, so the bitmap update stays inside the backpatched region. The slow path
+  // that a fault backpatches to marks the page itself.
+  EmitJITDirtyBitmapUpdate(reg_addr, offset);
+
   if (info)
   {
     info->address = GetWritableCodePtr();

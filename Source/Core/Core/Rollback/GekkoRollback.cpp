@@ -823,7 +823,7 @@ static void MaybeLogPerformance()
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
       "replay_exec {:.3f}/{:.3f} ms ({}); burst {:.3f}/{:.3f} ms ({}); "
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
-      "COW faults/pages/hot {}/{}/{}; udp tx/rx/reject {}/{}/{}; ahead={:.2f}",
+      "RAM dirty/saved pages {}/{}; udp tx/rx/reject {}/{}/{}; ahead={:.2f}",
       fps, g_manager.perf_real_frames,
       average(g_manager.perf_save_ms, g_manager.perf_save_count), g_manager.perf_save_max_ms,
       g_manager.perf_save_count,
@@ -842,9 +842,8 @@ static void MaybeLogPerformance()
       g_manager.perf_local_byte_changes[3], g_manager.perf_local_byte_changes[4],
       g_manager.perf_local_byte_changes[5], g_manager.perf_local_byte_changes[6],
       g_manager.perf_local_byte_changes[7],
-      cow.faults - g_manager.perf_cow_start.faults,
+      cow.dirty_pages - g_manager.perf_cow_start.dirty_pages,
       cow.pages_recorded - g_manager.perf_cow_start.pages_recorded,
-      cow.pages_copied - g_manager.perf_cow_start.pages_copied,
       udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session));
 
   g_manager.perf_window_start = now;

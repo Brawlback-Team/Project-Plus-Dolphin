@@ -8,5 +8,4 @@ namespace EMM
 void InstallExceptionHandler();
 void UninstallExceptionHandler();
 bool IsExceptionHandlerSupported();
-void InstallCowFallbackHandler();
 }  // namespace EMM

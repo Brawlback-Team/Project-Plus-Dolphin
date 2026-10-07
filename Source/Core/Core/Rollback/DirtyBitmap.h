@@ -1,0 +1,64 @@
+// Copyright 2026 YouGame
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// Dirty page bitmap for guest RAM, ported from FaultyPine's dolphin fork (DeltaSaveSlot.h).
+//
+// One byte per 4 KB page of the guest physical address space. Every write to guest RAM sets the
+// byte for each page it touches, and rollback snapshots copy and clear the pages that are set. The
+// JIT sets the bytes inline (EmuCodeBlock::EmitJITDirtyBitmapUpdate), so nothing traps and no
+// page protection is needed. Writes that do not go through the JIT call MarkPhysicalRangeDirty.
+//
+// A marked page only costs a compare at the next snapshot, so marking is allowed to be
+// conservative: a page that was read or marked without changing is harmless.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+#include "Common/CommonTypes.h"
+
+namespace Rollback
+{
+// Guest physical pages are 4 KB regardless of the host page size.
+constexpr std::size_t DIRTY_PAGE_SIZE = 4096;
+
+// Plain global so the JIT can embed its address as an absolute immediate (see
+// EmuCodeBlock::EmitJITDirtyBitmapUpdate).
+struct alignas(64) JITDirtyBitmap
+{
+  static constexpr std::size_t ARENA_SIZE = 512ULL * 1024 * 1024;  // 512 MB
+  static constexpr std::size_t ENTRY_COUNT = ARENA_SIZE / DIRTY_PAGE_SIZE;
+
+  uint8_t entries[ENTRY_COUNT];
+
+  static JITDirtyBitmap& Get()
+  {
+    static JITDirtyBitmap s_instance;
+    return s_instance;
+  }
+
+  void Clear() { std::memset(entries, 0, sizeof(entries)); }
+  void ClearRange(uint32_t first_page, uint32_t page_count)
+  {
+    std::memset(&entries[first_page], 0, page_count);
+  }
+};
+
+// Marks the guest physical range [physical_address, physical_address + size) as written. The
+// address is masked to 29 bits, so virtual addresses (0x80000000, 0x90000000) work too.
+inline void MarkPhysicalRangeDirty(u32 physical_address, std::size_t size)
+{
+  if (size == 0)
+    return;
+  const std::size_t phys = physical_address & 0x1FFF'FFFFu;
+  const std::size_t first = phys / DIRTY_PAGE_SIZE;
+  std::size_t last = (phys + size - 1) / DIRTY_PAGE_SIZE;
+  if (last >= JITDirtyBitmap::ENTRY_COUNT)
+    last = JITDirtyBitmap::ENTRY_COUNT - 1;
+  auto& bitmap = JITDirtyBitmap::Get();
+  for (std::size_t page = first; page <= last; ++page)
+    bitmap.entries[page] = 1;
+}
+}  // namespace Rollback

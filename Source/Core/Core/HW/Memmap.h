@@ -63,15 +63,6 @@ struct LogicalMemoryView
   bool writeable;
 };
 
-// A host mapping of guest RAM (Rollback/Cow.h protects RAM in every one of them).
-struct GuestRamView
-{
-  u8* base;
-  u32 physical_address;
-  u32 size;
-  bool writeable;
-};
-
 class MemoryManager
 {
 public:
@@ -119,9 +110,6 @@ public:
   void DoState(PointerWrap& p);
 
   void UpdateDBATMappings(const PowerPC::BatTable& dbat_table);
-  // Every host mapping of MEM1 and MEM2: the RAM views, and the fastmem arena's physical, BAT and
-  // page-table views.
-  std::vector<GuestRamView> GetGuestRamViews() const;
   // A further mapping of MEM1 (or MEM2) that nothing else uses, so rollback snapshots can read and
   // restore pages whatever their protection elsewhere. Made on first use; null if it can't be.
   u8* GetRollbackAlias(bool exram);
