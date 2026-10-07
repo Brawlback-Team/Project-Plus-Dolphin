@@ -1,4 +1,4 @@
-// Copyright 2026 YouGame
+// Copyright 2026 BrawlbackTeam
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // Dirty page bitmap for guest RAM, ported from FaultyPine's dolphin fork (DeltaSaveSlot.h).
