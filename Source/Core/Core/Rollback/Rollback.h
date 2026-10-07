@@ -16,7 +16,6 @@
 #include <cstddef>
 #include <optional>
 #include <span>
-#include <string_view>
 #include <vector>
 
 #include "Common/Buffer.h"
@@ -38,9 +37,6 @@ bool InSnapshotDoState();
 bool IsResimulating();
 void SetResimulating(bool resimulating);
 
-// Diagnostic checksum of live memory during boot initialization.
-void LogBootMemoryDigest(Core::System& system, std::string_view stage);
-
 // Holds InSnapshotDoState() true for its lifetime.
 class SnapshotScope
 {
@@ -61,14 +57,6 @@ struct MachineImage
   std::vector<u8> l1_cache;
 };
 
-struct SnapshotDigest
-{
-  u64 combined = 0;
-  u64 ram = 0;
-  u64 state = 0;
-  u64 l1_cache = 0;
-};
-
 // A ring of snapshots keyed by frame number. Saving overwrites the oldest slot.
 class SnapshotRing
 {
@@ -87,16 +75,6 @@ public:
   bool Has(s64 frame) const;
   // Forgets every snapshot and stops the NAND journal. Call while emulation is still running.
   void Reset(Core::System& system);
-  // RamChecksum of the snapshot taken at `frame`, or nullopt if it is not in the ring.
-  std::optional<u64> RamChecksum(s64 frame) const;
-  // Debug-only digest of the authoritative RAM, non-RAM state and locked L1 snapshot components.
-  std::optional<SnapshotDigest> Digest(s64 frame) const;
-  // Debug-only per-page RAM checksums, ordered as MEM1 then MEM2.
-  std::optional<std::vector<u64>> PageChecksums(s64 frame) const;
-
-  // The non-RAM state from the most recent Save, for hashing and diagnostics.
-  std::span<const u8> LastState() const;
-
   // Keyframes for mid-game joins. Capture writes what Save would into `image`; call it from the
   // frame-boundary hook. `stop_journal` stops the NAND journal the capture
   // started, for callers with no ring to undo to. LoadImage loads an image from another machine as
@@ -136,8 +114,5 @@ private:
   std::optional<bool> m_dirty_page_tracking;
   const bool m_tracked_bitmap_clear;
 };
-
-// XXH3 of MEM1 then MEM2: the checksum players compare to detect a desync.
-u64 RamChecksum(std::span<const u8> mem1, std::span<const u8> mem2);
 
 }  // namespace Rollback

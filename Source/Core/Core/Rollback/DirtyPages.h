@@ -20,7 +20,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <optional>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -60,11 +59,6 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
              bool tracked_bitmap_clear);
 // Forgets snapshot `id`; its saved pages merge into the next older snapshot's log.
 void Drop(u64 id);
-// RamChecksum (Rollback.h) of RAM as it was at snapshot `id`, rebuilt from the mirror and the logs.
-std::optional<u64> Checksum(u64 id);
-// XXH3 for each 4 KB page at snapshot `id`, ordered as MEM1 pages then MEM2 pages.
-std::optional<std::vector<u64>> PageChecksums(u64 id);
-
 // Memmap calls this when the host mappings of guest RAM change. Tracking stops if RAM is now
 // reachable through page tables, which the bitmap cannot see.
 void OnMappingsChanged(Core::System& system);

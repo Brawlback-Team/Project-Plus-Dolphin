@@ -178,8 +178,6 @@ void MemoryManager::Init()
   m_logical_page_mappings_base = reinterpret_cast<u8*>(m_logical_page_mappings.data());
 
   Clear();
-  Rollback::LogBootMemoryDigest(m_system, "memory_clear");
-
   INFO_LOG_FMT(MEMMAP, "Memory system initialized. RAM at {}", fmt::ptr(m_ram));
   m_is_initialized = true;
 }

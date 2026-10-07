@@ -9,8 +9,6 @@
 #include <memory>
 #include <mutex>
 
-#include <xxh3.h>
-
 #include "Common/Buffer.h"
 #include "Common/Logging/Log.h"
 #include "Core/HW/Memmap.h"
@@ -315,60 +313,6 @@ void Drop(u64 id)
   std::lock_guard lock(t.lock);
   if (t.log)
     t.log->Drop(id);
-}
-
-std::optional<u64> Checksum(u64 id)
-{
-  Tracker& t = T();
-  std::lock_guard lock(t.lock);
-  if (!t.log || !t.log->Has(id))
-    return std::nullopt;
-  std::vector<const u8*> pre_images(t.page_count, nullptr);
-  t.log->ForEachPreImage(id, [&](std::size_t page, const u8* data) { pre_images[page] = data; });
-
-  // Must hash the same bytes in the same order as Rollback::RamChecksum over MEM1 and MEM2.
-  XXH3_state_t* const state = XXH3_createState();
-  XXH3_64bits_reset(state);
-  for (std::size_t a = 0; a < t.areas.size(); ++a)
-  {
-    const std::size_t first = t.area_first_page[a];
-    const std::size_t count = t.areas[a].size / PAGE;
-    for (std::size_t i = 0; i < count; ++i)
-    {
-      const u8* const pre_image = pre_images[first + i];
-      const u8* const data = pre_image ? pre_image : t.mirrors[a].data() + i * PAGE;
-      XXH3_64bits_update(state, data, PAGE);
-    }
-  }
-  const u64 hash = XXH3_64bits_digest(state);
-  XXH3_freeState(state);
-  return hash;
-}
-
-std::optional<std::vector<u64>> PageChecksums(u64 id)
-{
-  Tracker& t = T();
-  std::lock_guard lock(t.lock);
-  if (!t.log || !t.log->Has(id))
-    return std::nullopt;
-
-  std::vector<const u8*> pre_images(t.page_count, nullptr);
-  t.log->ForEachPreImage(id, [&](std::size_t page, const u8* data) { pre_images[page] = data; });
-
-  std::vector<u64> hashes;
-  hashes.reserve(t.page_count);
-  for (std::size_t a = 0; a < t.areas.size(); ++a)
-  {
-    const std::size_t first = t.area_first_page[a];
-    const std::size_t count = t.areas[a].size / PAGE;
-    for (std::size_t i = 0; i < count; ++i)
-    {
-      const u8* const pre_image = pre_images[first + i];
-      const u8* const data = pre_image ? pre_image : t.mirrors[a].data() + i * PAGE;
-      hashes.push_back(XXH3_64bits(data, PAGE));
-    }
-  }
-  return hashes;
 }
 
 void OnMappingsChanged(Core::System& system)
