@@ -92,10 +92,8 @@ void CommitDirtyPages(Tracker& t)
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      u8& dirty = bitmap.entries[first_bitmap_page + i];
-      if (!dirty)
+      if (!bitmap.Consume(first_bitmap_page + i))
         continue;
-      dirty = 0;
       ++t.counters.dirty_pages;
       u8* const live = area.alias + i * PAGE;
       u8* const mirror = t.mirrors[a].data() + i * PAGE;
@@ -110,6 +108,7 @@ void CommitDirtyPages(Tracker& t)
 
 void ResetLocked(Tracker& t)
 {
+  JITDirtyBitmap::Get().SetEnabled(false);
   if (t.log)
     t.next_id = t.log->NextId();
   t.owner = nullptr;
@@ -155,6 +154,7 @@ bool Arm(const void* owner, const std::vector<Area>& areas)
   t.owner = owner;
   // Everything written before this point is already in the mirror.
   JITDirtyBitmap::Get().Clear();
+  JITDirtyBitmap::Get().SetEnabled(true);
   NOTICE_LOG_FMT(CORE, "Rollback: dirty-page snapshots over {} KB of guest RAM",
                  t.page_count * PAGE / 1024);
   return true;
@@ -166,10 +166,10 @@ bool ArmForSystem(Core::System& system, const void* owner)
     return false;
   auto& memory = system.GetMemory();
   // Page-table mappings reach RAM at addresses the bitmap does not index by physical page.
-  if (memory.HasPageTableMappings())
+  if (memory.HasNonCanonicalMappingsForRollback())
   {
-    NOTICE_LOG_FMT(CORE, "Rollback: dirty-page tracking off (page tables mapped); using full-copy "
-                         "snapshots");
+    NOTICE_LOG_FMT(CORE, "Rollback: dirty-page tracking off (noncanonical RAM mapping); using "
+                         "full-copy snapshots");
     return false;
   }
   std::vector<Area> areas;
@@ -255,7 +255,7 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      if (!bitmap.entries[first_bitmap_page + i] || logged[t.area_first_page[a] + i])
+      if (!bitmap.Load(first_bitmap_page + i) || logged[t.area_first_page[a] + i])
         continue;
       ReplacePage(area.alias + i * PAGE, t.mirrors[a].data() + i * PAGE, PhysicalOf(area, i),
                   changed);
@@ -309,12 +309,12 @@ void OnMappingsChanged(Core::System& system)
   std::lock_guard lock(t.lock);
   if (!t.log)
     return;
-  if (system.GetMemory().HasPageTableMappings())
+  if (system.GetMemory().HasNonCanonicalMappingsForRollback())
   {
-    // Writes through the page tables would not set the bitmap at their physical pages, so no
-    // snapshot can be trusted.
-    ERROR_LOG_FMT(CORE, "Rollback: guest RAM is now mapped through page tables; every snapshot is "
-                        "dropped");
+    // The JIT bitmap indexes a masked effective address. Arbitrary BAT or page-table mappings do
+    // not preserve that relationship, so no tracked snapshot can still be trusted.
+    ERROR_LOG_FMT(CORE, "Rollback: guest RAM gained a noncanonical mapping; every dirty-page "
+                        "snapshot is dropped");
     ResetLocked(t);
   }
 }

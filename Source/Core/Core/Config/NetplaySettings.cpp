@@ -53,6 +53,8 @@ const Info<bool> NETPLAY_ROLLBACK_DEBUG_P2_CSTICK{
     {System::Main, "NetPlay", "RollbackDebugP2CStick"}, false};
 const Info<bool> NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2{
     {System::Main, "NetPlay", "RollbackSimulateRemoteP2"}, false};
+const Info<bool> NETPLAY_ROLLBACK_STRESS_TEST{
+    {System::Main, "NetPlay", "RollbackStressTest3F10F"}, false};
 
 const Info<bool> NETPLAY_SAVEDATA_LOAD{{System::Main, "NetPlay", "SyncSaves"}, true};
 const Info<bool> NETPLAY_SAVEDATA_WRITE{{System::Main, "NetPlay", "WriteSaveData"}, false};

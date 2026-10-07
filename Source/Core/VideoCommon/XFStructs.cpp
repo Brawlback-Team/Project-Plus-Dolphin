@@ -272,7 +272,7 @@ void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
   else
   {
     auto& memory = system.GetMemory();
-    newData = reinterpret_cast<u32*>(memory.GetPointerForRange(
+    newData = reinterpret_cast<u32*>(memory.GetPointerForRangeReadOnly(
         g_main_cp_state.array_bases[array] + g_main_cp_state.array_strides[array] * index,
         buf_size));
   }
@@ -301,7 +301,7 @@ void PreprocessIndexedXF(CPArray array, u32 index, u16 address, u8 size)
 
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
-  const u8* new_data = memory.GetPointerForRange(
+  const u8* new_data = memory.GetPointerForRangeReadOnly(
       g_preprocess_cp_state.array_bases[array] + g_preprocess_cp_state.array_strides[array] * index,
       buf_size);
 

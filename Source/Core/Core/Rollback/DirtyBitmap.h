@@ -13,9 +13,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 #include "Common/CommonTypes.h"
 
@@ -31,6 +31,9 @@ struct alignas(64) JITDirtyBitmap
   static constexpr std::size_t ARENA_SIZE = 512ULL * 1024 * 1024;  // 512 MB
   static constexpr std::size_t ENTRY_COUNT = ARENA_SIZE / DIRTY_PAGE_SIZE;
 
+  // Generated JIT code checks this before calculating a bitmap index. Keeping the check in the
+  // generated block means already-compiled blocks safely switch as rollback arms and disarms.
+  alignas(64) std::atomic<u8> tracking_enabled{0};
   uint8_t entries[ENTRY_COUNT];
 
   static JITDirtyBitmap& Get()
@@ -39,10 +42,28 @@ struct alignas(64) JITDirtyBitmap
     return s_instance;
   }
 
-  void Clear() { std::memset(entries, 0, sizeof(entries)); }
+  bool IsEnabled() const { return tracking_enabled.load(std::memory_order_acquire) != 0; }
+  void SetEnabled(bool enabled)
+  {
+    tracking_enabled.store(enabled ? 1 : 0, std::memory_order_release);
+  }
+  u8 Consume(std::size_t page)
+  {
+    return std::atomic_ref<u8>(entries[page]).exchange(0, std::memory_order_acq_rel);
+  }
+  u8 Load(std::size_t page) const
+  {
+    return std::atomic_ref<u8>(const_cast<u8&>(entries[page])).load(std::memory_order_acquire);
+  }
+  void Mark(std::size_t page)
+  {
+    std::atomic_ref<u8>(entries[page]).store(1, std::memory_order_release);
+  }
+  void Clear() { ClearRange(0, ENTRY_COUNT); }
   void ClearRange(uint32_t first_page, uint32_t page_count)
   {
-    std::memset(&entries[first_page], 0, page_count);
+    for (std::size_t page = first_page; page < first_page + page_count; ++page)
+      std::atomic_ref<u8>(entries[page]).store(0, std::memory_order_release);
   }
 };
 
@@ -52,13 +73,15 @@ inline void MarkPhysicalRangeDirty(u32 physical_address, std::size_t size)
 {
   if (size == 0)
     return;
+  auto& bitmap = JITDirtyBitmap::Get();
+  if (!bitmap.IsEnabled())
+    return;
   const std::size_t phys = physical_address & 0x1FFF'FFFFu;
   const std::size_t first = phys / DIRTY_PAGE_SIZE;
   std::size_t last = (phys + size - 1) / DIRTY_PAGE_SIZE;
   if (last >= JITDirtyBitmap::ENTRY_COUNT)
     last = JITDirtyBitmap::ENTRY_COUNT - 1;
-  auto& bitmap = JITDirtyBitmap::Get();
   for (std::size_t page = first; page <= last; ++page)
-    bitmap.entries[page] = 1;
+    bitmap.Mark(page);
 }
 }  // namespace Rollback

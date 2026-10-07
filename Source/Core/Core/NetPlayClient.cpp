@@ -1880,9 +1880,12 @@ bool NetPlayClient::StartGame(const std::string& path)
                                         File::DeleteDirRecursively(redirect_path);
                                     });
 
+  const bool rollback_stress_test =
+      m_local_player->IsHost() && m_players.size() == 1 &&
+      Config::Get(Config::NETPLAY_ROLLBACK_STRESS_TEST);
   const bool simulate_remote_p2 =
       m_local_player->IsHost() && m_players.size() == 1 &&
-      Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2);
+      (Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2) || rollback_stress_test);
 
   m_net_settings.local_player_id = m_local_player->pid;
   NetPlay::NetSettings boot_net_settings = m_net_settings;
@@ -1914,7 +1917,7 @@ bool NetPlayClient::StartGame(const std::string& path)
 
   if (!Rollback::StartGekkoSession("Project+", m_current_game, num_players, local_seat,
                                    m_rollback_player_endpoints, local_delay, prediction_window,
-                                   debug_p2_cstick, simulate_remote_p2))
+                                   debug_p2_cstick, simulate_remote_p2, rollback_stress_test))
   {
     ERROR_LOG_FMT(NETPLAY, "GekkoNet: failed to start native UDP rollback session");
     return false;

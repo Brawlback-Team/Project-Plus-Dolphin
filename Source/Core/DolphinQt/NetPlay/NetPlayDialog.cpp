@@ -262,6 +262,13 @@ void NetPlayDialog::CreateMainLayout()
          "one-way packet latency. The peer uses the Player 2 C-stick test pattern so prediction "
          "transitions trigger rollback."));
   m_rollback_simulate_remote_p2_action->setCheckable(true);
+  m_rollback_stress_test_action =
+      m_other_menu->addAction(tr("Rollback Benchmark: Force 3F Every 10F"));
+  m_rollback_stress_test_action->setToolTip(
+      tr("In a host-alone lobby, run an in-process Player 2 whose input changes every 10 frames "
+         "and whose GekkoNet packets arrive exactly 3 emulated frames late. GekkoNet remains "
+         "responsible for detecting and requesting every rollback."));
+  m_rollback_stress_test_action->setCheckable(true);
 
   m_game_button->setDefault(false);
   m_game_button->setAutoDefault(false);
@@ -472,6 +479,8 @@ void NetPlayDialog::ConnectWidgets()
           &NetPlayDialog::SaveSettings);
   connect(m_rollback_simulate_remote_p2_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
+  connect(m_rollback_stress_test_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
 }
@@ -601,6 +610,7 @@ void NetPlayDialog::show(std::string nickname, bool use_traversal)
   m_network_menu->menuAction()->setVisible(is_hosting);
   m_game_digest_menu->menuAction()->setVisible(is_hosting);
   m_rollback_simulate_remote_p2_action->setVisible(is_hosting);
+  m_rollback_stress_test_action->setVisible(is_hosting);
 #ifdef HAS_LIBMGBA
   m_hide_remote_gbas_action->setVisible(is_hosting);
 #else
@@ -1204,6 +1214,7 @@ void NetPlayDialog::LoadSettings()
       Config::Get(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK);
   const bool rollback_simulate_remote_p2 =
       Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2);
+  const bool rollback_stress_test = Config::Get(Config::NETPLAY_ROLLBACK_STRESS_TEST);
 
   m_minimum_buffer_size_box->setValue(minimum_buffer_size);
   m_player_buffer_size_box->setValue(player_buffer_size);
@@ -1226,6 +1237,7 @@ void NetPlayDialog::LoadSettings()
   m_spectator_mode->setChecked(spectator_mode);
   m_rollback_debug_p2_cstick_action->setChecked(rollback_debug_p2_cstick);
   m_rollback_simulate_remote_p2_action->setChecked(rollback_simulate_remote_p2);
+  m_rollback_stress_test_action->setChecked(rollback_stress_test);
 
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
 
@@ -1273,6 +1285,8 @@ void NetPlayDialog::SaveSettings()
                   m_rollback_debug_p2_cstick_action->isChecked());
   Config::SetBase(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2,
                   m_rollback_simulate_remote_p2_action->isChecked());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_STRESS_TEST,
+                  m_rollback_stress_test_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())

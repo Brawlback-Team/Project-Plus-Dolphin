@@ -39,7 +39,7 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard);
 bool StartGekkoSession(const std::string& game_name, u32 session_id, int players, int local_player,
                        const std::vector<std::string>& player_endpoints,
                        int local_delay, int prediction_window, bool debug_p2_cstick,
-                       bool simulate_remote_p2);
+                       bool simulate_remote_p2, bool stress_test);
 void StopGekkoSession();
 bool IsGekkoSessionActive();
 

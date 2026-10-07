@@ -49,6 +49,7 @@ extern const Info<bool> NETPLAY_BRAWL_MUSIC_OFF;
 extern const Info<bool> NETPLAY_SPECTATOR_MODE;
 extern const Info<bool> NETPLAY_ROLLBACK_DEBUG_P2_CSTICK;
 extern const Info<bool> NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2;
+extern const Info<bool> NETPLAY_ROLLBACK_STRESS_TEST;
 
 extern const Info<bool> NETPLAY_SAVEDATA_LOAD;
 extern const Info<bool> NETPLAY_SAVEDATA_WRITE;

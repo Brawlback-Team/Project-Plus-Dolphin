@@ -357,7 +357,7 @@ std::optional<IPCReply> FSDevice::Write(const ReadWriteRequest& request)
   return MakeIPCReply([&](Ticks t) {
     auto& system = GetSystem();
     auto& memory = system.GetMemory();
-    return m_core.Write(request.fd, memory.GetPointerForRange(request.buffer, request.size),
+    return m_core.Write(request.fd, memory.GetPointerForRangeReadOnly(request.buffer, request.size),
                         request.size, request.buffer, t);
   });
 }

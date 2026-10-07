@@ -529,6 +529,37 @@ u8* MemoryManager::GetRollbackAlias(bool exram)
   return alias;
 }
 
+bool MemoryManager::HasNonCanonicalMappingsForRollback() const
+{
+  const auto overlaps_tracked_ram = [this](const LogicalMemoryView& entry) {
+    const u64 start = entry.physical_address;
+    const u64 end = start + entry.mapped_size;
+    const bool overlaps_mem1 = start < GetRamSize() && end > 0;
+    const bool overlaps_mem2 =
+        m_exram && start < 0x1000'0000ULL + GetExRamSize() && end > 0x1000'0000ULL;
+    return entry.writeable && (overlaps_mem1 || overlaps_mem2);
+  };
+
+  for (const auto& [logical_address, entry] : m_page_table_mapped_entries)
+  {
+    if (overlaps_tracked_ram(entry) &&
+        (logical_address & 0x1FFF'FFFFu) != entry.physical_address)
+    {
+      return true;
+    }
+  }
+
+  for (const auto& [logical_address, entry] : m_dbat_mapped_entries)
+  {
+    if (overlaps_tracked_ram(entry) &&
+        (logical_address & 0x1FFF'FFFFu) != entry.physical_address)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 void MemoryManager::DoState(PointerWrap& p)
 {
   const u32 current_ram_size = GetRamSize();
@@ -667,7 +698,7 @@ void MemoryManager::Clear()
     memset(m_exram, 0, GetExRamSize());
 }
 
-u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
+u8* MemoryManager::GetPointerForRangeReadOnly(u32 address, size_t size) const
 {
   std::span<u8> span = GetSpanForAddress(address);
 
@@ -690,12 +721,20 @@ u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
   return span.data();
 }
 
+u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
+{
+  u8* const pointer = GetPointerForRangeReadOnly(address, size);
+  if (pointer)
+    Rollback::MarkPhysicalRangeDirty(address, size);
+  return pointer;
+}
+
 void MemoryManager::CopyFromEmu(void* data, u32 address, size_t size) const
 {
   if (size == 0)
     return;
 
-  void* pointer = GetPointerForRange(address, size);
+  void* pointer = GetPointerForRangeReadOnly(address, size);
   if (!pointer)
   {
     PanicAlertFmt("Invalid range in CopyFromEmu. {:x} bytes from {:#010x}", size, address);

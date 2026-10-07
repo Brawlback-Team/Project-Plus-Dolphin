@@ -57,6 +57,8 @@ constexpr int MAX_PORTS = 4;
 constexpr int RING_SNAPSHOT_SLOTS = 12;
 constexpr int WAIT_SLEEP_US = 100;
 constexpr auto SIMULATED_P2_LATENCY = std::chrono::milliseconds(40);
+constexpr u64 STRESS_PACKET_DELAY_FRAMES = 3;
+constexpr u64 STRESS_INPUT_PERIOD_FRAMES = 10;
 constexpr std::string_view SIMULATED_P1_ADDRESS = "in-process-p1";
 constexpr std::string_view SIMULATED_P2_ADDRESS = "in-process-p2";
 constexpr u32 BRAWL_FRAME_HOOK_ADDR = 0x80017504;
@@ -107,6 +109,8 @@ struct QueuedEvent
 struct SimulatedPacket
 {
   std::chrono::steady_clock::time_point delivery_time;
+  u64 delivery_frame = 0;
+  bool frame_delayed = false;
   std::vector<char> data;
 };
 
@@ -115,6 +119,10 @@ std::deque<SimulatedPacket> s_packets_to_fake;
 std::vector<GekkoNetResult*> s_main_results;
 std::vector<GekkoNetResult*> s_fake_results;
 std::vector<GekkoNetResult*> s_shared_results;
+u64 s_simulated_link_frame = 0;
+u64 s_last_stress_peer_update_frame = 0;
+bool s_stress_mode = false;
+bool s_stress_frame_delay_active = false;
 
 bool ParsePeerEndpoint(std::string_view endpoint, ENetAddress* address)
 {
@@ -172,9 +180,21 @@ GekkoNetAdapter s_shared_adapter{SharedAdapterSend, SharedAdapterReceive, Shared
 
 void QueueSimulatedPacket(std::deque<SimulatedPacket>* destination, const char* data, int length)
 {
-  destination->push_back(
-      {std::chrono::steady_clock::now() + SIMULATED_P2_LATENCY,
-       std::vector<char>(data, data + length)});
+  SimulatedPacket packet;
+  packet.data.assign(data, data + length);
+  if (s_stress_mode && s_stress_frame_delay_active)
+  {
+    packet.delivery_frame = s_simulated_link_frame + STRESS_PACKET_DELAY_FRAMES;
+    packet.frame_delayed = true;
+  }
+  else
+  {
+    // Stress mode keeps handshake traffic immediate. Frame-delayed delivery begins only after
+    // Gekko reports that the session has started, avoiding a frame-zero synchronization deadlock.
+    packet.delivery_time = std::chrono::steady_clock::now() +
+                           (s_stress_mode ? std::chrono::milliseconds(0) : SIMULATED_P2_LATENCY);
+  }
+  destination->push_back(std::move(packet));
 }
 
 void MainAdapterSend(GekkoNetAddress*, const char* data, int length)
@@ -193,8 +213,13 @@ GekkoNetResult** ReceiveSimulatedPackets(std::deque<SimulatedPacket>* inbox,
 {
   results->clear();
   const auto now = std::chrono::steady_clock::now();
-  while (!inbox->empty() && inbox->front().delivery_time <= now)
+  while (!inbox->empty())
   {
+    const SimulatedPacket& front = inbox->front();
+    const bool ready = front.frame_delayed ? s_simulated_link_frame >= front.delivery_frame :
+                                             front.delivery_time <= now;
+    if (!ready)
+      break;
     SimulatedPacket packet = std::move(inbox->front());
     inbox->pop_front();
 
@@ -239,6 +264,10 @@ void ResetSimulatedLink()
   s_packets_to_fake.clear();
   s_main_results.clear();
   s_fake_results.clear();
+  s_simulated_link_frame = 0;
+  s_last_stress_peer_update_frame = 0;
+  s_stress_mode = false;
+  s_stress_frame_delay_active = false;
 }
 
 struct GekkoManager
@@ -257,6 +286,7 @@ struct GekkoManager
   bool local_uses_gc_adapter = false;
   bool debug_p2_cstick = false;
   bool simulate_remote_p2 = false;
+  bool stress_test = false;
   u64 local_input_frame = 0;
   std::vector<int> player_handles;
   std::deque<QueuedEvent> pending_events;
@@ -299,6 +329,9 @@ struct GekkoManager
   u64 perf_rollback_burst_count = 0;
   double perf_rollback_burst_ms = 0.0;
   double perf_rollback_burst_max_ms = 0.0;
+  u64 current_rollback_replays = 0;
+  u64 perf_rollback_depth_total = 0;
+  u64 perf_rollback_depth_max = 0;
   std::optional<std::chrono::steady_clock::time_point> last_real_advance;
   u64 perf_real_interval_count = 0;
   double perf_real_interval_ms = 0.0;
@@ -361,7 +394,7 @@ bool IsGekkoSessionActive()
 bool StartGekkoSession(const std::string& game_name, u32 session_id, int players, int local_player,
                        const std::vector<std::string>& player_endpoints,
                        int local_delay, int prediction_window, bool debug_p2_cstick,
-                       bool simulate_remote_p2)
+                       bool simulate_remote_p2, bool stress_test)
 {
   StopGekkoSession();
 
@@ -378,6 +411,11 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
                   "GekkoNet: simulated remote player 2 requires a two-player host session");
     return false;
   }
+  if (stress_test && !simulate_remote_p2)
+  {
+    ERROR_LOG_FMT(CORE, "GekkoNet: rollback stress test requires the simulated remote peer");
+    return false;
+  }
 
   if (!gekko_create(&g_manager.session, GekkoGameSession))
   {
@@ -386,7 +424,8 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   }
 
   const int clamped_delay = std::clamp(local_delay, 0, 10);
-  const int clamped_prediction = std::clamp(prediction_window, 1, 10);
+  const int clamped_prediction =
+      std::clamp(std::max(prediction_window, stress_test ? 3 : 1), 1, 10);
 
   GekkoConfig config{};
   config.num_players = static_cast<unsigned char>(players);
@@ -446,6 +485,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
       Config::Get(Config::GetInfoForSIDevice(0)) == SerialInterface::SIDEVICE_WIIU_ADAPTER;
   g_manager.debug_p2_cstick = debug_p2_cstick;
   g_manager.simulate_remote_p2 = simulate_remote_p2;
+  g_manager.stress_test = stress_test;
   g_manager.local_input_frame = 0;
   g_manager.local_handle = -1;
   g_manager.simulated_peer_p2_handle = -1;
@@ -476,6 +516,9 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.perf_rollback_burst_count = 0;
   g_manager.perf_rollback_burst_ms = 0.0;
   g_manager.perf_rollback_burst_max_ms = 0.0;
+  g_manager.current_rollback_replays = 0;
+  g_manager.perf_rollback_depth_total = 0;
+  g_manager.perf_rollback_depth_max = 0;
   g_manager.last_real_advance.reset();
   g_manager.perf_real_interval_count = 0;
   g_manager.perf_real_interval_ms = 0.0;
@@ -546,6 +589,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   if (simulate_remote_p2)
   {
     ResetSimulatedLink();
+    s_stress_mode = stress_test;
     if (!gekko_create(&g_manager.simulated_peer_session, GekkoGameSession))
     {
       ERROR_LOG_FMT(CORE, "GekkoNet: Failed to create simulated player 2 peer session");
@@ -571,7 +615,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
     }
     g_manager.simulated_peer_p2_handle = fake_local_p2;
     gekko_set_local_delay(g_manager.simulated_peer_session, fake_local_p2,
-                          static_cast<unsigned char>(clamped_delay));
+                          static_cast<unsigned char>(stress_test ? 0 : clamped_delay));
   }
 
   g_manager.ring = std::make_unique<SnapshotRing>(RING_SNAPSHOT_SLOTS);
@@ -581,11 +625,12 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   NOTICE_LOG_FMT(CORE,
                  "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, delay={}, "
                  "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-                 "simulated_one_way_latency_ms={})",
+                 "simulated_one_way_latency_ms={}, stress_3f_every_10f={})",
                  game_name, players, local_player, session_id, clamped_delay,
                  clamped_prediction, g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad",
                  debug_p2_cstick, simulate_remote_p2,
-                 simulate_remote_p2 ? SIMULATED_P2_LATENCY.count() : 0);
+                 simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
+                 stress_test);
   return true;
 }
 
@@ -647,6 +692,15 @@ static void ApplyDebugCStickPattern(GCPadStatus* status, u64 frame)
   status->substickY = static_cast<u8>(GCPadStatus::C_STICK_CENTER_Y + y);
 }
 
+static void ApplyStressCStickPattern(GCPadStatus* status, u64 frame)
+{
+  // A transition every ten frames defeats repeat-last-input prediction. Alternating left/right
+  // avoids a neutral interval whose first prediction could accidentally be correct.
+  const bool right = ((frame / STRESS_INPUT_PERIOD_FRAMES) & 1) == 0;
+  status->substickX = static_cast<u8>(GCPadStatus::C_STICK_CENTER_X + (right ? 90 : -90));
+  status->substickY = GCPadStatus::C_STICK_CENTER_Y;
+}
+
 static void SubmitLocalInput()
 {
   g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
@@ -690,12 +744,16 @@ static void SubmitLocalInput()
   if (g_manager.simulated_peer_session && g_manager.simulated_peer_p2_handle >= 0)
   {
     GCPadStatus simulated_p2{};
-    ApplyDebugCStickPattern(&simulated_p2, g_manager.local_input_frame);
+    if (g_manager.stress_test)
+      ApplyStressCStickPattern(&simulated_p2, g_manager.local_input_frame);
+    else
+      ApplyDebugCStickPattern(&simulated_p2, g_manager.local_input_frame);
     WirePad simulated_wire = EncodePad(simulated_p2);
     gekko_add_local_input(g_manager.simulated_peer_session,
                           g_manager.simulated_peer_p2_handle, &simulated_wire);
   }
   ++g_manager.local_input_frame;
+  s_simulated_link_frame = g_manager.local_input_frame;
 }
 
 static void PumpSimulatedPeer()
@@ -704,6 +762,17 @@ static void PumpSimulatedPeer()
     return;
 
   gekko_network_poll(g_manager.simulated_peer_session);
+  // Once deterministic frame delay is active, advance the hidden protocol peer exactly once per
+  // visible real frame. Repeated calls in the 100 us wait loop still poll packets but cannot make
+  // the hidden session race ahead and change the requested rollback depth.
+  if (g_manager.stress_test && s_stress_frame_delay_active &&
+      s_last_stress_peer_update_frame == s_simulated_link_frame)
+  {
+    return;
+  }
+  if (g_manager.stress_test && s_stress_frame_delay_active)
+    s_last_stress_peer_update_frame = s_simulated_link_frame;
+
   int event_count = 0;
   GekkoGameEvent** events =
       gekko_update_session(g_manager.simulated_peer_session, &event_count);
@@ -823,7 +892,8 @@ static void MaybeLogPerformance()
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
       "replay_exec {:.3f}/{:.3f} ms ({}); burst {:.3f}/{:.3f} ms ({}); "
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
-      "RAM dirty/saved pages {}/{}; udp tx/rx/reject {}/{}/{}; ahead={:.2f}",
+      "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
+      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}",
       fps, g_manager.perf_real_frames,
       average(g_manager.perf_save_ms, g_manager.perf_save_count), g_manager.perf_save_max_ms,
       g_manager.perf_save_count,
@@ -842,9 +912,15 @@ static void MaybeLogPerformance()
       g_manager.perf_local_byte_changes[3], g_manager.perf_local_byte_changes[4],
       g_manager.perf_local_byte_changes[5], g_manager.perf_local_byte_changes[6],
       g_manager.perf_local_byte_changes[7],
+      average(static_cast<double>(g_manager.perf_rollback_depth_total),
+              g_manager.perf_rollback_burst_count),
+      g_manager.perf_rollback_depth_max,
       cow.dirty_pages - g_manager.perf_cow_start.dirty_pages,
       cow.pages_recorded - g_manager.perf_cow_start.pages_recorded,
-      udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session));
+      (cow.dirty_pages - g_manager.perf_cow_start.dirty_pages) -
+          (cow.pages_recorded - g_manager.perf_cow_start.pages_recorded),
+      udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session),
+      g_manager.stress_test);
 
   g_manager.perf_window_start = now;
   g_manager.perf_cow_start = cow;
@@ -867,6 +943,8 @@ static void MaybeLogPerformance()
   g_manager.perf_rollback_burst_count = 0;
   g_manager.perf_rollback_burst_ms = 0.0;
   g_manager.perf_rollback_burst_max_ms = 0.0;
+  g_manager.perf_rollback_depth_total = 0;
+  g_manager.perf_rollback_depth_max = 0;
   g_manager.perf_real_interval_count = 0;
   g_manager.perf_real_interval_ms = 0.0;
   g_manager.perf_real_interval_max_ms = 0.0;
@@ -911,7 +989,10 @@ static bool PrepareQueuedFrame(Core::System& system)
               system.GetCoreTiming().GetThrottleReference();
         }
         if (!g_manager.rollback_burst_start)
+        {
           g_manager.rollback_burst_start = std::chrono::steady_clock::now();
+          g_manager.current_rollback_replays = 0;
+        }
         const auto start = std::chrono::steady_clock::now();
         if (!g_manager.ring->Load(system, SnapshotFrameKey(event.frame)))
         {
@@ -946,11 +1027,16 @@ static bool PrepareQueuedFrame(Core::System& system)
         g_manager.perf_rollback_burst_ms += elapsed;
         g_manager.perf_rollback_burst_max_ms =
             std::max(g_manager.perf_rollback_burst_max_ms, elapsed);
+        g_manager.perf_rollback_depth_total += g_manager.current_rollback_replays;
+        g_manager.perf_rollback_depth_max =
+            std::max(g_manager.perf_rollback_depth_max, g_manager.current_rollback_replays);
+        g_manager.current_rollback_replays = 0;
         g_manager.rollback_burst_start.reset();
       }
       if (resimulating)
       {
         ++g_manager.perf_replay_frames;
+        ++g_manager.current_rollback_replays;
       }
       else
       {
@@ -1095,6 +1181,14 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
         break;
       case GekkoSessionStarted:
         NOTICE_LOG_FMT(CORE, "GekkoNet: Session started! Rollback active.");
+        if (g_manager.stress_test && !s_stress_frame_delay_active)
+        {
+          s_stress_frame_delay_active = true;
+          s_last_stress_peer_update_frame = 0;
+          NOTICE_LOG_FMT(CORE,
+                         "GekkoNet benchmark: deterministic 3-frame packets active; Player 2 "
+                         "changes input every 10 frames");
+        }
         break;
       case GekkoDesyncDetected:
         ERROR_LOG_FMT(CORE, "GekkoNet: Desync detected at frame {} (remote handle {})!",
