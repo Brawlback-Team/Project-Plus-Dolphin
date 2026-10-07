@@ -43,7 +43,7 @@ u32 UndoLog::NextMark() const
 u64 UndoLog::Open()
 {
   m_logs.push_back(Log{m_next_id++, {}});
-  // Recording runs in a fault handler and should not allocate.
+  // Reserve entry storage so committing dirty pages rarely allocates at a frame boundary.
   m_logs.back().entries.reserve(std::max<std::size_t>(1024, m_page_count / 8));
   return m_logs.back().id;
 }

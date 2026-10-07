@@ -4,7 +4,8 @@
 // Orca rollback core: exact whole-machine snapshots, saved and restored at the frame boundary.
 //
 // A snapshot is RAM (MEM1, MEM2, the locked L1 cache) plus everything else through Dolphin's
-// DoState with RAM skipped. RAM is kept as undo logs over a dirty page bitmap (Cow.h). Because
+// DoState with RAM skipped. RAM is kept as undo logs over a dirty page bitmap (DirtyPages.h).
+// Because
 // saves and loads happen at the same instruction, CPU, DSP, timing and device state all come back
 // exactly. Subsystems check
 // InSnapshotDoState() to skip what a rollback must not touch: RAM inside DoState, JIT clears on
@@ -100,21 +101,21 @@ private:
     Common::UniqueBuffer<u8> state;
     std::size_t state_size = 0;
     u64 nand_journal_mark = 0;  // NAND journal position at save time
-    // Copy-on-write snapshot id for MEM1/MEM2, or 0 when they are copied into mem1/mem2.
-    u64 cow_id = 0;
+    // Dirty-page snapshot id for MEM1/MEM2, or 0 when they are copied into mem1/mem2.
+    u64 page_snapshot_id = 0;
   };
 
   Slot* Find(s64 frame);
   const Slot* Find(s64 frame) const;
-  // Empties a slot; its copy-on-write pages merge into the previous snapshot.
+  // Empties a slot; its dirty-page history merges into the previous snapshot.
   void Forget(Slot* slot);
-  // Whether saves are copy-on-write; decided, and tracking armed, at the first save.
-  bool UseCow(Core::System& system, bool* armed_now);
+  // Whether saves use dirty-page tracking; decided, and tracking armed, at the first save.
+  bool UseDirtyPageTracking(Core::System& system, bool* armed_now);
 
   std::vector<Slot> m_slots;
   std::size_t m_next = 0;
   std::size_t m_last = 0;
-  std::optional<bool> m_cow;
+  std::optional<bool> m_dirty_page_tracking;
 };
 
 // XXH3 of MEM1 then MEM2: the checksum players compare to detect a desync.

@@ -9,8 +9,8 @@
 // Restores and checksums are rebuilt from the mirror and the logs.
 //
 // Invariant: a page that is not marked dirty has the same bytes live as in the mirror. Every guest
-// RAM write must therefore set the bitmap: JIT stores do it inline, and the other writers go through
-// MemoryManager pointer accessors (GetPointerForRange) or call MarkPhysicalRangeDirty.
+// RAM write must therefore set the bitmap: JIT stores do it inline, and the other writers go
+// through MemoryManager pointer accessors (GetPointerForRange) or call MarkPhysicalRangeDirty.
 //
 // Threading: the CPU thread drives this, and the bitmap can be set from other threads, so all
 // tracker state is behind a lock. One snapshot ring owns the tracker at a time.
@@ -30,7 +30,7 @@ namespace Core
 class System;
 }
 
-namespace Rollback::Cow
+namespace Rollback::DirtyPages
 {
 // A tracked region of guest physical memory and a host mapping of it that the tracker can read and
 // write freely.
@@ -74,4 +74,4 @@ struct Counters
   u64 pages_recorded = 0;  // changed pages saved into undo logs
 };
 Counters GetCounters();
-}  // namespace Rollback::Cow
+}  // namespace Rollback::DirtyPages

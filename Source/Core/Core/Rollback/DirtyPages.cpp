@@ -1,7 +1,7 @@
 // Copyright 2026 YouGame
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "Core/Rollback/Cow.h"
+#include "Core/Rollback/DirtyPages.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -18,7 +18,7 @@
 #include "Core/Rollback/UndoLog.h"
 #include "Core/System.h"
 
-namespace Rollback::Cow
+namespace Rollback::DirtyPages
 {
 namespace
 {
@@ -332,4 +332,4 @@ Counters GetCounters()
   std::lock_guard lock(t.lock);
   return t.counters;
 }
-}  // namespace Rollback::Cow
+}  // namespace Rollback::DirtyPages

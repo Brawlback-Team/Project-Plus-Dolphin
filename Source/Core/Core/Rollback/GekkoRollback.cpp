@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -26,8 +26,8 @@
 
 #include <gekkonet.h>
 
-#include "Common/FPURoundMode.h"
 #include "Common/ENet.h"
+#include "Common/FPURoundMode.h"
 #include "Common/Logging/Log.h"
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
@@ -39,7 +39,7 @@
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
-#include "Core/Rollback/Cow.h"
+#include "Core/Rollback/DirtyPages.h"
 #include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
@@ -62,7 +62,7 @@ constexpr u64 STRESS_INPUT_PERIOD_FRAMES = 10;
 constexpr std::string_view SIMULATED_P1_ADDRESS = "in-process-p1";
 constexpr std::string_view SIMULATED_P2_ADDRESS = "in-process-p2";
 constexpr u32 BRAWL_FRAME_HOOK_ADDR = 0x80017504;
-constexpr u32 BRAWL_EXPECTED_OPCODE = 0x90170100; // stw r0, 0x100(r23)
+constexpr u32 BRAWL_EXPECTED_OPCODE = 0x90170100;  // stw r0, 0x100(r23)
 
 // Host floating point scope to protect guest FPU rounding modes
 u64 HostFloatControl()
@@ -238,14 +238,12 @@ GekkoNetResult** ReceiveSimulatedPackets(std::deque<SimulatedPacket>* inbox,
 
 GekkoNetResult** MainAdapterReceive(int* length)
 {
-  return ReceiveSimulatedPackets(&s_packets_to_main, &s_main_results, SIMULATED_P2_ADDRESS,
-                                 length);
+  return ReceiveSimulatedPackets(&s_packets_to_main, &s_main_results, SIMULATED_P2_ADDRESS, length);
 }
 
 GekkoNetResult** FakeAdapterReceive(int* length)
 {
-  return ReceiveSimulatedPackets(&s_packets_to_fake, &s_fake_results, SIMULATED_P1_ADDRESS,
-                                 length);
+  return ReceiveSimulatedPackets(&s_packets_to_fake, &s_fake_results, SIMULATED_P1_ADDRESS, length);
 }
 
 void SimulatedAdapterFree(void* data)
@@ -253,10 +251,8 @@ void SimulatedAdapterFree(void* data)
   std::free(data);
 }
 
-GekkoNetAdapter s_main_simulated_adapter{MainAdapterSend, MainAdapterReceive,
-                                         SimulatedAdapterFree};
-GekkoNetAdapter s_fake_simulated_adapter{FakeAdapterSend, FakeAdapterReceive,
-                                         SimulatedAdapterFree};
+GekkoNetAdapter s_main_simulated_adapter{MainAdapterSend, MainAdapterReceive, SimulatedAdapterFree};
+GekkoNetAdapter s_fake_simulated_adapter{FakeAdapterSend, FakeAdapterReceive, SimulatedAdapterFree};
 
 void ResetSimulatedLink()
 {
@@ -305,7 +301,7 @@ struct GekkoManager
   // Rolling diagnostics. These distinguish emulator snapshot cost from time spent waiting for
   // GekkoNet to authorize the next frame.
   std::chrono::steady_clock::time_point perf_window_start{};
-  Cow::Counters perf_cow_start{};
+  DirtyPages::Counters perf_dirty_pages_start{};
   u64 perf_real_frames = 0;
   u64 perf_replay_frames = 0;
   u64 perf_save_count = 0;
@@ -392,9 +388,9 @@ bool IsGekkoSessionActive()
 }
 
 bool StartGekkoSession(const std::string& game_name, u32 session_id, int players, int local_player,
-                       const std::vector<std::string>& player_endpoints,
-                       int local_delay, int prediction_window, bool debug_p2_cstick,
-                       bool simulate_remote_p2, bool stress_test)
+                       const std::vector<std::string>& player_endpoints, int local_delay,
+                       int prediction_window, bool debug_p2_cstick, bool simulate_remote_p2,
+                       bool stress_test)
 {
   StopGekkoSession();
 
@@ -402,13 +398,13 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
 
   if (players < 1 || players > 4 || local_player < 1 || local_player > players)
   {
-    ERROR_LOG_FMT(CORE, "GekkoNet: Invalid session parameters (players={}, local={})", players, local_player);
+    ERROR_LOG_FMT(CORE, "GekkoNet: Invalid session parameters (players={}, local={})", players,
+                  local_player);
     return false;
   }
   if (simulate_remote_p2 && (players != 2 || local_player != 1))
   {
-    ERROR_LOG_FMT(CORE,
-                  "GekkoNet: simulated remote player 2 requires a two-player host session");
+    ERROR_LOG_FMT(CORE, "GekkoNet: simulated remote player 2 requires a two-player host session");
     return false;
   }
   if (stress_test && !simulate_remote_p2)
@@ -433,7 +429,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   config.input_prediction_window = static_cast<unsigned char>(clamped_prediction);
   config.spectator_delay = 0;
   config.input_size = static_cast<unsigned int>(sizeof(WirePad));
-  config.state_size = 0; // State is maintained internally in Dolphin's SnapshotRing
+  config.state_size = 0;  // State is maintained internally in Dolphin's SnapshotRing
   // GekkoNet's limited-saving mode rebuilds confirmed snapshots by loading and replaying frames.
   // That is counterproductive for whole-emulator states, whose loads and replay frames are much
   // more expensive than a small game's state copy. Keep per-frame snapshots until GekkoNet has an
@@ -493,7 +489,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.player_handles.assign(players, -1);
   g_manager.pending_events.clear();
   g_manager.perf_window_start = {};
-  g_manager.perf_cow_start = Cow::GetCounters();
+  g_manager.perf_dirty_pages_start = DirtyPages::GetCounters();
   g_manager.perf_real_frames = 0;
   g_manager.perf_replay_frames = 0;
   g_manager.perf_save_count = 0;
@@ -562,8 +558,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
         destroy_failed_session();
         return false;
       }
-      NOTICE_LOG_FMT(CORE, "GekkoNet: Native player {} endpoint {}", p,
-                     player_endpoints[p]);
+      NOTICE_LOG_FMT(CORE, "GekkoNet: Native player {} endpoint {}", p, player_endpoints[p]);
       ENetAddress endpoint{};
       if (!ParsePeerEndpoint(player_endpoints[p], &endpoint))
       {
@@ -622,15 +617,16 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.stop_requested.store(false, std::memory_order_relaxed);
   g_manager.active.store(true, std::memory_order_release);
 
-  NOTICE_LOG_FMT(CORE,
-                 "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, delay={}, "
-                 "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-                 "simulated_one_way_latency_ms={}, stress_3f_every_10f={})",
-                 game_name, players, local_player, session_id, clamped_delay,
-                 clamped_prediction, g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad",
-                 debug_p2_cstick, simulate_remote_p2,
-                 simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
-                 stress_test);
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, "
+      "delay={}, "
+      "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
+      "simulated_one_way_latency_ms={}, stress_3f_every_10f={})",
+      game_name, players, local_player, session_id, clamped_delay, clamped_prediction,
+      g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad", debug_p2_cstick,
+      simulate_remote_p2, simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
+      stress_test);
   return true;
 }
 
@@ -677,8 +673,14 @@ static void ApplyDebugCStickPattern(GCPadStatus* status, u64 frame)
   constexpr int CENTER_FRAMES = 30;
   constexpr int SEGMENT_FRAMES = HOLD_FRAMES + CENTER_FRAMES;
   constexpr std::array<std::pair<int, int>, 8> DIRECTIONS{{
-      {90, 0}, {64, -64}, {0, -90}, {-64, -64},
-      {-90, 0}, {-64, 64}, {0, 90}, {64, 64},
+      {90, 0},
+      {64, -64},
+      {0, -90},
+      {-64, -64},
+      {-90, 0},
+      {-64, 64},
+      {0, 90},
+      {64, 64},
   }};
 
   status->substickX = GCPadStatus::C_STICK_CENTER_X;
@@ -749,8 +751,8 @@ static void SubmitLocalInput()
     else
       ApplyDebugCStickPattern(&simulated_p2, g_manager.local_input_frame);
     WirePad simulated_wire = EncodePad(simulated_p2);
-    gekko_add_local_input(g_manager.simulated_peer_session,
-                          g_manager.simulated_peer_p2_handle, &simulated_wire);
+    gekko_add_local_input(g_manager.simulated_peer_session, g_manager.simulated_peer_p2_handle,
+                          &simulated_wire);
   }
   ++g_manager.local_input_frame;
   s_simulated_link_frame = g_manager.local_input_frame;
@@ -774,8 +776,7 @@ static void PumpSimulatedPeer()
     s_last_stress_peer_update_frame = s_simulated_link_frame;
 
   int event_count = 0;
-  GekkoGameEvent** events =
-      gekko_update_session(g_manager.simulated_peer_session, &event_count);
+  GekkoGameEvent** events = gekko_update_session(g_manager.simulated_peer_session, &event_count);
   for (int i = 0; i < event_count; ++i)
   {
     GekkoGameEvent* event = events[i];
@@ -852,7 +853,8 @@ static void QueueEvents(GekkoGameEvent** events, int event_count)
 
 static double ElapsedMs(std::chrono::steady_clock::time_point start)
 {
-  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+      .count();
 }
 
 // Native GekkoNet uses frame -1 for the snapshot immediately before frame 0. SnapshotRing uses
@@ -878,12 +880,11 @@ static void MaybeLogPerformance()
     return;
 
   const auto now = std::chrono::steady_clock::now();
-  const double wall_ms = std::chrono::duration<double, std::milli>(
-                             now - g_manager.perf_window_start)
-                             .count();
+  const double wall_ms =
+      std::chrono::duration<double, std::milli>(now - g_manager.perf_window_start).count();
   const double fps = wall_ms > 0.0 ? g_manager.perf_real_frames * 1000.0 / wall_ms : 0.0;
   const auto average = [](double total, u64 count) { return count ? total / count : 0.0; };
-  const Cow::Counters cow = Cow::GetCounters();
+  const DirtyPages::Counters dirty_pages = DirtyPages::GetCounters();
   const Common::ENet::RollbackDatagramStats udp = Common::ENet::GetRollbackDatagramStats();
 
   NOTICE_LOG_FMT(
@@ -894,13 +895,11 @@ static void MaybeLogPerformance()
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
       "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}",
-      fps, g_manager.perf_real_frames,
-      average(g_manager.perf_save_ms, g_manager.perf_save_count), g_manager.perf_save_max_ms,
-      g_manager.perf_save_count,
+      fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
+      g_manager.perf_save_max_ms, g_manager.perf_save_count,
       average(g_manager.perf_pump_ms, g_manager.perf_pump_count), g_manager.perf_pump_max_ms,
-      g_manager.perf_pump_count,
-      average(g_manager.perf_load_ms, g_manager.perf_load_count), g_manager.perf_load_max_ms,
-      g_manager.perf_load_count, g_manager.perf_replay_frames,
+      g_manager.perf_pump_count, average(g_manager.perf_load_ms, g_manager.perf_load_count),
+      g_manager.perf_load_max_ms, g_manager.perf_load_count, g_manager.perf_replay_frames,
       average(g_manager.perf_replay_exec_ms, g_manager.perf_replay_exec_count),
       g_manager.perf_replay_exec_max_ms, g_manager.perf_replay_exec_count,
       average(g_manager.perf_rollback_burst_ms, g_manager.perf_rollback_burst_count),
@@ -915,15 +914,15 @@ static void MaybeLogPerformance()
       average(static_cast<double>(g_manager.perf_rollback_depth_total),
               g_manager.perf_rollback_burst_count),
       g_manager.perf_rollback_depth_max,
-      cow.dirty_pages - g_manager.perf_cow_start.dirty_pages,
-      cow.pages_recorded - g_manager.perf_cow_start.pages_recorded,
-      (cow.dirty_pages - g_manager.perf_cow_start.dirty_pages) -
-          (cow.pages_recorded - g_manager.perf_cow_start.pages_recorded),
+      dirty_pages.dirty_pages - g_manager.perf_dirty_pages_start.dirty_pages,
+      dirty_pages.pages_recorded - g_manager.perf_dirty_pages_start.pages_recorded,
+      (dirty_pages.dirty_pages - g_manager.perf_dirty_pages_start.dirty_pages) -
+          (dirty_pages.pages_recorded - g_manager.perf_dirty_pages_start.pages_recorded),
       udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session),
       g_manager.stress_test);
 
   g_manager.perf_window_start = now;
-  g_manager.perf_cow_start = cow;
+  g_manager.perf_dirty_pages_start = dirty_pages;
   g_manager.perf_real_frames = 0;
   g_manager.perf_replay_frames = 0;
   g_manager.perf_save_count = 0;
@@ -985,8 +984,7 @@ static bool PrepareQueuedFrame(Core::System& system)
         DEBUG_LOG_FMT(CORE, "GekkoNet: Loading rollback frame {}", event.frame);
         if (!Rollback::IsResimulating() && !g_manager.throttle_reference_before_load)
         {
-          g_manager.throttle_reference_before_load =
-              system.GetCoreTiming().GetThrottleReference();
+          g_manager.throttle_reference_before_load = system.GetCoreTiming().GetThrottleReference();
         }
         if (!g_manager.rollback_burst_start)
         {
@@ -1020,9 +1018,9 @@ static bool PrepareQueuedFrame(Core::System& system)
       const auto advance_now = std::chrono::steady_clock::now();
       if (!resimulating && g_manager.rollback_burst_start)
       {
-        const double elapsed = std::chrono::duration<double, std::milli>(
-                                   advance_now - *g_manager.rollback_burst_start)
-                                   .count();
+        const double elapsed =
+            std::chrono::duration<double, std::milli>(advance_now - *g_manager.rollback_burst_start)
+                .count();
         ++g_manager.perf_rollback_burst_count;
         g_manager.perf_rollback_burst_ms += elapsed;
         g_manager.perf_rollback_burst_max_ms =
@@ -1042,9 +1040,9 @@ static bool PrepareQueuedFrame(Core::System& system)
       {
         if (g_manager.last_real_advance)
         {
-          const double interval = std::chrono::duration<double, std::milli>(
-                                      advance_now - *g_manager.last_real_advance)
-                                      .count();
+          const double interval =
+              std::chrono::duration<double, std::milli>(advance_now - *g_manager.last_real_advance)
+                  .count();
           ++g_manager.perf_real_interval_count;
           g_manager.perf_real_interval_ms += interval;
           g_manager.perf_real_interval_max_ms =
@@ -1148,8 +1146,11 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
   static u32 s_boundary_ticks = 0;
   if (++s_boundary_ticks % 60 == 1)
   {
-   NOTICE_LOG_FMT(CORE, "GekkoNet: Frame boundary tick #{}, local_player={}, ahead={:.2f}, target={:.4f}, scale={:.4f}",
-                    s_boundary_ticks, g_manager.local_player, frames_ahead, g_manager.target_scale, g_manager.speed_scale);
+    NOTICE_LOG_FMT(CORE,
+                   "GekkoNet: Frame boundary tick #{}, local_player={}, ahead={:.2f}, "
+                   "target={:.4f}, scale={:.4f}",
+                   s_boundary_ticks, g_manager.local_player, frames_ahead, g_manager.target_scale,
+                   g_manager.speed_scale);
   }
 
   // Run GekkoNet event pump - must wait for an advance event each frame.
@@ -1173,8 +1174,8 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
       switch (sev->type)
       {
       case GekkoPlayerSyncing:
-        NOTICE_LOG_FMT(CORE, "GekkoNet: Player handle {} syncing ({}/{})",
-                       sev->data.syncing.handle, sev->data.syncing.current, sev->data.syncing.max);
+        NOTICE_LOG_FMT(CORE, "GekkoNet: Player handle {} syncing ({}/{})", sev->data.syncing.handle,
+                       sev->data.syncing.current, sev->data.syncing.max);
         break;
       case GekkoPlayerConnected:
         NOTICE_LOG_FMT(CORE, "GekkoNet: Player handle {} connected!", sev->data.connected.handle);
@@ -1185,9 +1186,8 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
         {
           s_stress_frame_delay_active = true;
           s_last_stress_peer_update_frame = 0;
-          NOTICE_LOG_FMT(CORE,
-                         "GekkoNet benchmark: deterministic 3-frame packets active; Player 2 "
-                         "changes input every 10 frames");
+          NOTICE_LOG_FMT(CORE, "GekkoNet benchmark: deterministic 3-frame packets active; Player 2 "
+                               "changes input every 10 frames");
         }
         break;
       case GekkoDesyncDetected:
