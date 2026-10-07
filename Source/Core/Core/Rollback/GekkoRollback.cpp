@@ -294,6 +294,7 @@ struct GekkoManager
   bool simulate_remote_p2 = false;
   bool stress_test = false;
   bool tracked_bitmap_clear = false;
+  bool full_scan_benchmark = false;
   int configured_local_delay = 0;
   u32 session_id = 0;
   u64 local_input_frame = 0;
@@ -707,8 +708,10 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   }
 
   g_manager.tracked_bitmap_clear = Config::Get(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR);
-  g_manager.ring =
-      std::make_unique<SnapshotRing>(RING_SNAPSHOT_SLOTS, g_manager.tracked_bitmap_clear);
+  g_manager.full_scan_benchmark = Config::Get(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK);
+  g_manager.ring = std::make_unique<SnapshotRing>(RING_SNAPSHOT_SLOTS,
+                                                  g_manager.tracked_bitmap_clear,
+                                                  g_manager.full_scan_benchmark);
   g_manager.stop_requested.store(false, std::memory_order_relaxed);
   g_manager.active.store(true, std::memory_order_release);
 
@@ -717,11 +720,12 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
       "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, "
       "delay={}, "
       "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-      "simulated_one_way_latency_ms={}, stress_3f_every_10f={}, tracked_bitmap_clear={})",
+      "simulated_one_way_latency_ms={}, stress_3f_every_10f={}, tracked_bitmap_clear={}, "
+      "full_scan_benchmark={})",
       game_name, players, local_player, session_id, clamped_delay, clamped_prediction,
       g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad", debug_p2_cstick,
       simulate_remote_p2, simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
-      stress_test, g_manager.tracked_bitmap_clear);
+      stress_test, g_manager.tracked_bitmap_clear, g_manager.full_scan_benchmark);
   return true;
 }
 
@@ -762,11 +766,9 @@ void StopGekkoSession()
 
 static void ApplyDebugCStickPattern(GCPadStatus* status, u64 frame)
 {
-  // Hold each of eight directions for 10 frames, then center for half a second before advancing.
-  // Diagonals are normalized to approximately the same radius as cardinal directions.
-  constexpr int HOLD_FRAMES = 10;
-  constexpr int CENTER_FRAMES = 30;
-  constexpr int SEGMENT_FRAMES = HOLD_FRAMES + CENTER_FRAMES;
+  // Change to the next of eight directions every two frames. Diagonals are normalized to
+  // approximately the same radius as cardinal directions.
+  constexpr int DIRECTION_FRAMES = 2;
   constexpr std::array<std::pair<int, int>, 8> DIRECTIONS{{
       {90, 0},
       {64, -64},
@@ -778,15 +780,20 @@ static void ApplyDebugCStickPattern(GCPadStatus* status, u64 frame)
       {64, 64},
   }};
 
-  status->substickX = GCPadStatus::C_STICK_CENTER_X;
-  status->substickY = GCPadStatus::C_STICK_CENTER_Y;
-  const u64 position = frame % (DIRECTIONS.size() * SEGMENT_FRAMES);
-  if (position % SEGMENT_FRAMES >= HOLD_FRAMES)
-    return;
-
-  const auto [x, y] = DIRECTIONS[position / SEGMENT_FRAMES];
+  const auto [x, y] = DIRECTIONS[(frame / DIRECTION_FRAMES) % DIRECTIONS.size()];
   status->substickX = static_cast<u8>(GCPadStatus::C_STICK_CENTER_X + x);
   status->substickY = static_cast<u8>(GCPadStatus::C_STICK_CENTER_Y + y);
+
+  // Mash both triggers on even frames and release them on odd frames. Override both the digital
+  // click and analog pressure so the wire input changes unambiguously every frame.
+  constexpr u16 TRIGGER_BUTTONS = PAD_TRIGGER_L | PAD_TRIGGER_R;
+  const bool triggers_pressed = (frame & 1) == 0;
+  if (triggers_pressed)
+    status->button |= TRIGGER_BUTTONS;
+  else
+    status->button &= ~TRIGGER_BUTTONS;
+  status->triggerLeft = triggers_pressed ? 255 : 0;
+  status->triggerRight = triggers_pressed ? 255 : 0;
 }
 
 static void ApplyStressCStickPattern(GCPadStatus* status, u64 frame)
@@ -1085,7 +1092,7 @@ static void MaybeLogPerformance()
       "{:.2f}/{}/{} frames avg/min/max ({} transitions); "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
       "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}; "
-      "tracked_bitmap_clear={}",
+      "tracked_bitmap_clear={}; full_scan_benchmark={}",
       fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
       g_manager.perf_save_max_ms, g_manager.perf_save_count,
       average(g_manager.perf_pump_ms, g_manager.perf_pump_count), g_manager.perf_pump_max_ms,
@@ -1127,7 +1134,7 @@ static void MaybeLogPerformance()
       (dirty_pages.dirty_pages - g_manager.perf_dirty_pages_start.dirty_pages) -
           (dirty_pages.pages_recorded - g_manager.perf_dirty_pages_start.pages_recorded),
       udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session),
-      g_manager.stress_test, g_manager.tracked_bitmap_clear);
+      g_manager.stress_test, g_manager.tracked_bitmap_clear, g_manager.full_scan_benchmark);
 
   g_manager.perf_window_start = now;
   g_manager.perf_dirty_pages_start = dirty_pages;

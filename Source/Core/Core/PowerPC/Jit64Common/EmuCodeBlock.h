@@ -59,12 +59,17 @@ public:
                                       BitSet32 registers_in_use);
   // Marks the guest page of reg_addr + offset dirty for rollback (Core/Rollback/DirtyBitmap.h).
   // Every guest RAM store the JIT emits must call this.
-  void EmitJITDirtyBitmapUpdate(Gen::X64Reg reg_addr, s32 offset, u32 size = 1);
+  void EmitJITDirtyBitmapUpdate(Gen::X64Reg reg_addr, s32 offset, u32 size = 1,
+                                BitSet32 registers_to_preserve = {});
+  // Constant addresses need no runtime page calculation or register save/restore.
+  void EmitJITDirtyBitmapUpdate(u32 address, u32 size, Gen::X64Reg value_reg);
   // these return the address of the MOV, for backpatching
   void UnsafeWriteRegToReg(Gen::OpArg reg_value, Gen::X64Reg reg_addr, int accessSize,
-                           s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr);
+                           s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr,
+                           BitSet32 registers_in_use = {});
   void UnsafeWriteRegToReg(Gen::X64Reg reg_value, Gen::X64Reg reg_addr, int accessSize,
-                           s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr);
+                           s32 offset = 0, bool swap = true, Gen::MovInfo* info = nullptr,
+                           BitSet32 registers_in_use = {});
 
   bool UnsafeLoadToReg(Gen::X64Reg reg_value, Gen::OpArg opAddress, int accessSize, s32 offset,
                        bool signExtend, Gen::MovInfo* info = nullptr);

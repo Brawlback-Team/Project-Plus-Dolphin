@@ -170,6 +170,7 @@ private:
   QAction* m_rollback_simulate_remote_p2_action;
   QAction* m_rollback_stress_test_action;
   QAction* m_rollback_tracked_bitmap_clear_action;
+  QAction* m_rollback_full_scan_benchmark_action;
   QCheckBox* m_brawlmusic_off;
   QCheckBox* m_spectator_mode;
   QPushButton* m_quit_button;

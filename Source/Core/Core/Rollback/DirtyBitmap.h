@@ -34,6 +34,9 @@ struct alignas(64) JITDirtyBitmap
   // Generated JIT code checks this before calculating a bitmap index. Keeping the check in the
   // generated block means already-compiled blocks safely switch as rollback arms and disarms.
   alignas(64) std::atomic<u8> tracking_enabled{0};
+  // Read while compiling a JIT block. Full-scan benchmark mode disables emission of the dirty
+  // update entirely, then invalidates existing blocks so replay execution has no tracking cost.
+  std::atomic<u8> emit_updates{1};
   uint8_t entries[ENTRY_COUNT];
 
   static JITDirtyBitmap& Get()
@@ -43,6 +46,11 @@ struct alignas(64) JITDirtyBitmap
   }
 
   bool IsEnabled() const { return tracking_enabled.load(std::memory_order_acquire) != 0; }
+  bool ShouldEmitUpdates() const { return emit_updates.load(std::memory_order_acquire) != 0; }
+  void SetEmitUpdates(bool enabled)
+  {
+    emit_updates.store(enabled ? 1 : 0, std::memory_order_release);
+  }
   void SetEnabled(bool enabled)
   {
     tracking_enabled.store(enabled ? 1 : 0, std::memory_order_release);

@@ -112,8 +112,9 @@ SnapshotScope::~SnapshotScope()
   s_in_snapshot.store(false, std::memory_order_relaxed);
 }
 
-SnapshotRing::SnapshotRing(std::size_t slots, bool tracked_bitmap_clear)
-    : m_slots(std::max<std::size_t>(slots, 2)), m_tracked_bitmap_clear(tracked_bitmap_clear)
+SnapshotRing::SnapshotRing(std::size_t slots, bool tracked_bitmap_clear, bool force_full_scan)
+    : m_slots(std::max<std::size_t>(slots, 2)), m_tracked_bitmap_clear(tracked_bitmap_clear),
+      m_force_full_scan(force_full_scan)
 {
   m_changed_blocks.reserve(4096);
 }
@@ -150,7 +151,7 @@ bool SnapshotRing::UseDirtyPageTracking(Core::System& system, bool* armed_now)
   }
   if (!m_dirty_page_tracking)
   {
-    m_dirty_page_tracking = DirtyPages::ArmForSystem(system, this);
+    m_dirty_page_tracking = DirtyPages::ArmForSystem(system, this, m_force_full_scan);
     *armed_now = *m_dirty_page_tracking;
   }
   return *m_dirty_page_tracking;

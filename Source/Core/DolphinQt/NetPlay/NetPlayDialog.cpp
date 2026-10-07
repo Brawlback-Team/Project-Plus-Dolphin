@@ -257,8 +257,8 @@ void NetPlayDialog::CreateMainLayout()
   m_rollback_debug_p2_cstick_action =
       m_other_menu->addAction(tr("Rollback Debug: Step Player 2 C-Stick"));
   m_rollback_debug_p2_cstick_action->setToolTip(
-      tr("On the player 2 client, hold each of eight C-stick directions for 10 frames, then "
-         "return to center for 30 frames. "
+      tr("On the player 2 client, change between eight C-stick directions every two frames and "
+         "press/release both L and R on alternating frames. "
          "This is a rollback testing aid and should be disabled for normal play."));
   m_rollback_debug_p2_cstick_action->setCheckable(true);
   m_rollback_simulate_remote_p2_action =
@@ -282,6 +282,13 @@ void NetPlayDialog::CreateMainLayout()
          "512 MB address-indexed bitmap. No other restore behavior changes. The selection is "
          "locked when a session starts and applies to the next session."));
   m_rollback_tracked_bitmap_clear_action->setCheckable(true);
+  m_rollback_full_scan_benchmark_action =
+      m_other_menu->addAction(tr("Rollback Benchmark: Disable JIT Dirty Tracking"));
+  m_rollback_full_scan_benchmark_action->setToolTip(
+      tr("Compile guest RAM stores without inline dirty-page updates and conservatively scan all "
+         "MEM1/MEM2 pages on every save and restore. This isolates JIT tracking overhead and is "
+         "intentionally slower in the snapshot paths."));
+  m_rollback_full_scan_benchmark_action->setCheckable(true);
 
   m_game_button->setDefault(false);
   m_game_button->setAutoDefault(false);
@@ -513,6 +520,8 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_rollback_stress_test_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_rollback_tracked_bitmap_clear_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
+  connect(m_rollback_full_scan_benchmark_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
@@ -985,6 +994,8 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
   m_player_buffer_label->setEnabled(enabled);
   m_auto_delay_button->setEnabled(enabled);
   m_record_input_action->setEnabled(enabled);
+  m_rollback_tracked_bitmap_clear_action->setEnabled(enabled);
+  m_rollback_full_scan_benchmark_action->setEnabled(enabled);
 }
 
 void NetPlayDialog::OnMsgStartGame()
@@ -1257,6 +1268,8 @@ void NetPlayDialog::LoadSettings()
   const bool rollback_stress_test = Config::Get(Config::NETPLAY_ROLLBACK_STRESS_TEST);
   const bool rollback_tracked_bitmap_clear =
       Config::Get(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR);
+  const bool rollback_full_scan_benchmark =
+      Config::Get(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK);
 
   m_minimum_buffer_size_box->setValue(minimum_buffer_size);
   m_player_buffer_size_box->setValue(player_buffer_size);
@@ -1281,6 +1294,7 @@ void NetPlayDialog::LoadSettings()
   m_rollback_simulate_remote_p2_action->setChecked(rollback_simulate_remote_p2);
   m_rollback_stress_test_action->setChecked(rollback_stress_test);
   m_rollback_tracked_bitmap_clear_action->setChecked(rollback_tracked_bitmap_clear);
+  m_rollback_full_scan_benchmark_action->setChecked(rollback_full_scan_benchmark);
 
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
 
@@ -1334,6 +1348,8 @@ void NetPlayDialog::SaveSettings()
   // layer currently supplies the value so the next session observes the menu state immediately.
   Config::SetBaseOrCurrent(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR,
                            m_rollback_tracked_bitmap_clear_action->isChecked());
+  Config::SetBaseOrCurrent(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK,
+                           m_rollback_full_scan_benchmark_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())

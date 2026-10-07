@@ -61,7 +61,8 @@ struct MachineImage
 class SnapshotRing
 {
 public:
-  explicit SnapshotRing(std::size_t slots, bool tracked_bitmap_clear = false);
+  explicit SnapshotRing(std::size_t slots, bool tracked_bitmap_clear = false,
+                        bool force_full_scan = false);
   ~SnapshotRing();
   SnapshotRing(const SnapshotRing&) = delete;
   SnapshotRing& operator=(const SnapshotRing&) = delete;
@@ -113,6 +114,7 @@ private:
   std::vector<u32> m_changed_blocks;
   std::optional<bool> m_dirty_page_tracking;
   const bool m_tracked_bitmap_clear;
+  const bool m_force_full_scan;
 };
 
 }  // namespace Rollback

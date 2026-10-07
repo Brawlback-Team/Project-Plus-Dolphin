@@ -47,6 +47,7 @@ struct Tracker
   // Generation marks replace a freshly allocated and zeroed page array on every restore.
   std::vector<u32> restore_marks;
   u32 restore_mark = 0;
+  bool force_full_scan = false;
   Counters counters;
   // Ids stay unique across arms, so a stale id never names another ring's snapshot.
   u64 next_id = 1;
@@ -98,7 +99,8 @@ void CommitDirtyPages(Tracker& t)
       const std::size_t bitmap_page = first_bitmap_page + i;
       // Clean pages dominate. Avoid an atomic read-modify-write unless the cheap load observes a
       // mark; a mark racing after a clean load remains set for the next snapshot.
-      if (!bitmap.Load(bitmap_page) || !bitmap.Consume(bitmap_page))
+      if (!t.force_full_scan &&
+          (!bitmap.Load(bitmap_page) || !bitmap.Consume(bitmap_page)))
         continue;
       ++t.counters.dirty_pages;
       u8* const live = area.alias + i * PAGE;
@@ -114,7 +116,9 @@ void CommitDirtyPages(Tracker& t)
 
 void ResetLocked(Tracker& t)
 {
-  JITDirtyBitmap::Get().SetEnabled(false);
+  auto& bitmap = JITDirtyBitmap::Get();
+  bitmap.SetEnabled(false);
+  bitmap.SetEmitUpdates(true);
   // Active-session blocks omit the per-store enabled test. Stop dispatching them before the
   // tracker is used again in its guarded state. ClearSafe is valid from inside a JIT block.
   if (t.system)
@@ -129,11 +133,12 @@ void ResetLocked(Tracker& t)
   t.mirrors.clear();
   t.restore_marks.clear();
   t.restore_mark = 0;
+  t.force_full_scan = false;
   t.log.reset();
 }
 }  // namespace
 
-bool Arm(const void* owner, const std::vector<Area>& areas)
+bool Arm(const void* owner, const std::vector<Area>& areas, bool force_full_scan)
 {
   Tracker& t = T();
   std::lock_guard lock(t.lock);
@@ -165,17 +170,20 @@ bool Arm(const void* owner, const std::vector<Area>& areas)
   t.log = std::make_unique<UndoLog>(PAGE, t.page_count, t.next_id);
   t.restore_marks.assign(t.page_count, 0);
   t.restore_mark = 0;
+  t.force_full_scan = force_full_scan;
   t.log->Reserve(RESERVE_PAGES);
   t.owner = owner;
   // Everything written before this point is already in the mirror.
-  JITDirtyBitmap::Get().Clear();
-  JITDirtyBitmap::Get().SetEnabled(true);
-  NOTICE_LOG_FMT(CORE, "Rollback: dirty-page snapshots over {} KB of guest RAM",
-                 t.page_count * PAGE / 1024);
+  auto& bitmap = JITDirtyBitmap::Get();
+  bitmap.SetEmitUpdates(!force_full_scan);
+  bitmap.Clear();
+  bitmap.SetEnabled(!force_full_scan);
+  NOTICE_LOG_FMT(CORE, "Rollback: dirty-page snapshots over {} KB of guest RAM (full_scan={})",
+                 t.page_count * PAGE / 1024, force_full_scan);
   return true;
 }
 
-bool ArmForSystem(Core::System& system, const void* owner)
+bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan)
 {
   if (!JIT_STORES_TRACKED)
     return false;
@@ -205,7 +213,7 @@ bool ArmForSystem(Core::System& system, const void* owner)
     }
     areas.push_back(Area{exram_alias, MEM2_PHYSICAL, memory.GetExRamSize()});
   }
-  if (!Arm(owner, areas))
+  if (!Arm(owner, areas, force_full_scan))
     return false;
 
   Tracker& t = T();
@@ -260,6 +268,9 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
   std::lock_guard lock(t.lock);
   if (!t.log || !t.log->Has(id))
     return false;
+  // With inline tracking disabled, first settle every write made since the newest snapshot.
+  if (t.force_full_scan)
+    CommitDirtyPages(t);
   // Pages with a pre-image in the logs from `id` on hold their bytes at `id` there.
   if (++t.restore_mark == 0)
   {
@@ -294,7 +305,11 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
   }
   // Live RAM now matches the mirror again, so nothing is dirty. The benchmark path clears only
   // MEM1/MEM2 instead of all 512 MB represented by the address-indexed bitmap.
-  if (tracked_bitmap_clear)
+  if (t.force_full_scan)
+  {
+    // The bitmap is disabled and remained clear.
+  }
+  else if (tracked_bitmap_clear)
   {
     for (const Area& area : t.areas)
       bitmap.ClearRange(area.physical_address / PAGE, area.size / PAGE);

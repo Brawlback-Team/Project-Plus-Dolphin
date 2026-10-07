@@ -42,9 +42,9 @@ struct Area
 
 // Starts tracking `areas` for `owner` (a snapshot ring). False if another owner is tracking, the
 // areas are unaligned, or the host's JIT does not set the bitmap.
-bool Arm(const void* owner, const std::vector<Area>& areas);
+bool Arm(const void* owner, const std::vector<Area>& areas, bool force_full_scan);
 // Arm over MEM1 and MEM2 of the running machine.
-bool ArmForSystem(Core::System& system, const void* owner);
+bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan);
 // Stops tracking if `owner` holds it and drops every log.
 void Disarm(const void* owner);
 bool IsArmedFor(const void* owner);
