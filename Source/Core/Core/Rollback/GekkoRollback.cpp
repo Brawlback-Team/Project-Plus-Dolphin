@@ -114,6 +114,12 @@ struct SimulatedPacket
   std::vector<char> data;
 };
 
+struct SampledLocalInput
+{
+  s64 frame = 0;
+  WirePad input{};
+};
+
 std::deque<SimulatedPacket> s_packets_to_main;
 std::deque<SimulatedPacket> s_packets_to_fake;
 std::vector<GekkoNetResult*> s_main_results;
@@ -283,9 +289,11 @@ struct GekkoManager
   bool debug_p2_cstick = false;
   bool simulate_remote_p2 = false;
   bool stress_test = false;
+  int configured_local_delay = 0;
   u64 local_input_frame = 0;
   std::vector<int> player_handles;
   std::deque<QueuedEvent> pending_events;
+  std::deque<SampledLocalInput> sampled_local_inputs;
 
   std::array<GCPadStatus, MAX_PORTS> latched_pads{};
   std::atomic<bool> active{false};
@@ -316,6 +324,15 @@ struct GekkoManager
   std::optional<WirePad> last_local_wire;
   u64 perf_local_input_changes = 0;
   std::array<u64, sizeof(WirePad)> perf_local_byte_changes{};
+  std::optional<WirePad> last_applied_local_wire;
+  u64 perf_delay_checks = 0;
+  u64 perf_delay_matches = 0;
+  u64 perf_delay_mismatches = 0;
+  u64 perf_delay_missing = 0;
+  u64 perf_delay_transitions = 0;
+  u64 perf_delay_transition_frames = 0;
+  u64 perf_delay_transition_min = 0;
+  u64 perf_delay_transition_max = 0;
   std::optional<std::chrono::steady_clock::time_point> frame_execution_start;
   bool frame_execution_resim = false;
   u64 perf_replay_exec_count = 0;
@@ -387,6 +404,32 @@ bool IsGekkoSessionActive()
   return g_manager.active.load(std::memory_order_relaxed);
 }
 
+void SetGekkoLocalDelay(int local_delay)
+{
+  const int clamped_delay = std::clamp(local_delay, 0, 60);
+  std::lock_guard lk(g_manager.mutex);
+  if (!g_manager.session || g_manager.local_handle < 0)
+    return;
+
+  const int previous_delay = g_manager.configured_local_delay;
+  if (previous_delay == clamped_delay)
+    return;
+
+  gekko_set_local_delay(g_manager.session, g_manager.local_handle,
+                        static_cast<unsigned char>(clamped_delay));
+  g_manager.configured_local_delay = clamped_delay;
+  g_manager.perf_delay_checks = 0;
+  g_manager.perf_delay_matches = 0;
+  g_manager.perf_delay_mismatches = 0;
+  g_manager.perf_delay_missing = 0;
+  g_manager.perf_delay_transitions = 0;
+  g_manager.perf_delay_transition_frames = 0;
+  g_manager.perf_delay_transition_min = 0;
+  g_manager.perf_delay_transition_max = 0;
+  NOTICE_LOG_FMT(CORE, "GekkoNet: Live local input delay changed {} -> {} at sample frame {}",
+                 previous_delay, clamped_delay, g_manager.local_input_frame);
+}
+
 bool StartGekkoSession(const std::string& game_name, u32 session_id, int players, int local_player,
                        const std::vector<std::string>& player_endpoints, int local_delay,
                        int prediction_window, bool debug_p2_cstick, bool simulate_remote_p2,
@@ -419,7 +462,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
     return false;
   }
 
-  const int clamped_delay = std::clamp(local_delay, 0, 10);
+  const int clamped_delay = std::clamp(local_delay, 0, 60);
   const int clamped_prediction =
       std::clamp(std::max(prediction_window, stress_test ? 3 : 1), 1, 10);
 
@@ -482,12 +525,14 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.debug_p2_cstick = debug_p2_cstick;
   g_manager.simulate_remote_p2 = simulate_remote_p2;
   g_manager.stress_test = stress_test;
+  g_manager.configured_local_delay = clamped_delay;
   g_manager.local_input_frame = 0;
   g_manager.local_handle = -1;
   g_manager.simulated_peer_p2_handle = -1;
   g_manager.remote_handle = -1;
   g_manager.player_handles.assign(players, -1);
   g_manager.pending_events.clear();
+  g_manager.sampled_local_inputs.clear();
   g_manager.perf_window_start = {};
   g_manager.perf_dirty_pages_start = DirtyPages::GetCounters();
   g_manager.perf_real_frames = 0;
@@ -504,6 +549,15 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.last_local_wire.reset();
   g_manager.perf_local_input_changes = 0;
   g_manager.perf_local_byte_changes.fill(0);
+  g_manager.last_applied_local_wire.reset();
+  g_manager.perf_delay_checks = 0;
+  g_manager.perf_delay_matches = 0;
+  g_manager.perf_delay_mismatches = 0;
+  g_manager.perf_delay_missing = 0;
+  g_manager.perf_delay_transitions = 0;
+  g_manager.perf_delay_transition_frames = 0;
+  g_manager.perf_delay_transition_min = 0;
+  g_manager.perf_delay_transition_max = 0;
   g_manager.frame_execution_start.reset();
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
@@ -741,6 +795,12 @@ static void SubmitLocalInput()
   }
   g_manager.last_local_wire = wire;
 
+  // Keep the raw host sample beside the Gekko frame on which it was submitted. When Gekko later
+  // emits the local player's input for an Advance event, this lets diagnostics verify the actual
+  // delay behavior instead of merely reporting the configured value.
+  g_manager.sampled_local_inputs.push_back(
+      {static_cast<s64>(g_manager.local_input_frame), wire});
+
   gekko_add_local_input(g_manager.session, g_manager.local_handle, &wire);
 
   if (g_manager.simulated_peer_session && g_manager.simulated_peer_p2_handle >= 0)
@@ -811,6 +871,91 @@ static void LatchInputs(const unsigned char* raw_inputs)
       std::memcpy(&wire, raw_inputs + (handle * sizeof(WirePad)), sizeof(WirePad));
       g_manager.latched_pads[p] = DecodePad(wire);
     }
+  }
+}
+
+static bool InputsEqual(const WirePad& lhs, const WirePad& rhs)
+{
+  return std::memcmp(&lhs, &rhs, sizeof(WirePad)) == 0;
+}
+
+static void MeasureLocalInputDelay(int advance_frame, const std::vector<unsigned char>& inputs)
+{
+  if (g_manager.local_handle < 0)
+    return;
+
+  const std::size_t input_offset =
+      static_cast<std::size_t>(g_manager.local_handle) * sizeof(WirePad);
+  if (inputs.size() < input_offset + sizeof(WirePad))
+  {
+    ++g_manager.perf_delay_missing;
+    return;
+  }
+
+  WirePad applied{};
+  std::memcpy(&applied, inputs.data() + input_offset, sizeof(WirePad));
+
+  const s64 expected_sample_frame =
+      static_cast<s64>(advance_frame) - g_manager.configured_local_delay;
+  if (expected_sample_frame >= 0)
+  {
+    const auto expected = std::find_if(
+        g_manager.sampled_local_inputs.begin(), g_manager.sampled_local_inputs.end(),
+        [expected_sample_frame](const SampledLocalInput& sample) {
+          return sample.frame == expected_sample_frame;
+        });
+    if (expected == g_manager.sampled_local_inputs.end())
+    {
+      ++g_manager.perf_delay_missing;
+    }
+    else
+    {
+      ++g_manager.perf_delay_checks;
+      if (InputsEqual(applied, expected->input))
+        ++g_manager.perf_delay_matches;
+      else
+        ++g_manager.perf_delay_mismatches;
+    }
+  }
+
+  // An applied transition can be matched to the newest identical sampled transition. This is an
+  // independent observation of the effective delay and will report zero if the host bypasses the
+  // configured Gekko delay. It is intentionally transition-based because an unchanged held input
+  // cannot reveal how many frames it was delayed.
+  if (g_manager.last_applied_local_wire &&
+      !InputsEqual(applied, *g_manager.last_applied_local_wire))
+  {
+    for (std::size_t i = g_manager.sampled_local_inputs.size(); i-- > 1;)
+    {
+      const SampledLocalInput& sample = g_manager.sampled_local_inputs[i];
+      const SampledLocalInput& previous = g_manager.sampled_local_inputs[i - 1];
+      if (sample.frame > advance_frame || !InputsEqual(sample.input, applied) ||
+          InputsEqual(sample.input, previous.input))
+      {
+        continue;
+      }
+
+      const u64 observed_delay = static_cast<u64>(advance_frame - sample.frame);
+      ++g_manager.perf_delay_transitions;
+      g_manager.perf_delay_transition_frames += observed_delay;
+      if (g_manager.perf_delay_transitions == 1)
+        g_manager.perf_delay_transition_min = observed_delay;
+      else
+        g_manager.perf_delay_transition_min =
+            std::min(g_manager.perf_delay_transition_min, observed_delay);
+      g_manager.perf_delay_transition_max =
+          std::max(g_manager.perf_delay_transition_max, observed_delay);
+      break;
+    }
+  }
+  g_manager.last_applied_local_wire = applied;
+
+  constexpr s64 SAMPLE_HISTORY_FRAMES = 64;
+  const s64 oldest_needed = static_cast<s64>(advance_frame) - SAMPLE_HISTORY_FRAMES;
+  while (g_manager.sampled_local_inputs.size() > 2 &&
+         g_manager.sampled_local_inputs[1].frame < oldest_needed)
+  {
+    g_manager.sampled_local_inputs.pop_front();
   }
 }
 
@@ -893,6 +1038,8 @@ static void MaybeLogPerformance()
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
       "replay_exec {:.3f}/{:.3f} ms ({}); burst {:.3f}/{:.3f} ms ({}); "
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
+      "delay_measure cfg={} verified={}/{} mismatch={} missing={} observed "
+      "{:.2f}/{}/{} frames avg/min/max ({} transitions); "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
       "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}",
       fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
@@ -911,6 +1058,13 @@ static void MaybeLogPerformance()
       g_manager.perf_local_byte_changes[3], g_manager.perf_local_byte_changes[4],
       g_manager.perf_local_byte_changes[5], g_manager.perf_local_byte_changes[6],
       g_manager.perf_local_byte_changes[7],
+      g_manager.configured_local_delay, g_manager.perf_delay_matches,
+      g_manager.perf_delay_checks, g_manager.perf_delay_mismatches,
+      g_manager.perf_delay_missing,
+      average(static_cast<double>(g_manager.perf_delay_transition_frames),
+              g_manager.perf_delay_transitions),
+      g_manager.perf_delay_transition_min, g_manager.perf_delay_transition_max,
+      g_manager.perf_delay_transitions,
       average(static_cast<double>(g_manager.perf_rollback_depth_total),
               g_manager.perf_rollback_burst_count),
       g_manager.perf_rollback_depth_max,
@@ -936,6 +1090,14 @@ static void MaybeLogPerformance()
   g_manager.perf_pump_max_ms = 0.0;
   g_manager.perf_local_input_changes = 0;
   g_manager.perf_local_byte_changes.fill(0);
+  g_manager.perf_delay_checks = 0;
+  g_manager.perf_delay_matches = 0;
+  g_manager.perf_delay_mismatches = 0;
+  g_manager.perf_delay_missing = 0;
+  g_manager.perf_delay_transitions = 0;
+  g_manager.perf_delay_transition_frames = 0;
+  g_manager.perf_delay_transition_min = 0;
+  g_manager.perf_delay_transition_max = 0;
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
@@ -1007,8 +1169,10 @@ static bool PrepareQueuedFrame(Core::System& system)
 
     case GekkoAdvanceEvent:
     {
-      LatchInputs(event.inputs.data());
       const bool resimulating = event.rolling_back || event.running_ahead;
+      if (!resimulating)
+        MeasureLocalInputDelay(event.frame, event.inputs);
+      LatchInputs(event.inputs.data());
       Rollback::SetResimulating(resimulating);
       if (!resimulating && g_manager.throttle_reference_before_load)
       {

@@ -328,6 +328,7 @@ void NetPlayClient::AdjustPlayerPadBufferSize(u32 buffer)
   std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
 
   m_local_player->buffer = buffer;
+  Rollback::SetGekkoLocalDelay(static_cast<int>(buffer));
 
   // Publish the local GekkoNet input delay independently of Dolphin's legacy network mode.
   sf::Packet spac;

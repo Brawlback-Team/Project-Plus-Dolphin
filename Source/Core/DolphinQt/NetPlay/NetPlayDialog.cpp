@@ -137,7 +137,7 @@ void NetPlayDialog::CreateMainLayout()
       tr("GekkoNet prediction window and maximum rollback depth, in frames. Shared by the host."));
   m_minimum_buffer_label = new QLabel(tr("Rollback Frames:"));
   m_player_buffer_size_box = new QSpinBox;
-  m_player_buffer_size_box->setRange(0, 10);
+  m_player_buffer_size_box->setRange(0, 60);
   m_player_buffer_size_box->setToolTip(
       tr("GekkoNet local input delay for this player, in frames."));
   m_player_buffer_label = new QLabel(tr("Input Delay:"));
@@ -932,6 +932,8 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
   {
     m_start_button->setEnabled(enabled);
     m_game_button->setEnabled(enabled);
+    m_minimum_buffer_size_box->setEnabled(enabled);
+    m_minimum_buffer_label->setEnabled(enabled);
     m_savedata_none_action->setEnabled(enabled);
     m_savedata_load_only_action->setEnabled(enabled);
     m_savedata_load_and_write_action->setEnabled(enabled);
@@ -946,6 +948,8 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
     m_spectator_mode->setEnabled(enabled);
   }
 
+  m_player_buffer_size_box->setEnabled(enabled);
+  m_player_buffer_label->setEnabled(enabled);
   m_record_input_action->setEnabled(enabled);
 }
 
@@ -962,6 +966,7 @@ void NetPlayDialog::OnMsgStartGame()
   }
 
   QueueOnObject(this, [this] {
+    SetOptionsEnabled(false);
     const auto client = Settings::Instance().GetNetPlayClient();
 
     if (client)
@@ -979,7 +984,10 @@ void NetPlayDialog::OnMsgStopGame()
 {
   g_netplay_chat_ui.reset();
   g_netplay_golf_ui.reset();
-  QueueOnObject(this, [this] { UpdateDiscordPresence(); });
+  QueueOnObject(this, [this] {
+    SetOptionsEnabled(true);
+    UpdateDiscordPresence();
+  });
 }
 
 void NetPlayDialog::OnMsgPowerButton()
@@ -1029,8 +1037,9 @@ void NetPlayDialog::OnHostInputAuthorityChanged(bool enabled)
 
   QueueOnObject(this, [this] {
     const bool is_hosting = IsHosting();
-    m_minimum_buffer_size_box->setEnabled(is_hosting);
-    m_minimum_buffer_label->setEnabled(is_hosting);
+    const bool game_stopped = m_start_button->isEnabled();
+    m_minimum_buffer_size_box->setEnabled(is_hosting && game_stopped);
+    m_minimum_buffer_label->setEnabled(is_hosting && game_stopped);
     m_minimum_buffer_size_box->setHidden(!is_hosting);
     m_minimum_buffer_label->setHidden(!is_hosting);
     m_minimum_buffer_label->setText(tr("Rollback Frames:"));
@@ -1103,8 +1112,9 @@ void NetPlayDialog::OnGolferChanged(const bool is_golfer, const std::string& gol
   if (m_host_input_authority)
   {
     QueueOnObject(this, [this, is_golfer] {
-      m_minimum_buffer_size_box->setEnabled(!is_golfer);
-      m_minimum_buffer_label->setEnabled(!is_golfer);
+      const bool game_stopped = m_start_button->isEnabled();
+      m_minimum_buffer_size_box->setEnabled(!is_golfer && game_stopped);
+      m_minimum_buffer_label->setEnabled(!is_golfer && game_stopped);
     });
   }
 

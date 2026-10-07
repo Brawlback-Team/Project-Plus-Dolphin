@@ -42,5 +42,6 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
                        bool simulate_remote_p2, bool stress_test);
 void StopGekkoSession();
 bool IsGekkoSessionActive();
+void SetGekkoLocalDelay(int local_delay);
 
 }  // namespace Rollback
