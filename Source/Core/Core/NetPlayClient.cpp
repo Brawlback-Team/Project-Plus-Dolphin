@@ -431,6 +431,10 @@ void NetPlayClient::OnData(sf::Packet& packet)
     OnPadBufferPlayer(packet);
     break;
 
+  case MessageID::GekkoInputDelay:
+    OnGekkoInputDelay(packet);
+    break;
+
   case MessageID::HostInputAuthority:
     OnHostInputAuthority(packet);
     break;
@@ -800,6 +804,13 @@ void NetPlayClient::OnPadBufferPlayer(sf::Packet& packet)
       std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
       packet >> m_players[pid].buffer;
     }
+}
+
+void NetPlayClient::OnGekkoInputDelay(sf::Packet& packet)
+{
+  u32 delay = 0;
+  packet >> delay;
+  AdjustPlayerPadBufferSize(std::min(delay, 60u));
 }
 
 void NetPlayClient::OnHostInputAuthority(sf::Packet& packet)

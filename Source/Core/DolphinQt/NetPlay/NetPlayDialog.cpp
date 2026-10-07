@@ -429,8 +429,11 @@ void NetPlayDialog::ConnectWidgets()
         static_cast<int>(std::lround(client->GetPlayersMaxPing() / FRAME_PAIR_MS - 2.0)), 0, 60);
     m_player_buffer_size_box->setValue(delay);
 
-    if (Settings::Instance().GetNetPlayServer())
+    if (const auto server = Settings::Instance().GetNetPlayServer())
+    {
+      server->SetGekkoInputDelay(static_cast<unsigned int>(delay));
       m_minimum_buffer_size_box->setValue(7);
+    }
   });
   const auto hia_function = [this](bool enable) {
     if (m_host_input_authority != enable)

@@ -176,6 +176,7 @@ enum class MessageID : u8
   PadHostData = 0x63,
   GBAConfig = 0x64,
   PadBufferPlayer = 0x66,
+  GekkoInputDelay = 0x67,
 
   WiimoteData = 0x70,
   WiimoteMapping = 0x71,

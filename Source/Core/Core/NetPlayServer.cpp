@@ -706,6 +706,16 @@ void NetPlayServer::AdjustMinimumPadBufferSize(unsigned int size)
   SendAsyncToClients(std::move(spac));
 }
 
+// Called from the GUI thread when the host uses Auto. Manual input-delay changes remain local to
+// each player; Auto deliberately applies its calculated value to every player in the lobby.
+void NetPlayServer::SetGekkoInputDelay(unsigned int delay)
+{
+  sf::Packet spac;
+  spac << MessageID::GekkoInputDelay;
+  spac << delay;
+  SendAsyncToClients(std::move(spac));
+}
+
 void NetPlayServer::SetHostInputAuthority(const bool enable)
 {
   std::lock_guard lkg(m_crit.game);

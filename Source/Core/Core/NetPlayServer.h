@@ -64,6 +64,7 @@ public:
   void SetWiimoteMapping(const PadMappingArray& mappings);
 
   void AdjustMinimumPadBufferSize(unsigned int size);
+  void SetGekkoInputDelay(unsigned int delay);
   void SetHostInputAuthority(bool enable);
 
   void KickPlayer(PlayerId player);

@@ -316,6 +316,7 @@ private:
   void OnWiimoteData(sf::Packet& packet);
   void OnPadBufferMinimum(sf::Packet& packet);
   void OnPadBufferPlayer(sf::Packet& packet);
+  void OnGekkoInputDelay(sf::Packet& packet);
   void OnHostInputAuthority(sf::Packet& packet);
   void OnGolfSwitch(sf::Packet& packet);
   void OnGolfPrepare(sf::Packet& packet);
