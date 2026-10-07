@@ -17,6 +17,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #ifdef _M_X86_64
@@ -40,7 +41,8 @@ void JitInterface::SetJit(std::unique_ptr<JitBase> jit)
 
 void JitInterface::DoState(PointerWrap& p)
 {
-  if (m_jit && p.IsReadMode())
+  // A rollback load invalidates only the code pages whose RAM it changed (Core/Rollback).
+  if (m_jit && p.IsReadMode() && !Rollback::InSnapshotDoState())
     m_jit->ClearCache();
 }
 

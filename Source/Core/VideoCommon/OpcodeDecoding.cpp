@@ -27,6 +27,7 @@
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderBase.h"
 #include "VideoCommon/VertexLoaderManager.h"
+#include "VideoCommon/VideoState.h"
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
@@ -125,12 +126,15 @@ public:
   }
   OPCODE_CALLBACK(void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat,
                                           u32 vertex_size, u16 num_vertices, const u8* vertex_data))
-  {
-    // load vertices
-    const u32 size = vertex_size * num_vertices;
+    {
+      // load vertices
+      const u32 size = vertex_size * num_vertices;
 
-    const u32 bytes =
-        VertexLoaderManager::RunVertices<is_preprocess>(vat, primitive, num_vertices, vertex_data);
+      // Orca: on a skipped frame, load nothing; the size is already known.
+      const u32 bytes =
+        (!is_preprocess && VideoCommon_IsSkippingRender()) ?
+            size :
+            VertexLoaderManager::RunVertices<is_preprocess>(vat, primitive, num_vertices, vertex_data);
 
     ASSERT(bytes == size);
 

@@ -20,6 +20,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -103,6 +104,17 @@ public:
   u64 GetTicks() const;
   u64 GetIdleTicks() const;
   TimePoint GetTargetHostTime(s64 target_cycle);
+
+  // Orca rollback pacing (CPU thread). The throttle maps an emulated cycle to a host time. A
+  // rollback restores that reference once the re-run catches up, so the rollback's cost is made up
+  // instead of delaying every later frame. ResetThrottleToNow drops any lead or lag.
+  std::pair<s64, TimePoint> GetThrottleReference() const;
+  void SetThrottleReference(const std::pair<s64, TimePoint>& reference);
+  void ResetThrottleToNow();
+
+  // Rollback timesync scale (set by netplay, read by throttle). 1.0 means no adjustment;
+  // values above 1.0 speed up the host throttle limit, below 1.0 slow it down.
+  void SetTimesyncScale(float scale);
 
   void RefreshConfig();
 
@@ -240,6 +252,9 @@ private:
   // Used to optionally minimize throttling for improving input latency.
   std::atomic_bool m_throttled_after_presentation = false;
   DT m_max_throttle_skip_time{};
+
+  // Rollback timesync scale applied to the per-frame throttle target.
+  float m_timesync_scale = 1.0f;
 };
 
 }  // namespace CoreTiming

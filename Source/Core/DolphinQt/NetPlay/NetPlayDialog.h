@@ -165,6 +165,8 @@ private:
   QAction* m_golf_mode_overlay_action;
   QAction* m_fixed_delay_action;
   QAction* m_hide_remote_gbas_action;
+  QAction* m_rollback_debug_p2_cstick_action;
+  QAction* m_rollback_simulate_remote_p2_action;
   QCheckBox* m_brawlmusic_off;
   QCheckBox* m_spectator_mode;
   QPushButton* m_quit_button;

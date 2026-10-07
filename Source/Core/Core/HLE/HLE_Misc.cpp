@@ -10,6 +10,7 @@
 #include "Core/Host.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 namespace HLE_Misc
@@ -78,5 +79,10 @@ void GeckoReturnTrampoline(const Core::CPUThreadGuard& guard)
         PowerPC::MMU::HostRead<u64>(guard, SP + 24 + 2 * i * sizeof(u64)),
         PowerPC::MMU::HostRead<u64>(guard, SP + 24 + (2 * i + 1) * sizeof(u64)));
   }
+}
+
+void GekkoFrameBoundary(const Core::CPUThreadGuard& guard)
+{
+  Rollback::OnFrameBoundary(guard);
 }
 }  // namespace HLE_Misc

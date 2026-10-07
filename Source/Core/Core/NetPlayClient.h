@@ -352,6 +352,7 @@ private:
   NetSettings m_net_settings{};
   std::map<PlayerId, Player> m_players;
   std::string m_host_spec;
+  std::vector<std::string> m_rollback_player_endpoints;
   std::string m_player_name;
   bool m_connecting = false;
   Common::TraversalClient* m_traversal_client = nullptr;

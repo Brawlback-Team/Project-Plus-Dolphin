@@ -11,6 +11,7 @@
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
+#include "Core/Rollback/Cow.h"
 
 namespace IOS::HLE::FS
 {
@@ -135,6 +136,8 @@ Result<u32> HostFileSystem::ReadBytesFromFile(Fd fd, u8* ptr, u32 count)
 
   // File might be opened twice, need to seek before we read
   handle->host_file->Seek(handle->file_offset, File::SeekOrigin::Begin);
+  // `ptr` is usually guest RAM, which the read() under fread fills without faulting.
+  Rollback::Cow::PrepareHostWrite(ptr, count);
   const u32 actually_read = static_cast<u32>(fread(ptr, 1, count, handle->host_file->GetHandle()));
 
   if (actually_read != count && ferror(handle->host_file->GetHandle()))
@@ -155,6 +158,8 @@ Result<u32> HostFileSystem::WriteBytesToFile(Fd fd, const u8* ptr, u32 count)
   if ((u8(handle->mode) & u8(Mode::Write)) == 0)
     return std::unexpected{ResultCode::AccessDenied};
 
+  JournalWritten(BuildFilename(handle->wii_path).host_path, *handle->host_file,
+                 handle->file_offset, count);
   // File might be opened twice, need to seek before we read
   handle->host_file->Seek(handle->file_offset, File::SeekOrigin::Begin);
   if (!handle->host_file->WriteBytes(ptr, count))

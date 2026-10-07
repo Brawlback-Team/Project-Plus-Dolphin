@@ -53,6 +53,7 @@
 #include "Core/HW/DSP.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/GBAPad.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/HW.h"
@@ -280,6 +281,8 @@ void Stop(Core::System& system)  // - Hammertime!
   HostDispatchJobs(system);
 
   system.GetFifo().EmulatorState(false);
+
+  Rollback::StopGekkoSession();
 
   INFO_LOG_FMT(CONSOLE, "Stop [Main Thread]\t\t---- Shutting down ----");
 

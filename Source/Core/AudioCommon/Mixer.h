@@ -102,6 +102,14 @@ private:
     using Granule = std::array<StereoPair, GRANULE_SIZE>;
 
   public:
+    struct Diagnostics
+    {
+      u64 empty_dequeues = 0;
+      u64 gap_fills = 0;
+      u64 overflows = 0;
+      std::size_t queue_depth = 0;
+    };
+
     MixerFifo(Mixer* mixer, u32 sample_rate_divisor,
               u32 sample_rate_dividend = FIXED_SAMPLE_RATE_DIVIDEND)
         : m_mixer(mixer), m_input_sample_rate_dividend(sample_rate_dividend),
@@ -122,6 +130,7 @@ private:
     }
 
     void Mix(s16* samples, std::size_t num_samples);
+    Diagnostics ExchangeDiagnostics();
 
     void SetInputSampleRateDividend(u32 rate_dividend);
     u32 GetInputSampleRateDividend() const;
@@ -151,6 +160,9 @@ private:
     std::atomic<std::size_t> m_queue_tail{0};
     std::atomic<bool> m_queue_fading{false};
     std::atomic<bool> m_queue_looping{false};
+    std::atomic<u64> m_diag_empty_dequeues{0};
+    std::atomic<u64> m_diag_gap_fills{0};
+    std::atomic<u64> m_diag_overflows{0};
     float m_fade_volume = 1.0;
 
     void Enqueue();
@@ -193,6 +205,11 @@ private:
 
   bool m_log_dtk_audio = false;
   bool m_log_dsp_audio = false;
+
+  std::atomic<u64> m_diag_dma_pushed{0};
+  std::atomic<u64> m_diag_dma_suppressed{0};
+  std::atomic<u64> m_diag_stream_pushed{0};
+  std::atomic<u64> m_diag_stream_suppressed{0};
 
   float m_config_emulation_speed;
   bool m_config_audio_preserve_pitch;

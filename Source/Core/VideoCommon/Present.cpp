@@ -22,6 +22,7 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/VideoState.h"
 #include "VideoCommon/Widescreen.h"
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -992,6 +993,33 @@ void Presenter::Present(PresentInfo* present_info)
     }
 
     g_gfx->PresentBackbuffer();
+
+    // Host presentation cadence diagnostic. Gekko's frame metrics are measured on the CPU thread
+    // and cannot show whether rollback catch-up reaches the display as a long/short frame pair.
+    static std::optional<TimePoint> s_last_present_time;
+    static u64 s_present_intervals = 0;
+    static double s_present_interval_ms = 0.0;
+    static double s_present_interval_max_ms = 0.0;
+    const TimePoint actual_present_time = Clock::now();
+    if (s_last_present_time)
+    {
+      const double interval_ms =
+          std::chrono::duration<double, std::milli>(actual_present_time - *s_last_present_time)
+              .count();
+      ++s_present_intervals;
+      s_present_interval_ms += interval_ms;
+      s_present_interval_max_ms = std::max(s_present_interval_max_ms, interval_ms);
+      if (s_present_intervals == 300)
+      {
+        NOTICE_LOG_FMT(CORE, "Present perf: interval {:.3f}/{:.3f} ms avg/max (300)",
+                       s_present_interval_ms / static_cast<double>(s_present_intervals),
+                       s_present_interval_max_ms);
+        s_present_intervals = 0;
+        s_present_interval_ms = 0.0;
+        s_present_interval_max_ms = 0.0;
+      }
+    }
+    s_last_present_time = actual_present_time;
   }
 
   if (m_xfb_entry)
@@ -1069,8 +1097,9 @@ void Presenter::DoState(PointerWrap& p)
   p.Do(m_last_xfb_stride);
   p.Do(m_last_xfb_height);
 
-  // If we're loading and there is a last XFB, re-display it.
-  if (p.IsReadMode() && m_last_xfb_stride != 0)
+  // If we're loading and there is a last XFB, re-display it. (Orca: not on a rollback load; the
+  // re-run frames present the corrected frame themselves.)
+  if (p.IsReadMode() && m_last_xfb_stride != 0 && VideoCommon_LoadRedisplays())
   {
     // This technically counts as the end of the frame
     GetVideoEvents().after_frame_event.Trigger(Core::System::GetInstance());
