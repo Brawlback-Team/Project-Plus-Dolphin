@@ -572,8 +572,8 @@ add_library(core
   PowerPC/SignatureDB/SignatureDB.h
   State.cpp
   State.h
-  Rollback/Cow.cpp
-  Rollback/Cow.h
+  Rollback/DirtyPages.cpp
+  Rollback/DirtyPages.h
   Rollback/DirtyBitmap.h
   Rollback/GekkoRollback.cpp
   Rollback/GekkoRollback.h

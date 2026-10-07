@@ -328,6 +328,7 @@ void NetPlayClient::AdjustPlayerPadBufferSize(u32 buffer)
   std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
 
   m_local_player->buffer = buffer;
+  Rollback::SetGekkoLocalDelay(static_cast<int>(buffer));
 
   // Publish the local GekkoNet input delay independently of Dolphin's legacy network mode.
   sf::Packet spac;
@@ -428,6 +429,10 @@ void NetPlayClient::OnData(sf::Packet& packet)
     
   case MessageID::PadBufferPlayer:
     OnPadBufferPlayer(packet);
+    break;
+
+  case MessageID::GekkoInputDelay:
+    OnGekkoInputDelay(packet);
     break;
 
   case MessageID::HostInputAuthority:
@@ -801,6 +806,13 @@ void NetPlayClient::OnPadBufferPlayer(sf::Packet& packet)
     }
 }
 
+void NetPlayClient::OnGekkoInputDelay(sf::Packet& packet)
+{
+  u32 delay = 0;
+  packet >> delay;
+  AdjustPlayerPadBufferSize(std::min(delay, 60u));
+}
+
 void NetPlayClient::OnHostInputAuthority(sf::Packet& packet)
 {
   packet >> m_host_input_authority;
@@ -1063,6 +1075,11 @@ void NetPlayClient::OnDesyncDetected(sf::Packet& packet)
   packet >> pid_to_blame;
   packet >> frame;
 
+  // Legacy timebase comparisons are not meaningful while GekkoNet rollback is resimulating
+  // frames. Consume the server packet without presenting a false desync warning.
+  if (Rollback::IsGekkoSessionActive())
+    return;
+
   std::string player = "??";
   std::lock_guard lkp(m_crit.players);
   {
@@ -1118,6 +1135,13 @@ void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
 {
   packet >> m_sync_save_data_count;
   m_sync_save_data_success_count = 0;
+
+  // A save sync notification starts a new boot generation. Discard anything left by an aborted
+  // start so only Wii data received for this generation can be passed to BootSessionData.
+  m_wii_sync_fs.reset();
+  m_wii_sync_titles.clear();
+  m_wii_sync_redirect_folder.clear();
+  m_wii_sync_data_ready = false;
 
   INFO_LOG_FMT(NETPLAY, "Initializing wait for {} savegame chunks.", m_sync_save_data_count);
 
@@ -1611,8 +1635,12 @@ void NetPlayClient::DisplayPlayersPing()
                        OSD::Duration::SHORT, OSD::Color::CYAN);
 }
 
-u32 NetPlayClient::GetPlayersMaxPing() const
+u32 NetPlayClient::GetPlayersMaxPing()
 {
+  std::lock_guard lkp(m_crit.players);
+  if (m_players.empty())
+    return 0;
+
   return std::ranges::max_element(m_players, {}, [](const auto& kv) { return kv.second.ping; })
       ->second.ping;
 }
@@ -1818,6 +1846,18 @@ void NetPlayClient::SendStopGamePacket()
 bool NetPlayClient::StartGame(const std::string& path)
 {
   std::lock_guard lkg(m_crit.game);
+
+  if (m_net_settings.savedata_load && !m_wii_sync_data_ready)
+  {
+    ERROR_LOG_FMT(NETPLAY,
+                  "Refusing to start: fresh Wii save synchronization data was not received for "
+                  "this boot");
+    PanicAlertFmtT("Fresh Wii save synchronization data was not received for this boot. The game "
+                   "was not started to prevent a NetPlay desync.");
+    SendStopGamePacket();
+    return false;
+  }
+
   SendStartGamePacket();
 
   if (m_is_running.IsSet())
@@ -1879,10 +1919,14 @@ bool NetPlayClient::StartGame(const std::string& path)
                                       if (File::Exists(redirect_path))
                                         File::DeleteDirRecursively(redirect_path);
                                     });
+  m_wii_sync_data_ready = false;
 
+  const bool rollback_stress_test =
+      m_local_player->IsHost() && m_players.size() == 1 &&
+      Config::Get(Config::NETPLAY_ROLLBACK_STRESS_TEST);
   const bool simulate_remote_p2 =
       m_local_player->IsHost() && m_players.size() == 1 &&
-      Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2);
+      (Config::Get(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2) || rollback_stress_test);
 
   m_net_settings.local_player_id = m_local_player->pid;
   NetPlay::NetSettings boot_net_settings = m_net_settings;
@@ -1914,7 +1958,7 @@ bool NetPlayClient::StartGame(const std::string& path)
 
   if (!Rollback::StartGekkoSession("Project+", m_current_game, num_players, local_seat,
                                    m_rollback_player_endpoints, local_delay, prediction_window,
-                                   debug_p2_cstick, simulate_remote_p2))
+                                   debug_p2_cstick, simulate_remote_p2, rollback_stress_test))
   {
     ERROR_LOG_FMT(NETPLAY, "GekkoNet: failed to start native UDP rollback session");
     return false;
@@ -2697,6 +2741,7 @@ void NetPlayClient::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
   m_wii_sync_fs = std::move(fs);
   m_wii_sync_titles = std::move(titles);
   m_wii_sync_redirect_folder = std::move(redirect_folder);
+  m_wii_sync_data_ready = true;
 }
 
 SyncIdentifier NetPlayClient::GetSDCardIdentifier()

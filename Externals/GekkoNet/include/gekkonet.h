@@ -200,6 +200,12 @@ GEKKONET_API GekkoSessionEvent** gekko_session_events(GekkoSession* session, int
 
 GEKKONET_API float gekko_frames_ahead(GekkoSession* session);
 
+// Diagnostic frame counters. Inputs are frame-tagged, so these allow an integration to compare
+// confirmed timelines without enabling GekkoNet's per-frame state hashing.
+GEKKONET_API int gekko_current_frame(GekkoSession* session);
+
+GEKKONET_API int gekko_last_received_frame(GekkoSession* session, int player);
+
 GEKKONET_API void gekko_network_stats(GekkoSession* session, int player, GekkoNetworkStats* stats);
 
 GEKKONET_API void gekko_network_poll(GekkoSession* session);

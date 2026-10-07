@@ -161,7 +161,7 @@ public:
       if constexpr (is_preprocess)
       {
         auto& memory = system.GetMemory();
-        const u8* const start_address = memory.GetPointerForRange(address, size);
+        const u8* const start_address = memory.GetPointerForRangeReadOnly(address, size);
 
         system.GetFifo().PushFifoAuxBuffer(start_address, size);
 
@@ -182,7 +182,7 @@ public:
         else
         {
           auto& memory = system.GetMemory();
-          start_address = memory.GetPointerForRange(address, size);
+          start_address = memory.GetPointerForRangeReadOnly(address, size);
         }
 
         // Avoid the crash if memory.GetPointerForRange failed ..

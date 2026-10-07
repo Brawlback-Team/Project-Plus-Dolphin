@@ -340,7 +340,7 @@ std::optional<IPCReply> WFSSRVDevice::IOCtl(const IOCtlRequest& request)
     {
       fd_obj->file.Seek(position, File::SeekOrigin::Begin);
     }
-    fd_obj->file.WriteArray(memory.GetPointerForRange(addr, size), size);
+    fd_obj->file.WriteArray(memory.GetPointerForRangeReadOnly(addr, size), size);
     // TODO(wfs): Handle write errors.
     if (absolute)
     {

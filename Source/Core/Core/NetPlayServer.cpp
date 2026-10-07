@@ -706,6 +706,16 @@ void NetPlayServer::AdjustMinimumPadBufferSize(unsigned int size)
   SendAsyncToClients(std::move(spac));
 }
 
+// Called from the GUI thread when the host uses Auto. Manual input-delay changes remain local to
+// each player; Auto deliberately applies its calculated value to every player in the lobby.
+void NetPlayServer::SetGekkoInputDelay(unsigned int delay)
+{
+  sf::Packet spac;
+  spac << MessageID::GekkoInputDelay;
+  spac << delay;
+  SendAsyncToClients(std::move(spac));
+}
+
 void NetPlayServer::SetHostInputAuthority(const bool enable)
 {
   std::lock_guard lkg(m_crit.game);
@@ -1833,8 +1843,20 @@ std::optional<SaveSyncInfo> NetPlayServer::CollectSaveSyncInfo()
     ++sync_info.save_count;
 
     sync_info.configured_fs = IOS::HLE::FS::MakeFileSystem(IOS::HLE::FS::Location::Configured);
-    if (m_settings.savedata_sync_all_wii)
+    // A launcher ELF/DOL does not identify the Wii title it will eventually boot. Synchronizing no
+    // titles makes the client use an empty temporary NAND while the host uses its configured NAND.
+    // In that case the only deterministic general solution is to collect all installed Wii saves.
+    const bool sync_all_wii =
+        m_settings.savedata_sync_all_wii ||
+        sync_info.game->GetPlatform() == DiscIO::Platform::ELFOrDOL;
+    if (sync_all_wii)
     {
+      if (!m_settings.savedata_sync_all_wii)
+      {
+        INFO_LOG_FMT(NETPLAY,
+                     "Selected game is an ELF/DOL; synchronizing all Wii saves because its target "
+                     "title cannot be inferred");
+      }
       IOS::HLE::Kernel ios;
       for (const u64 title : ios.GetESCore().GetInstalledTitles())
       {

@@ -121,6 +121,7 @@ public:
   ~NetPlayClient() override;
 
   std::vector<const Player*> GetPlayers();
+  u32 GetPlayersMaxPing();
   const NetSettings& GetNetSettings() const;
 
   // Called from the GUI thread.
@@ -298,7 +299,6 @@ private:
   void SendGameStatus();
   void ComputeGameDigest(const SyncIdentifier& sync_identifier);
   void DisplayPlayersPing();
-  u32 GetPlayersMaxPing() const;
 
   void OnData(sf::Packet& packet);
   void OnPlayerJoin(sf::Packet& packet);
@@ -316,6 +316,7 @@ private:
   void OnWiimoteData(sf::Packet& packet);
   void OnPadBufferMinimum(sf::Packet& packet);
   void OnPadBufferPlayer(sf::Packet& packet);
+  void OnGekkoInputDelay(sf::Packet& packet);
   void OnHostInputAuthority(sf::Packet& packet);
   void OnGolfSwitch(sf::Packet& packet);
   void OnGolfPrepare(sf::Packet& packet);
@@ -378,6 +379,9 @@ private:
   std::unique_ptr<IOS::HLE::FS::FileSystem> m_wii_sync_fs;
   std::vector<u64> m_wii_sync_titles;
   std::string m_wii_sync_redirect_folder;
+  // Wii sync data is consumed by BootSessionData. Require SetWiiSyncData to run again before
+  // every subsequent boot instead of silently falling back to each peer's configured NAND.
+  bool m_wii_sync_data_ready = false;
 };
 
 void NetPlay_Enable(NetPlayClient* const np);

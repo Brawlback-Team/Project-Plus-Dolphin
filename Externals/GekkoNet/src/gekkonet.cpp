@@ -84,6 +84,16 @@ float gekko_frames_ahead(GekkoSession* session)
     return session->FramesAhead();
 }
 
+int gekko_current_frame(GekkoSession* session)
+{
+    return session->CurrentFrame();
+}
+
+int gekko_last_received_frame(GekkoSession* session, int player)
+{
+    return session->LastReceivedFrame(player);
+}
+
 void gekko_network_stats(GekkoSession* session, int player, GekkoNetworkStats* stats)
 {
     session->NetworkStats(player, stats);

@@ -42,9 +42,15 @@ u32 UndoLog::NextMark() const
 
 u64 UndoLog::Open()
 {
-  m_logs.push_back(Log{m_next_id++, {}});
-  // Recording runs in a fault handler and should not allocate.
-  m_logs.back().entries.reserve(std::max<std::size_t>(1024, m_page_count / 8));
+  std::vector<Entry> entries;
+  if (!m_spare_entry_storage.empty())
+  {
+    entries = std::move(m_spare_entry_storage.back());
+    m_spare_entry_storage.pop_back();
+  }
+  // Reserve entry storage so committing dirty pages rarely allocates at a frame boundary.
+  entries.reserve(std::max<std::size_t>(1024, m_page_count / 8));
+  m_logs.push_back(Log{m_next_id++, std::move(entries)});
   return m_logs.back().id;
 }
 
@@ -91,6 +97,7 @@ bool UndoLog::RewindTo(u64 id)
   while (m_logs.back().id != id)
   {
     FreeEntries(&m_logs.back());
+    RecycleEntryStorage(&m_logs.back());
     m_logs.pop_back();
   }
   // Pages from the dropped logs carry ids that no longer match the newest. Reset the emptied log's
@@ -109,6 +116,7 @@ void UndoLog::Drop(u64 id)
   if (log == m_logs.begin())
   {
     FreeEntries(&*log);
+    RecycleEntryStorage(&*log);
     m_logs.pop_front();
     return;
   }
@@ -130,6 +138,7 @@ void UndoLog::Drop(u64 id)
     }
   }
   log->entries.clear();
+  RecycleEntryStorage(&*log);
   const bool was_newest = std::next(log) == m_logs.end();
   m_logs.erase(log);
   if (was_newest)
@@ -178,5 +187,11 @@ void UndoLog::FreeEntries(Log* log)
     m_free.push_back(entry.data);
   m_pages_held -= log->entries.size();
   log->entries.clear();
+}
+
+void UndoLog::RecycleEntryStorage(Log* log)
+{
+  if (log->entries.capacity() != 0)
+    m_spare_entry_storage.push_back(std::move(log->entries));
 }
 }  // namespace Rollback

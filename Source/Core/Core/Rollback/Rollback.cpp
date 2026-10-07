@@ -7,11 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <span>
 #include <tuple>
-#include <unordered_set>
-
-#include <xxh3.h>
 
 #include "Common/FPURoundMode.h"
 #include "Common/Logging/Log.h"
@@ -21,7 +17,8 @@
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
-#include "Core/Rollback/Cow.h"
+#include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "VideoCommon/VideoState.h"
@@ -42,10 +39,9 @@ constexpr u32 PHYSICAL_MASK = 0x1FFFFFFFu;
 // Copies saved RAM back one page at a time, skipping pages that already match. Only changed pages
 // have their JIT blocks invalidated; clearing the whole JIT (as a normal state load does) would
 // recompile the hot code after every rollback. Changed pages are collected by physical address.
-void RestoreRam(Core::System& system, u8* live, const std::vector<u8>& saved, u32 virtual_base,
-                std::unordered_set<u32>* changed_pages)
+void RestoreRam(u8* live, const std::vector<u8>& saved, u32 virtual_base,
+                std::vector<u32>* changed_pages)
 {
-  auto& jit = system.GetJitInterface();
   const std::size_t size = saved.size();
   for (std::size_t offset = 0; offset < size; offset += RESTORE_PAGE)
   {
@@ -54,15 +50,14 @@ void RestoreRam(Core::System& system, u8* live, const std::vector<u8>& saved, u3
       continue;
     std::memcpy(live + offset, saved.data() + offset, length);
     const u32 address = virtual_base + static_cast<u32>(offset);
-    jit.InvalidateICache(address, static_cast<u32>(length), true);
-    changed_pages->insert(address & PHYSICAL_MASK);
+    changed_pages->push_back(address & PHYSICAL_MASK);
   }
 }
 
 // The JIT also remembers per-instruction facts (GPU FIFO writes, paired quantization, no
 // speculative constants). A restored page may hold different instructions, so forget its entries.
 // Done here in bulk because the JIT's own per-word invalidation is too slow for thousands of pages.
-void ForgetLearnedJitAddresses(Core::System& system, const std::unordered_set<u32>& changed_pages)
+void ForgetLearnedJitAddresses(Core::System& system, const std::vector<u32>& changed_pages)
 {
   // JitInterface only holds a JitBase (null for the interpreter). static_cast because MSVC builds
   // have RTTI off.
@@ -70,7 +65,8 @@ void ForgetLearnedJitAddresses(Core::System& system, const std::unordered_set<u3
   if (!jit || changed_pages.empty())
     return;
   const auto in_changed_page = [&changed_pages](u32 address) {
-    return changed_pages.contains(address & PHYSICAL_MASK & ~static_cast<u32>(RESTORE_PAGE - 1));
+    const u32 page = address & PHYSICAL_MASK & ~static_cast<u32>(RESTORE_PAGE - 1);
+    return std::binary_search(changed_pages.begin(), changed_pages.end(), page);
   };
   std::erase_if(jit->js.fifoWriteAddresses, in_changed_page);
   std::erase_if(jit->js.pairedQuantizeAddresses, in_changed_page);
@@ -85,18 +81,6 @@ IOS::HLE::FS::HostFileSystem* HostNand(Core::System& system)
   return ios ? static_cast<IOS::HLE::FS::HostFileSystem*>(ios->GetFS().get()) : nullptr;
 }
 }  // namespace
-
-
-u64 RamChecksum(std::span<const u8> mem1, std::span<const u8> mem2)
-{
-  XXH3_state_t* const state = XXH3_createState();
-  XXH3_64bits_reset(state);
-  XXH3_64bits_update(state, mem1.data(), mem1.size());
-  XXH3_64bits_update(state, mem2.data(), mem2.size());
-  const u64 hash = XXH3_64bits_digest(state);
-  XXH3_freeState(state);
-  return hash;
-}
 
 bool InSnapshotDoState()
 {
@@ -128,46 +112,49 @@ SnapshotScope::~SnapshotScope()
   s_in_snapshot.store(false, std::memory_order_relaxed);
 }
 
-SnapshotRing::SnapshotRing(std::size_t slots) : m_slots(std::max<std::size_t>(slots, 2))
+SnapshotRing::SnapshotRing(std::size_t slots, bool tracked_bitmap_clear, bool force_full_scan)
+    : m_slots(std::max<std::size_t>(slots, 2)), m_tracked_bitmap_clear(tracked_bitmap_clear),
+      m_force_full_scan(force_full_scan)
 {
+  m_changed_blocks.reserve(4096);
 }
 
 SnapshotRing::~SnapshotRing()
 {
-  Cow::Disarm(this);
+  DirtyPages::Disarm(this);
 }
 
 void SnapshotRing::Forget(Slot* slot)
 {
-  if (slot->cow_id != 0)
-    Cow::Drop(slot->cow_id);
-  slot->cow_id = 0;
+  if (slot->page_snapshot_id != 0)
+    DirtyPages::Drop(slot->page_snapshot_id);
+  slot->page_snapshot_id = 0;
   slot->frame = -1;
 }
 
-bool SnapshotRing::UseCow(Core::System& system, bool* armed_now)
+bool SnapshotRing::UseDirtyPageTracking(Core::System& system, bool* armed_now)
 {
   *armed_now = false;
   // If tracking stopped under us (emulation stopped, or an unsupported RAM mapping), the
   // undo-log snapshots are gone.
-  if (m_cow.value_or(false) && !Cow::IsArmedFor(this))
+  if (m_dirty_page_tracking.value_or(false) && !DirtyPages::IsArmedFor(this))
   {
     for (Slot& slot : m_slots)
     {
-      if (slot.cow_id != 0)
+      if (slot.page_snapshot_id != 0)
       {
-        slot.cow_id = 0;
+        slot.page_snapshot_id = 0;
         slot.frame = -1;
       }
     }
-    m_cow.reset();
+    m_dirty_page_tracking.reset();
   }
-  if (!m_cow)
+  if (!m_dirty_page_tracking)
   {
-    m_cow = Cow::ArmForSystem(system, this);
-    *armed_now = *m_cow;
+    m_dirty_page_tracking = DirtyPages::ArmForSystem(system, this, m_force_full_scan);
+    *armed_now = *m_dirty_page_tracking;
   }
-  return *m_cow;
+  return *m_dirty_page_tracking;
 }
 
 SnapshotRing::Slot* SnapshotRing::Find(s64 frame)
@@ -193,7 +180,7 @@ const SnapshotRing::Slot* SnapshotRing::Find(s64 frame) const
 bool SnapshotRing::Has(s64 frame) const
 {
   const Slot* slot = Find(frame);
-  return slot && (slot->cow_id == 0 || Cow::Has(slot->cow_id));
+  return slot && (slot->page_snapshot_id == 0 || DirtyPages::Has(slot->page_snapshot_id));
 }
 
 void SnapshotRing::Reset(Core::System& system)
@@ -201,10 +188,10 @@ void SnapshotRing::Reset(Core::System& system)
   for (Slot& slot : m_slots)
   {
     slot.frame = -1;
-    slot.cow_id = 0;
+    slot.page_snapshot_id = 0;
   }
-  Cow::Disarm(this);
-  m_cow.reset();
+  DirtyPages::Disarm(this);
+  m_dirty_page_tracking.reset();
   m_next = 0;
   if (IOS::HLE::FS::HostFileSystem* nand = HostNand(system))
     nand->JournalStop();
@@ -222,7 +209,7 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
   m_last = static_cast<std::size_t>(slot - m_slots.data());
   Forget(slot);
   bool armed_now;
-  const bool cow = UseCow(system, &armed_now);
+  const bool dirty_page_tracking = UseDirtyPageTracking(system, &armed_now);
   const auto buffers = [slot] {
     return std::tuple{slot->state.data(), slot->mem1.capacity(), slot->mem2.capacity()};
   };
@@ -237,9 +224,9 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
   auto& memory = system.GetMemory();
   // Dirty-page tracking: commit the RAM written since the last snapshot and open this snapshot's
   // undo log. A 0 id means tracking stopped, so fall back to a full copy.
-  if (cow)
-    slot->cow_id = Cow::Snapshot();
-  if (slot->cow_id == 0)
+  if (dirty_page_tracking)
+    slot->page_snapshot_id = DirtyPages::Snapshot();
+  if (slot->page_snapshot_id == 0)
   {
     slot->mem1.assign(memory.GetRAM(), memory.GetRAM() + memory.GetRamSize());
     if (memory.GetEXRAM())
@@ -263,7 +250,7 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
     nand->JournalTrim(oldest);
   }
 
-  // Arming write-protects all of RAM once; that one-off cost counts as an allocation.
+  // Arming allocates and initializes the RAM mirrors; that one-off cost counts as an allocation.
   return armed_now || buffers() != buffers_before;
 }
 
@@ -285,42 +272,41 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   // requests from RAM while loading, and live RAM may already hold a newer reply. The device-state
   // load writes no RAM in a session, since EFB copies stay on the GPU.
   auto& memory = system.GetMemory();
-  std::unordered_set<u32> changed_pages;
-  if (slot->cow_id != 0)
+  m_changed_blocks.clear();
+  if (slot->page_snapshot_id != 0)
   {
     // The undo logs of this snapshot and every newer one list exactly the pages written since.
-    std::vector<u32> changed_blocks;
-    if (!Cow::Restore(slot->cow_id, [&changed_blocks](u32 physical, u32 length) {
+    if (!DirtyPages::Restore(slot->page_snapshot_id, [this](u32 physical, u32 length) {
           for (u32 offset = 0; offset < length; offset += static_cast<u32>(RESTORE_PAGE))
-            changed_blocks.push_back(physical + offset);
-        }))
+            m_changed_blocks.push_back(physical + offset);
+        }, m_tracked_bitmap_clear))
     {
-      ERROR_LOG_FMT(CORE, "Rollback: the copy-on-write snapshot for frame {} is gone", frame);
+      ERROR_LOG_FMT(CORE, "Rollback: the dirty-page snapshot for frame {} is gone", frame);
       return false;
-    }
-    // MEM1 is at 0x80000000 and MEM2 at 0x90000000: both are physical | 0x80000000.
-    auto& jit = system.GetJitInterface();
-    for (const u32 physical : changed_blocks)
-    {
-      jit.InvalidateICache(physical | MEM1_VIRTUAL, static_cast<u32>(RESTORE_PAGE), true);
-      changed_pages.insert(physical);
     }
   }
   else
   {
-    RestoreRam(system, memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &changed_pages);
+    RestoreRam(memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &m_changed_blocks);
     if (memory.GetEXRAM() && !slot->mem2.empty())
-      RestoreRam(system, memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &changed_pages);
+      RestoreRam(memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &m_changed_blocks);
   }
+  std::sort(m_changed_blocks.begin(), m_changed_blocks.end());
+  m_changed_blocks.erase(std::unique(m_changed_blocks.begin(), m_changed_blocks.end()),
+                         m_changed_blocks.end());
+  // MEM1 is at 0x80000000 and MEM2 at 0x90000000: both are physical | 0x80000000.
+  auto& jit = system.GetJitInterface();
+  for (const u32 physical : m_changed_blocks)
+    jit.InvalidateICache(physical | MEM1_VIRTUAL, static_cast<u32>(RESTORE_PAGE), true);
   std::memcpy(memory.GetL1Cache(), slot->l1_cache.data(), slot->l1_cache.size());
-  ForgetLearnedJitAddresses(system, changed_pages);
+  ForgetLearnedJitAddresses(system, m_changed_blocks);
 
   bool ok;
   {
     SnapshotScope scope;
     VideoCommon_SetSnapshotRedisplays(redisplay);
-    ok = State::LoadFromBufferForRollback(
-        system, std::span<u8>(slot->state.data(), slot->state_size));
+    ok = State::LoadFromBufferForRollback(system,
+                                          std::span<u8>(slot->state.data(), slot->state_size));
     VideoCommon_SetSnapshotRedisplays(false);
   }
   if (!ok)
@@ -338,30 +324,12 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   // Later frames are about to be re-run and re-saved, so drop their snapshots.
   for (Slot& other : m_slots)
   {
-    if (other.frame > frame || (other.cow_id != 0 && !Cow::Has(other.cow_id)))
+    if (other.frame > frame ||
+        (other.page_snapshot_id != 0 && !DirtyPages::Has(other.page_snapshot_id)))
       Forget(&other);
   }
   m_next = (static_cast<std::size_t>(slot - m_slots.data()) + 1) % m_slots.size();
   return true;
-}
-
-std::optional<u64> SnapshotRing::RamChecksum(s64 frame) const
-{
-  const Slot* slot = Find(frame);
-  if (!slot)
-    return std::nullopt;
-  // Copy-on-write snapshots keep no full copy: rebuild RAM from live RAM plus the undo logs.
-  if (slot->cow_id != 0)
-    return Cow::Checksum(slot->cow_id);
-  return Rollback::RamChecksum(slot->mem1, slot->mem2);
-}
-
-std::span<const u8> SnapshotRing::LastState() const
-{
-  if (m_last >= m_slots.size())
-    return {};
-  const Slot& slot = m_slots[m_last];
-  return {slot.state.data(), slot.state_size};
 }
 
 bool SnapshotRing::Capture(Core::System& system, MachineImage* image, bool stop_journal)
@@ -406,7 +374,7 @@ bool SnapshotRing::LoadImage(Core::System& system, MachineImage image, s64 frame
     slot = &m_slots[m_next];
     m_next = (m_next + 1) % m_slots.size();
   }
-  // Store as a full-copy slot (cow_id 0), so LoadSlot restores mem1/mem2 directly.
+  // Store as a full-copy slot (page_snapshot_id 0), so LoadSlot restores mem1/mem2 directly.
   Forget(slot);
   slot->state.reset(image.state.size());
   std::memcpy(slot->state.data(), image.state.data(), image.state.size());

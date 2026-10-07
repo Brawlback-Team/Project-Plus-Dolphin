@@ -114,6 +114,9 @@ public:
   // restore pages whatever their protection elsewhere. Made on first use; null if it can't be.
   u8* GetRollbackAlias(bool exram);
   bool HasPageTableMappings() const { return !m_page_table_mapped_entries.empty(); }
+  // The JIT dirty bitmap derives a physical page by masking the effective address. This is exact
+  // only for the normal mirrored BAT layout and cannot represent page-table mappings.
+  bool HasNonCanonicalMappingsForRollback() const;
   void AddPageTableMapping(u32 logical_address, u32 translated_address, bool writeable);
   void RemovePageTableMappings(const std::set<u32>& mappings);
   void RemoveAllPageTableMappings();
@@ -131,6 +134,9 @@ public:
 
   // If the specified range is within a single valid memory region, returns a pointer to the start
   // of the corresponding range in host memory. Otherwise, returns nullptr.
+  // Use the read-only form when the caller cannot write through the returned pointer; the legacy
+  // form conservatively marks the range because its mutable pointer may be used as an output.
+  u8* GetPointerForRangeReadOnly(u32 address, size_t size) const;
   u8* GetPointerForRange(u32 address, size_t size) const;
   void CopyFromEmu(void* data, u32 address, size_t size) const;
   void CopyToEmu(u32 address, const void* data, size_t size);
@@ -151,7 +157,7 @@ public:
   template <typename T>
   void CopyFromEmuSwapped(T* data, u32 address, size_t size) const
   {
-    const T* src = reinterpret_cast<T*>(GetPointerForRange(address, size));
+    const T* src = reinterpret_cast<T*>(GetPointerForRangeReadOnly(address, size));
 
     if (src == nullptr)
       return;

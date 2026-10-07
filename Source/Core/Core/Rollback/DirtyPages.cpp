@@ -1,7 +1,7 @@
 // Copyright 2026 YouGame
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "Core/Rollback/Cow.h"
+#include "Core/Rollback/DirtyPages.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -9,23 +9,22 @@
 #include <memory>
 #include <mutex>
 
-#include <xxh3.h>
-
 #include "Common/Buffer.h"
 #include "Common/Logging/Log.h"
 #include "Core/HW/Memmap.h"
+#include "Core/PowerPC/JitInterface.h"
 #include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/UndoLog.h"
 #include "Core/System.h"
 
-namespace Rollback::Cow
+namespace Rollback::DirtyPages
 {
 namespace
 {
 constexpr std::size_t PAGE = DIRTY_PAGE_SIZE;
 constexpr u32 MEM2_PHYSICAL = 0x10000000u;
 // Spare page buffers kept ready at each snapshot.
-constexpr std::size_t RESERVE_PAGES = 512;
+constexpr std::size_t RESERVE_PAGES = 2048;
 
 // The JIT's inline bitmap stores exist only in the x86-64 backend. Other hosts keep full copies.
 #if defined(_M_X86_64) || defined(__x86_64__)
@@ -38,12 +37,17 @@ struct Tracker
 {
   std::mutex lock;
   const void* owner = nullptr;
+  Core::System* system = nullptr;
   std::vector<Area> areas;
   std::vector<std::size_t> area_first_page;  // global index of each area's first page
   std::size_t page_count = 0;
   // RAM as it was at the newest snapshot, per area. Pages the bitmap marks are compared with it.
   std::vector<Common::UniqueBuffer<u8>> mirrors;
   std::unique_ptr<UndoLog> log;
+  // Generation marks replace a freshly allocated and zeroed page array on every restore.
+  std::vector<u32> restore_marks;
+  u32 restore_mark = 0;
+  bool force_full_scan = false;
   Counters counters;
   // Ids stay unique across arms, so a stale id never names another ring's snapshot.
   u64 next_id = 1;
@@ -92,10 +96,12 @@ void CommitDirtyPages(Tracker& t)
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      u8& dirty = bitmap.entries[first_bitmap_page + i];
-      if (!dirty)
+      const std::size_t bitmap_page = first_bitmap_page + i;
+      // Clean pages dominate. Avoid an atomic read-modify-write unless the cheap load observes a
+      // mark; a mark racing after a clean load remains set for the next snapshot.
+      if (!t.force_full_scan &&
+          (!bitmap.Load(bitmap_page) || !bitmap.Consume(bitmap_page)))
         continue;
-      dirty = 0;
       ++t.counters.dirty_pages;
       u8* const live = area.alias + i * PAGE;
       u8* const mirror = t.mirrors[a].data() + i * PAGE;
@@ -110,18 +116,29 @@ void CommitDirtyPages(Tracker& t)
 
 void ResetLocked(Tracker& t)
 {
+  auto& bitmap = JITDirtyBitmap::Get();
+  bitmap.SetEnabled(false);
+  bitmap.SetEmitUpdates(true);
+  // Active-session blocks omit the per-store enabled test. Stop dispatching them before the
+  // tracker is used again in its guarded state. ClearSafe is valid from inside a JIT block.
+  if (t.system)
+    t.system->GetJitInterface().ClearSafe();
   if (t.log)
     t.next_id = t.log->NextId();
   t.owner = nullptr;
+  t.system = nullptr;
   t.areas.clear();
   t.area_first_page.clear();
   t.page_count = 0;
   t.mirrors.clear();
+  t.restore_marks.clear();
+  t.restore_mark = 0;
+  t.force_full_scan = false;
   t.log.reset();
 }
 }  // namespace
 
-bool Arm(const void* owner, const std::vector<Area>& areas)
+bool Arm(const void* owner, const std::vector<Area>& areas, bool force_full_scan)
 {
   Tracker& t = T();
   std::lock_guard lock(t.lock);
@@ -151,25 +168,31 @@ bool Arm(const void* owner, const std::vector<Area>& areas)
     std::memcpy(t.mirrors.back().data(), area.alias, area.size);
   }
   t.log = std::make_unique<UndoLog>(PAGE, t.page_count, t.next_id);
+  t.restore_marks.assign(t.page_count, 0);
+  t.restore_mark = 0;
+  t.force_full_scan = force_full_scan;
   t.log->Reserve(RESERVE_PAGES);
   t.owner = owner;
   // Everything written before this point is already in the mirror.
-  JITDirtyBitmap::Get().Clear();
-  NOTICE_LOG_FMT(CORE, "Rollback: dirty-page snapshots over {} KB of guest RAM",
-                 t.page_count * PAGE / 1024);
+  auto& bitmap = JITDirtyBitmap::Get();
+  bitmap.SetEmitUpdates(!force_full_scan);
+  bitmap.Clear();
+  bitmap.SetEnabled(!force_full_scan);
+  NOTICE_LOG_FMT(CORE, "Rollback: dirty-page snapshots over {} KB of guest RAM (full_scan={})",
+                 t.page_count * PAGE / 1024, force_full_scan);
   return true;
 }
 
-bool ArmForSystem(Core::System& system, const void* owner)
+bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan)
 {
   if (!JIT_STORES_TRACKED)
     return false;
   auto& memory = system.GetMemory();
   // Page-table mappings reach RAM at addresses the bitmap does not index by physical page.
-  if (memory.HasPageTableMappings())
+  if (memory.HasNonCanonicalMappingsForRollback())
   {
-    NOTICE_LOG_FMT(CORE, "Rollback: dirty-page tracking off (page tables mapped); using full-copy "
-                         "snapshots");
+    NOTICE_LOG_FMT(CORE, "Rollback: dirty-page tracking off (noncanonical RAM mapping); using "
+                         "full-copy snapshots");
     return false;
   }
   std::vector<Area> areas;
@@ -190,7 +213,16 @@ bool ArmForSystem(Core::System& system, const void* owner)
     }
     areas.push_back(Area{exram_alias, MEM2_PHYSICAL, memory.GetExRamSize()});
   }
-  return Arm(owner, areas);
+  if (!Arm(owner, areas, force_full_scan))
+    return false;
+
+  Tracker& t = T();
+  std::lock_guard lock(t.lock);
+  t.system = &system;
+  // Existing blocks retain the guarded bitmap update and are safe for the remainder of the block
+  // that armed tracking. Newly dispatched blocks are recompiled with the active-session fast path.
+  system.GetJitInterface().ClearSafe();
+  return true;
 }
 
 void Disarm(const void* owner)
@@ -229,16 +261,25 @@ bool Has(u64 id)
   return t.log && t.log->Has(id);
 }
 
-bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed)
+bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed,
+             bool tracked_bitmap_clear)
 {
   Tracker& t = T();
   std::lock_guard lock(t.lock);
   if (!t.log || !t.log->Has(id))
     return false;
+  // With inline tracking disabled, first settle every write made since the newest snapshot.
+  if (t.force_full_scan)
+    CommitDirtyPages(t);
   // Pages with a pre-image in the logs from `id` on hold their bytes at `id` there.
-  std::vector<u8> logged(t.page_count, 0);
+  if (++t.restore_mark == 0)
+  {
+    std::fill(t.restore_marks.begin(), t.restore_marks.end(), 0);
+    t.restore_mark = 1;
+  }
+  const u32 restore_mark = t.restore_mark;
   t.log->ForEachPreImage(id, [&](std::size_t page, const u8* pre_image) {
-    logged[page] = 1;
+    t.restore_marks[page] = restore_mark;
     const std::size_t a = AreaOf(t, page);
     const Area& area = t.areas[a];
     const std::size_t i = page - t.area_first_page[a];
@@ -255,14 +296,28 @@ bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>
     const std::size_t first_bitmap_page = area.physical_address / PAGE;
     for (std::size_t i = 0; i < pages; ++i)
     {
-      if (!bitmap.entries[first_bitmap_page + i] || logged[t.area_first_page[a] + i])
+      if (!bitmap.Load(first_bitmap_page + i) ||
+          t.restore_marks[t.area_first_page[a] + i] == restore_mark)
         continue;
       ReplacePage(area.alias + i * PAGE, t.mirrors[a].data() + i * PAGE, PhysicalOf(area, i),
                   changed);
     }
   }
-  // Live RAM now matches the mirror again, so nothing is dirty.
-  bitmap.Clear();
+  // Live RAM now matches the mirror again, so nothing is dirty. The benchmark path clears only
+  // MEM1/MEM2 instead of all 512 MB represented by the address-indexed bitmap.
+  if (t.force_full_scan)
+  {
+    // The bitmap is disabled and remained clear.
+  }
+  else if (tracked_bitmap_clear)
+  {
+    for (const Area& area : t.areas)
+      bitmap.ClearRange(area.physical_address / PAGE, area.size / PAGE);
+  }
+  else
+  {
+    bitmap.Clear();
+  }
   t.log->RewindTo(id);
   return true;
 }
@@ -275,46 +330,18 @@ void Drop(u64 id)
     t.log->Drop(id);
 }
 
-std::optional<u64> Checksum(u64 id)
-{
-  Tracker& t = T();
-  std::lock_guard lock(t.lock);
-  if (!t.log || !t.log->Has(id))
-    return std::nullopt;
-  std::vector<const u8*> pre_images(t.page_count, nullptr);
-  t.log->ForEachPreImage(id, [&](std::size_t page, const u8* data) { pre_images[page] = data; });
-
-  // Must hash the same bytes in the same order as Rollback::RamChecksum over MEM1 and MEM2.
-  XXH3_state_t* const state = XXH3_createState();
-  XXH3_64bits_reset(state);
-  for (std::size_t a = 0; a < t.areas.size(); ++a)
-  {
-    const std::size_t first = t.area_first_page[a];
-    const std::size_t count = t.areas[a].size / PAGE;
-    for (std::size_t i = 0; i < count; ++i)
-    {
-      const u8* const pre_image = pre_images[first + i];
-      const u8* const data = pre_image ? pre_image : t.mirrors[a].data() + i * PAGE;
-      XXH3_64bits_update(state, data, PAGE);
-    }
-  }
-  const u64 hash = XXH3_64bits_digest(state);
-  XXH3_freeState(state);
-  return hash;
-}
-
 void OnMappingsChanged(Core::System& system)
 {
   Tracker& t = T();
   std::lock_guard lock(t.lock);
   if (!t.log)
     return;
-  if (system.GetMemory().HasPageTableMappings())
+  if (system.GetMemory().HasNonCanonicalMappingsForRollback())
   {
-    // Writes through the page tables would not set the bitmap at their physical pages, so no
-    // snapshot can be trusted.
-    ERROR_LOG_FMT(CORE, "Rollback: guest RAM is now mapped through page tables; every snapshot is "
-                        "dropped");
+    // The JIT bitmap indexes a masked effective address. Arbitrary BAT or page-table mappings do
+    // not preserve that relationship, so no tracked snapshot can still be trusted.
+    ERROR_LOG_FMT(CORE, "Rollback: guest RAM gained a noncanonical mapping; every dirty-page "
+                        "snapshot is dropped");
     ResetLocked(t);
   }
 }
@@ -332,4 +359,4 @@ Counters GetCounters()
   std::lock_guard lock(t.lock);
   return t.counters;
 }
-}  // namespace Rollback::Cow
+}  // namespace Rollback::DirtyPages

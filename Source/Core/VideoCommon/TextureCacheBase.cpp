@@ -1844,7 +1844,7 @@ RcTcacheEntry TextureCacheBase::GetXFBTexture(u32 address, u32 width, u32 height
 
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
-  const u8* src_data = memory.GetPointerForRange(address, total_size);
+  const u8* src_data = memory.GetPointerForRangeReadOnly(address, total_size);
   if (!src_data)
   {
     ERROR_LOG_FMT(VIDEO, "Trying to load XFB texture from invalid address {:#010x}", address);

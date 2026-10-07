@@ -1,7 +1,7 @@
 // Copyright 2026 YouGame
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Undo logs for copy-on-write rollback snapshots (Cow.h). Each snapshot's log holds the old
+// Undo logs for dirty-page rollback snapshots (DirtyPages.h). Each snapshot's log holds the old
 // contents ("pre-images") of pages first written after it was taken.
 //
 // Logs are kept oldest first; log i covers writes between snapshot i and snapshot i + 1. To rebuild
@@ -9,7 +9,7 @@
 // pre-image from the oldest of those logs. Pages in none of them have not changed since s.
 //
 // Pure bookkeeping with no platform code: the caller reports first writes and restores pages
-// itself. Not thread-safe; Cow.cpp holds its lock around every call.
+// itself. Not thread-safe; DirtyPages.cpp holds its lock around every call.
 
 #pragma once
 
@@ -87,7 +87,7 @@ public:
 
   // Pre-images held across all logs.
   std::size_t PagesHeld() const { return m_pages_held; }
-  // Keeps at least `pages` free buffers so recording inside a fault handler rarely allocates.
+  // Keeps at least `pages` free buffers so recording dirty pages at a boundary rarely allocates.
   void Reserve(std::size_t pages);
 
 private:
@@ -107,10 +107,14 @@ private:
   u32 NextMark() const;
   u8* TakeBuffer();
   void FreeEntries(Log* log);
+  void RecycleEntryStorage(Log* log);
 
   std::size_t m_page_size;
   std::size_t m_page_count;
   std::deque<Log> m_logs;
+  // Dropped logs donate their entry vectors to later snapshots. This keeps the per-frame Open()
+  // path from allocating a fresh multi-thousand-entry vector.
+  std::vector<std::vector<Entry>> m_spare_entry_storage;
   u64 m_next_id = 1;
   // Per page: the id of the newest log that recorded it, and that pre-image.
   std::vector<u64> m_recorded_in;

@@ -150,6 +150,7 @@ private:
   QSpinBox* m_minimum_buffer_size_box;
   QLabel* m_player_buffer_label;
   QSpinBox* m_player_buffer_size_box;
+  QPushButton* m_auto_delay_button;
 
   QActionGroup* m_savedata_style_group;
   QAction* m_savedata_none_action;
@@ -167,6 +168,9 @@ private:
   QAction* m_hide_remote_gbas_action;
   QAction* m_rollback_debug_p2_cstick_action;
   QAction* m_rollback_simulate_remote_p2_action;
+  QAction* m_rollback_stress_test_action;
+  QAction* m_rollback_tracked_bitmap_clear_action;
+  QAction* m_rollback_full_scan_benchmark_action;
   QCheckBox* m_brawlmusic_off;
   QCheckBox* m_spectator_mode;
   QPushButton* m_quit_button;

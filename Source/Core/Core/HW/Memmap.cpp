@@ -33,15 +33,15 @@
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/MemoryInterface.h"
-#include "Core/Rollback/Cow.h"
-#include "Core/Rollback/DirtyBitmap.h"
-#include "Core/Rollback/Rollback.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/HW/WII_IPC.h"
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/PixelEngine.h"
@@ -178,7 +178,6 @@ void MemoryManager::Init()
   m_logical_page_mappings_base = reinterpret_cast<u8*>(m_logical_page_mappings.data());
 
   Clear();
-
   INFO_LOG_FMT(MEMMAP, "Memory system initialized. RAM at {}", fmt::ptr(m_ram));
   m_is_initialized = true;
 }
@@ -254,7 +253,7 @@ bool MemoryManager::InitFastmemArena()
 
   m_is_fastmem_arena_initialized = true;
   m_fastmem_arena_size = memory_size;
-  Rollback::Cow::OnMappingsChanged(m_system);
+  Rollback::DirtyPages::OnMappingsChanged(m_system);
   return true;
 }
 
@@ -315,16 +314,16 @@ void MemoryManager::UpdateDBATMappings(const PowerPC::BatTable& dbat_table)
 
             void* mapped_pointer = m_arena.MapInMemoryRegion(position, mapped_size, base, true);
             if (!mapped_pointer)
-              {
-                PanicAlertFmt("Memory::UpdateDBATMappings(): Failed to map memory region at 0x{:08X} "
-                              "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
-                              intersection_start, mapped_size, logical_address);
-                continue;
-              }
-              // Keyed by where this view is: one BAT run can cover MEM1 and MEM2 (0x80000000 and
-              // 0x90000000 map 0x00000000 and 0x10000000 contiguously), and both views must be
-              // remembered to be unmapped (and write-protected by rollback snapshots).
-              m_dbat_mapped_entries.emplace(
+            {
+              PanicAlertFmt("Memory::UpdateDBATMappings(): Failed to map memory region at 0x{:08X} "
+                            "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
+                            intersection_start, mapped_size, logical_address);
+              continue;
+            }
+            // Keyed by where this view is: one BAT run can cover MEM1 and MEM2 (0x80000000 and
+            // 0x90000000 map 0x00000000 and 0x10000000 contiguously), and both views must be
+            // remembered to be unmapped (and tracked by rollback snapshots).
+            m_dbat_mapped_entries.emplace(
                 mapped_logical_address,
                 LogicalMemoryView{mapped_pointer, mapped_size, intersection_start, true});
           }
@@ -337,7 +336,7 @@ void MemoryManager::UpdateDBATMappings(const PowerPC::BatTable& dbat_table)
       }
     }
   }
-  Rollback::Cow::OnMappingsChanged(m_system);
+  Rollback::DirtyPages::OnMappingsChanged(m_system);
 }
 
 void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_address, bool writeable)
@@ -454,7 +453,7 @@ void MemoryManager::AddHostPageTableMapping(u32 logical_address, u32 translated_
           LogicalMemoryView{mapped_pointer, mapped_size, intersection_start, writeable});
     }
   }
-  Rollback::Cow::OnMappingsChanged(m_system);
+  Rollback::DirtyPages::OnMappingsChanged(m_system);
 }
 
 void MemoryManager::RemovePageTableMappings(const std::set<u32>& mappings)
@@ -499,7 +498,7 @@ void MemoryManager::RemoveHostPageTableMapping(u32 logical_address)
     m_arena.UnmapFromMemoryRegion(entry.mapped_pointer, entry.mapped_size);
 
     m_page_table_mapped_entries.erase(it);
-    Rollback::Cow::OnMappingsChanged(m_system);
+    Rollback::DirtyPages::OnMappingsChanged(m_system);
   }
 }
 
@@ -514,9 +513,8 @@ void MemoryManager::RemoveAllPageTableMappings()
   m_large_readable_pages.clear();
   m_large_writeable_pages.clear();
   if (had_mappings)
-    Rollback::Cow::OnMappingsChanged(m_system);
+    Rollback::DirtyPages::OnMappingsChanged(m_system);
 }
-
 
 u8* MemoryManager::GetRollbackAlias(bool exram)
 {
@@ -527,6 +525,35 @@ u8* MemoryManager::GetRollbackAlias(bool exram)
   if (!alias)
     alias = static_cast<u8*>(m_arena.CreateView(region.shm_position, region.size));
   return alias;
+}
+
+bool MemoryManager::HasNonCanonicalMappingsForRollback() const
+{
+  const auto overlaps_tracked_ram = [this](const LogicalMemoryView& entry) {
+    const u64 start = entry.physical_address;
+    const u64 end = start + entry.mapped_size;
+    const bool overlaps_mem1 = start < GetRamSize() && end > 0;
+    const bool overlaps_mem2 =
+        m_exram && start < 0x1000'0000ULL + GetExRamSize() && end > 0x1000'0000ULL;
+    return entry.writeable && (overlaps_mem1 || overlaps_mem2);
+  };
+
+  for (const auto& [logical_address, entry] : m_page_table_mapped_entries)
+  {
+    if (overlaps_tracked_ram(entry) && (logical_address & 0x1FFF'FFFFu) != entry.physical_address)
+    {
+      return true;
+    }
+  }
+
+  for (const auto& [logical_address, entry] : m_dbat_mapped_entries)
+  {
+    if (overlaps_tracked_ram(entry) && (logical_address & 0x1FFF'FFFFu) != entry.physical_address)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void MemoryManager::DoState(PointerWrap& p)
@@ -591,7 +618,7 @@ void MemoryManager::DoState(PointerWrap& p)
 
 void MemoryManager::Shutdown()
 {
-  Rollback::Cow::StopTracking();
+  Rollback::DirtyPages::StopTracking();
   ShutdownFastmemArena();
 
   m_is_initialized = false;
@@ -619,7 +646,7 @@ void MemoryManager::ShutdownFastmemArena()
   if (!m_is_fastmem_arena_initialized)
     return;
   // Rollback snapshots can't follow writes through views that come back later.
-  Rollback::Cow::StopTracking();
+  Rollback::DirtyPages::StopTracking();
 
   for (const PhysicalMemoryRegion& region : m_physical_regions)
   {
@@ -667,7 +694,7 @@ void MemoryManager::Clear()
     memset(m_exram, 0, GetExRamSize());
 }
 
-u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
+u8* MemoryManager::GetPointerForRangeReadOnly(u32 address, size_t size) const
 {
   std::span<u8> span = GetSpanForAddress(address);
 
@@ -690,12 +717,20 @@ u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
   return span.data();
 }
 
+u8* MemoryManager::GetPointerForRange(u32 address, size_t size) const
+{
+  u8* const pointer = GetPointerForRangeReadOnly(address, size);
+  if (pointer)
+    Rollback::MarkPhysicalRangeDirty(address, size);
+  return pointer;
+}
+
 void MemoryManager::CopyFromEmu(void* data, u32 address, size_t size) const
 {
   if (size == 0)
     return;
 
-  void* pointer = GetPointerForRange(address, size);
+  void* pointer = GetPointerForRangeReadOnly(address, size);
   if (!pointer)
   {
     PanicAlertFmt("Invalid range in CopyFromEmu. {:x} bytes from {:#010x}", size, address);
