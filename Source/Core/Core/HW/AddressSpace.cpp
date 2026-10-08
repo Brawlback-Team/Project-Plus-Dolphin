@@ -218,8 +218,7 @@ struct AuxiliaryAddressSpaceAccessors : Accessors
 
   void WriteU8(const Core::CPUThreadGuard& guard, u32 address, u8 value) override
   {
-    u8* base = guard.GetSystem().GetDSP().GetARAMPtr();
-    base[address] = value;
+    guard.GetSystem().GetDSP().WriteARAM(value, address);
   }
 
   iterator begin() const override { return Core::System::GetInstance().GetDSP().GetARAMPtr(); }

@@ -46,6 +46,8 @@ const Info<u32> NETPLAY_PLAYER_BUFFER_SIZE{{System::Main, "NetPlay", "PlayerBuff
 const Info<u32> NETPLAY_CLIENT_BUFFER_SIZE{{System::Main, "NetPlay", "BufferSizeClient"}, 1};
 const Info<u32> NETPLAY_ROLLBACK_FRAMES{{System::Main, "NetPlay", "RollbackFrames"}, 7};
 const Info<u32> NETPLAY_ROLLBACK_INPUT_DELAY{{System::Main, "NetPlay", "RollbackInputDelay"}, 2};
+const Info<u32> NETPLAY_ROLLBACK_FRAME_BOUNDARY{
+    {System::Main, "NetPlay", "RollbackFrameBoundary"}, 0};
 
 const Info<bool> NETPLAY_BRAWL_MUSIC_OFF{{System::Main, "NetPlay", "BrawlMusicOff"}, false};
 const Info<bool> NETPLAY_SPECTATOR_MODE{{System::Main, "NetPlay", "IsSpectator"}, false};
@@ -59,6 +61,8 @@ const Info<bool> NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR{
     {System::Main, "NetPlay", "RollbackTrackedBitmapClear"}, false};
 const Info<bool> NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK{
     {System::Main, "NetPlay", "RollbackFullScanBenchmark"}, false};
+const Info<bool> NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM{
+    {System::Main, "NetPlay", "RollbackCompareConfirmedRAM"}, false};
 
 const Info<bool> NETPLAY_SAVEDATA_LOAD{{System::Main, "NetPlay", "SyncSaves"}, true};
 const Info<bool> NETPLAY_SAVEDATA_WRITE{{System::Main, "NetPlay", "WriteSaveData"}, false};

@@ -123,6 +123,7 @@ struct NetSettings
   bool golf_mode = false;
   bool use_fma = false;
   bool hide_remote_gbas = false;
+  u8 rollback_frame_boundary = 0;
 
   Sram sram;
 

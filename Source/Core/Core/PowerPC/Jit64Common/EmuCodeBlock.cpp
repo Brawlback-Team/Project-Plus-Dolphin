@@ -21,6 +21,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
 #include "Core/System.h"
 
 using namespace Gen;
@@ -184,6 +185,33 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
     tracking_disabled = J_CC(CC_E, Jump::Near);
   }
 
+  const bool have_fake_vmem = m_jit.m_system.GetMemory().GetFakeVMEM() != nullptr;
+  const u32 fake_vmem_mask = m_jit.m_system.GetMemory().GetFakeVMemMask();
+  const auto canonicalize = [&](X64Reg address) {
+    if (!have_fake_vmem)
+      return;
+
+    // Dolphin's fake-MMU BATs mirror FakeVMEM through both 0x4xxxxxxx and 0x7xxxxxxx. Map every
+    // alias to the backing store's single bitmap range before recording the write.
+    CMP(32, R(address), Imm32(0x40000000u));
+    const FixupBranch below_first = J_CC(CC_B, Jump::Near);
+    CMP(32, R(address), Imm32(0x50000000u));
+    const FixupBranch first_alias = J_CC(CC_B, Jump::Near);
+    CMP(32, R(address), Imm32(0x70000000u));
+    const FixupBranch between_aliases = J_CC(CC_B, Jump::Near);
+    CMP(32, R(address), Imm32(0x80000000u));
+    const FixupBranch above_aliases = J_CC(CC_AE, Jump::Near);
+    SetJumpTarget(first_alias);
+    AND(32, R(address), Imm32(fake_vmem_mask));
+    OR(32, R(address), Imm32(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL));
+    const FixupBranch canonicalized = J(Jump::Near);
+    SetJumpTarget(below_first);
+    SetJumpTarget(between_aliases);
+    SetJumpTarget(above_aliases);
+    SetJumpTarget(canonicalized);
+  };
+
+  canonicalize(RSCRATCH);
   AND(32, R(RSCRATCH), Imm32(0x1FFFFFFFu));
   SHR(32, R(RSCRATCH), Imm8(12));
   MOV(8, MComplex(RSCRATCH2, RSCRATCH, SCALE_1,
@@ -193,6 +221,7 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
   if (size > 1)
   {
     ADD(32, R(RSCRATCH_EXTRA), Imm32(size - 1));
+    canonicalize(RSCRATCH_EXTRA);
     AND(32, R(RSCRATCH_EXTRA), Imm32(0x1FFFFFFFu));
     SHR(32, R(RSCRATCH_EXTRA), Imm8(12));
     CMP(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
@@ -232,9 +261,19 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(u32 address, u32 size, X64Reg value_
     tracking_disabled = J_CC(CC_E, Jump::Near);
   }
 
-  const u32 first_page = (address & 0x1FFFFFFFu) / Rollback::DIRTY_PAGE_SIZE;
+  const auto canonicalize = [this](u32 value) {
+    auto& memory = m_jit.m_system.GetMemory();
+    const u32 top_nibble = value >> 28;
+    if (memory.GetFakeVMEM() && (top_nibble == 0x4 || top_nibble == 0x7))
+    {
+      return Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL |
+             (value & memory.GetFakeVMemMask());
+    }
+    return value & 0x1fffffffu;
+  };
+  const u32 first_page = canonicalize(address) / Rollback::DIRTY_PAGE_SIZE;
   const u32 last_page =
-      ((address & 0x1FFFFFFFu) + size - 1) / Rollback::DIRTY_PAGE_SIZE;
+      canonicalize(address + size - 1) / Rollback::DIRTY_PAGE_SIZE;
   MOV(8, MDisp(scratch, static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries) + first_page)),
       Imm8(1));
   if (last_page != first_page)

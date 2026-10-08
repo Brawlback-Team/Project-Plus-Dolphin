@@ -29,6 +29,7 @@
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Movie.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 #include "DiscIO/Enums.h"
@@ -875,6 +876,7 @@ void VideoInterfaceManager::BeginField(FieldType field, u64 ticks)
   // going to change the VI registers while a frame is scanning out.
   if (Config::Get(Config::GFX_HACK_EARLY_XFB_OUTPUT))
     OutputField(field, ticks);
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VIBeginField);
 }
 
 void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
@@ -898,6 +900,7 @@ void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
   m_system.GetPerfMetrics().CountVBlank();
   m_system.GetVideoEvents().vi_end_field_event.Trigger();
   Core::OnFrameEnd(m_system);
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VIEndField);
 }
 
 // Purpose: Send VI interrupt when triggered

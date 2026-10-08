@@ -23,6 +23,7 @@
 #include "Core/Core.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
@@ -386,6 +387,10 @@ void CoreTimingManager::Advance()
   // until the next slice:
   //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
   power_pc.CheckExternalExceptions();
+
+  // VI callbacks only identify the requested logical boundary. Run rollback after the complete
+  // timing batch so save/load never mutates CoreTiming while its event queue is being dispatched.
+  Rollback::RunPendingVIBoundary(m_system);
 }
 
 TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)

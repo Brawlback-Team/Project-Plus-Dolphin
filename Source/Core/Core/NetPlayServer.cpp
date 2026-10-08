@@ -1553,6 +1553,8 @@ bool NetPlayServer::SetupNetSettings()
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   settings.spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);
+  settings.rollback_frame_boundary = static_cast<u8>(
+      std::min<u32>(Config::Get(Config::NETPLAY_ROLLBACK_FRAME_BOUNDARY), 3));
 
   // Unload GameINI to restore things to normal
   Config::RemoveLayer(Config::LayerType::GlobalGame);
@@ -1604,16 +1606,16 @@ bool NetPlayServer::RequestStartGame()
       return false;
     }
 
-    if (save_sync_info->has_wii_save)
-    {
-      // Set titles for host-side loading in WiiRoot
-      std::vector<u64> titles;
-      for (const auto& title_id : std::views::keys(save_sync_info->wii_saves))
-        titles.push_back(title_id);
-      m_dialog->SetHostWiiSyncData(
-          std::move(titles),
-          save_sync_info->redirected_save ? save_sync_info->redirected_save->m_target_path : "");
-    }
+    // Publish a fresh result to the host for every boot, including an empty result for launcher
+    // DOLs with no directly associated Wii title. StartGame deliberately rejects stale/missing
+    // generations, so omitting this call makes a host-alone launcher session announce a start but
+    // refuse to boot.
+    std::vector<u64> titles;
+    for (const auto& title_id : std::views::keys(save_sync_info->wii_saves))
+      titles.push_back(title_id);
+    m_dialog->SetHostWiiSyncData(
+        std::move(titles),
+        save_sync_info->redirected_save ? save_sync_info->redirected_save->m_target_path : "");
 
     if (m_players.size() > 1)
     {
@@ -1765,6 +1767,8 @@ bool NetPlayServer::StartGame()
 
   for (size_t i = 0; i < sizeof(m_settings.sram); ++i)
     spac << m_settings.sram[i];
+
+  spac << m_settings.rollback_frame_boundary;
 
   // GekkoNet shares the existing ENet UDP socket. These are the exact peer endpoints observed by
   // that socket, including the NAT-mapped port established by Dolphin traversal.

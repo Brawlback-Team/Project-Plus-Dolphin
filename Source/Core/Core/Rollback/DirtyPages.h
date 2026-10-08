@@ -1,7 +1,8 @@
 // Copyright 2026 YouGame
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Rollback snapshots of guest RAM (MEM1 and MEM2) that copy only what changed.
+// Rollback snapshots of guest memory (MEM1, MEM2, GameCube FakeVMEM, and standalone GameCube ARAM)
+// that copy only what changed.
 //
 // Writes are tracked by the dirty page bitmap (DirtyBitmap.h). The tracker keeps a mirror of RAM as
 // it was at the newest snapshot. A snapshot copies the pages the bitmap marks, and only those whose
@@ -31,6 +32,12 @@ class System;
 
 namespace Rollback::DirtyPages
 {
+// Standalone GameCube ARAM has no guest CPU physical address. Reserve an otherwise unused part of
+// the dirty bitmap so it can use the same undo logs as MEM1 and MEM2.
+constexpr u32 GC_ARAM_PHYSICAL = 0x18000000u;
+// FakeVMEM is exposed at 0x7e000000, but the bitmap has one entry per byte in the lower 512 MB.
+// Masking its physical address to that bitmap gives this collision-free canonical range.
+constexpr u32 GC_FAKE_VMEM_PHYSICAL = 0x1e000000u;
 // A tracked region of guest physical memory and a host mapping of it that the tracker can read and
 // write freely.
 struct Area
@@ -48,6 +55,8 @@ bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan)
 // Stops tracking if `owner` holds it and drops every log.
 void Disarm(const void* owner);
 bool IsArmedFor(const void* owner);
+// True when the active tracker owns this exact host memory range.
+bool IsTrackingArea(const u8* alias, u32 physical_address, u32 size);
 
 // Takes a snapshot and opens an empty undo log for it. Returns its id (never 0).
 u64 Snapshot();

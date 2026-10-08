@@ -54,6 +54,7 @@
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
 #include "Core/System.h"
 
 #include "VideoCommon/EFBInterface.h"
@@ -505,6 +506,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
   {
     std::memcpy(&m_memory.GetFakeVMEM()[em_address & m_memory.GetFakeVMemMask()], &swapped_data,
                 size);
+    Rollback::MarkPhysicalRangeDirty(
+        Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL |
+            (em_address & m_memory.GetFakeVMemMask()),
+        size);
     return;
   }
 

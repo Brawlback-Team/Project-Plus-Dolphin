@@ -147,6 +147,16 @@ void NetPlayDialog::CreateMainLayout()
   m_auto_delay_button->setToolTip(
       tr("Set Input Delay to round(ping / 33.3333333 ms - 2). The host also sets Rollback "
          "Frames to 7."));
+  m_frame_boundary_label = new QLabel(tr("Frame Boundary:"));
+  m_frame_boundary_combo = new QComboBox;
+  m_frame_boundary_combo->addItem(tr("Brawl Hook (0x80017504)"), 0);
+  m_frame_boundary_combo->addItem(tr("VI Begin Field"), 1);
+  m_frame_boundary_combo->addItem(tr("VI End Field"), 2);
+  m_frame_boundary_combo->addItem(tr("VI New Field"), 3);
+  m_frame_boundary_combo->setToolTip(
+      tr("Choose where Dolphin advances GekkoNet and takes rollback snapshots. The host selection "
+         "is synchronized to every client when the session starts. Brawl Hook is the known-safe "
+         "default; the VI choices are experimental."));
   m_quit_button = new QPushButton(tr("Quit"));
   m_brawlmusic_off = new QCheckBox(tr("Client Side Music Off"));
   m_spectator_mode = new QCheckBox(tr("Spectator"));
@@ -289,6 +299,13 @@ void NetPlayDialog::CreateMainLayout()
          "MEM1/MEM2 pages on every save and restore. This isolates JIT tracking overhead and is "
          "intentionally slower in the snapshot paths."));
   m_rollback_full_scan_benchmark_action->setCheckable(true);
+  m_rollback_compare_confirmed_ram_action =
+      m_other_menu->addAction(tr("Rollback Debug: Compare Confirmed RAM"));
+  m_rollback_compare_confirmed_ram_action->setToolTip(
+      tr("Hash RAM snapshots only after their inputs are confirmed. On the first peer mismatch, "
+         "restore that snapshot, dump MEM1/MEM2/L1 to the Logs folder, and stop emulation. The "
+         "diagnostic automatically enables itself on connected peers."));
+  m_rollback_compare_confirmed_ram_action->setCheckable(true);
 
   m_game_button->setDefault(false);
   m_game_button->setAutoDefault(false);
@@ -312,10 +329,12 @@ void NetPlayDialog::CreateMainLayout()
   options_widget->addWidget(m_player_buffer_label, 0, 3, Qt::AlignVCenter);
   options_widget->addWidget(m_player_buffer_size_box, 0, 4, Qt::AlignVCenter);
   options_widget->addWidget(m_auto_delay_button, 0, 5, Qt::AlignVCenter);
-  options_widget->addWidget(m_brawlmusic_off, 0, 6, Qt::AlignVCenter);
-  options_widget->addWidget(m_spectator_mode, 0, 7, Qt::AlignVCenter);
-  options_widget->addWidget(m_quit_button, 0, 9, Qt::AlignVCenter | Qt::AlignRight);
-  options_widget->setColumnStretch(8, 1000);
+  options_widget->addWidget(m_frame_boundary_label, 0, 6, Qt::AlignVCenter);
+  options_widget->addWidget(m_frame_boundary_combo, 0, 7, Qt::AlignVCenter);
+  options_widget->addWidget(m_brawlmusic_off, 0, 8, Qt::AlignVCenter);
+  options_widget->addWidget(m_spectator_mode, 0, 9, Qt::AlignVCenter);
+  options_widget->addWidget(m_quit_button, 0, 11, Qt::AlignVCenter | Qt::AlignRight);
+  options_widget->setColumnStretch(10, 1000);
 
   m_main_layout->addLayout(options_widget, 2, 0, 1, -1, Qt::AlignRight);
   m_main_layout->setRowStretch(1, 1000);
@@ -501,6 +520,8 @@ void NetPlayDialog::ConnectWidgets()
 
   connect(m_minimum_buffer_size_box, &QSpinBox::valueChanged, this, &NetPlayDialog::SaveSettings);
   connect(m_player_buffer_size_box, &QSpinBox::valueChanged, this, &NetPlayDialog::SaveSettings);
+  connect(m_frame_boundary_combo, &QComboBox::currentIndexChanged, this,
+          &NetPlayDialog::SaveSettings);
   connect(m_savedata_none_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_savedata_load_only_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_savedata_load_and_write_action, &QAction::toggled, this, &NetPlayDialog::SaveSettings);
@@ -522,6 +543,8 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_rollback_tracked_bitmap_clear_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_rollback_full_scan_benchmark_action, &QAction::toggled, this,
+          &NetPlayDialog::SaveSettings);
+  connect(m_rollback_compare_confirmed_ram_action, &QAction::toggled, this,
           &NetPlayDialog::SaveSettings);
   connect(m_brawlmusic_off, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
   connect(m_spectator_mode, &QCheckBox::toggled, this, &NetPlayDialog::SaveSettings);
@@ -976,6 +999,8 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
     m_game_button->setEnabled(enabled);
     m_minimum_buffer_size_box->setEnabled(enabled);
     m_minimum_buffer_label->setEnabled(enabled);
+    m_frame_boundary_label->setEnabled(enabled);
+    m_frame_boundary_combo->setEnabled(enabled);
     m_savedata_none_action->setEnabled(enabled);
     m_savedata_load_only_action->setEnabled(enabled);
     m_savedata_load_and_write_action->setEnabled(enabled);
@@ -996,6 +1021,7 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
   m_record_input_action->setEnabled(enabled);
   m_rollback_tracked_bitmap_clear_action->setEnabled(enabled);
   m_rollback_full_scan_benchmark_action->setEnabled(enabled);
+  m_rollback_compare_confirmed_ram_action->setEnabled(enabled);
 }
 
 void NetPlayDialog::OnMsgStartGame()
@@ -1251,6 +1277,7 @@ void NetPlayDialog::LoadSettings()
 {
   const int minimum_buffer_size = Config::Get(Config::NETPLAY_ROLLBACK_FRAMES);
   const int player_buffer_size = Config::Get(Config::NETPLAY_ROLLBACK_INPUT_DELAY);
+  const u32 rollback_frame_boundary = Config::Get(Config::NETPLAY_ROLLBACK_FRAME_BOUNDARY);
   const bool savedata_load = Config::Get(Config::NETPLAY_SAVEDATA_LOAD);
   const bool savedata_write = Config::Get(Config::NETPLAY_SAVEDATA_WRITE);
   const bool sync_all_wii_saves = Config::Get(Config::NETPLAY_SAVEDATA_SYNC_ALL_WII);
@@ -1270,9 +1297,14 @@ void NetPlayDialog::LoadSettings()
       Config::Get(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR);
   const bool rollback_full_scan_benchmark =
       Config::Get(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK);
+  const bool rollback_compare_confirmed_ram =
+      Config::Get(Config::NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM);
 
   m_minimum_buffer_size_box->setValue(minimum_buffer_size);
   m_player_buffer_size_box->setValue(player_buffer_size);
+  const int frame_boundary_index =
+      m_frame_boundary_combo->findData(static_cast<int>(rollback_frame_boundary));
+  m_frame_boundary_combo->setCurrentIndex(frame_boundary_index >= 0 ? frame_boundary_index : 0);
 
   if (!savedata_load)
     m_savedata_none_action->setChecked(true);
@@ -1295,6 +1327,7 @@ void NetPlayDialog::LoadSettings()
   m_rollback_stress_test_action->setChecked(rollback_stress_test);
   m_rollback_tracked_bitmap_clear_action->setChecked(rollback_tracked_bitmap_clear);
   m_rollback_full_scan_benchmark_action->setChecked(rollback_full_scan_benchmark);
+  m_rollback_compare_confirmed_ram_action->setChecked(rollback_compare_confirmed_ram);
 
   const std::string network_mode = Config::Get(Config::NETPLAY_NETWORK_MODE);
 
@@ -1323,6 +1356,8 @@ void NetPlayDialog::SaveSettings()
 
   Config::SetBase(Config::NETPLAY_ROLLBACK_FRAMES, m_minimum_buffer_size_box->value());
   Config::SetBase(Config::NETPLAY_ROLLBACK_INPUT_DELAY, m_player_buffer_size_box->value());
+  Config::SetBase(Config::NETPLAY_ROLLBACK_FRAME_BOUNDARY,
+                  m_frame_boundary_combo->currentData().toUInt());
 
   const bool write_savedata = m_savedata_load_and_write_action->isChecked();
   const bool load_savedata = write_savedata || m_savedata_load_only_action->isChecked();
@@ -1356,6 +1391,8 @@ void NetPlayDialog::SaveSettings()
                             m_rollback_tracked_bitmap_clear_action->isChecked());
   set_rollback_test_setting(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK,
                             m_rollback_full_scan_benchmark_action->isChecked());
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM,
+                            m_rollback_compare_confirmed_ram_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())

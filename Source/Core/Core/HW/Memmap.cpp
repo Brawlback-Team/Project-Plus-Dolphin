@@ -603,10 +603,17 @@ void MemoryManager::DoState(PointerWrap& p)
     p.DoArray(m_l1_cache, current_l1_cache_size);
   }
   p.DoMarker("Memory RAM");
-  // The ring copies MEM1, MEM2 and the L1 cache only; fake VMEM (GameCube without MMU emulation)
-  // stays in the state.
-  if (current_have_fake_vmem)
+  const bool skip_fake_vmem =
+      skip_ram && current_have_fake_vmem &&
+      Rollback::DirtyPages::IsTrackingArea(m_fake_vmem,
+                                            Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL,
+                                            current_fake_vmem_size);
+  if (current_have_fake_vmem && !skip_fake_vmem)
+  {
     p.DoArray(m_fake_vmem, current_fake_vmem_size);
+    Rollback::MarkPhysicalRangeDirty(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL,
+                                     current_fake_vmem_size);
+  }
   p.DoMarker("Memory FakeVMEM");
   if (current_have_exram && !skip_ram)
   {

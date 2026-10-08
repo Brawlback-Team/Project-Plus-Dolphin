@@ -11,6 +11,7 @@
 
 #include "Common/Buffer.h"
 #include "Common/Logging/Log.h"
+#include "Core/HW/DSP.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/Rollback/DirtyBitmap.h"
@@ -213,6 +214,16 @@ bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan)
     }
     areas.push_back(Area{exram_alias, MEM2_PHYSICAL, memory.GetExRamSize()});
   }
+  else if (!system.IsWii())
+  {
+    auto& dsp = system.GetDSP();
+    areas.push_back(Area{dsp.GetARAMPtr(), GC_ARAM_PHYSICAL, dsp.GetARAMSize()});
+    if (memory.GetFakeVMEM())
+    {
+      areas.push_back(Area{memory.GetFakeVMEM(), GC_FAKE_VMEM_PHYSICAL,
+                           memory.GetFakeVMemSize()});
+    }
+  }
   if (!Arm(owner, areas, force_full_scan))
     return false;
 
@@ -239,6 +250,16 @@ bool IsArmedFor(const void* owner)
   Tracker& t = T();
   std::lock_guard lock(t.lock);
   return t.owner && t.owner == owner;
+}
+
+bool IsTrackingArea(const u8* alias, u32 physical_address, u32 size)
+{
+  Tracker& t = T();
+  std::lock_guard lock(t.lock);
+  return t.owner && std::any_of(t.areas.begin(), t.areas.end(), [&](const Area& area) {
+           return area.alias == alias && area.physical_address == physical_address &&
+                  area.size == size;
+         });
 }
 
 u64 Snapshot()

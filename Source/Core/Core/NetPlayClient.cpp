@@ -990,6 +990,8 @@ void NetPlayClient::OnStartGame(sf::Packet& packet)
     for (size_t i = 0; i < sizeof(m_net_settings.sram); ++i)
       packet >> m_net_settings.sram[i];
 
+    packet >> m_net_settings.rollback_frame_boundary;
+
     // Dolphin supplies connection discovery only. Once these endpoints are handed to GekkoNet,
     // rollback traffic uses GekkoNet's native UDP adapter and never re-enters NetPlay/ENet.
     u8 rollback_endpoint_count = 0;
@@ -1146,7 +1148,12 @@ void NetPlayClient::OnSyncSaveDataNotify(sf::Packet& packet)
   INFO_LOG_FMT(NETPLAY, "Initializing wait for {} savegame chunks.", m_sync_save_data_count);
 
   if (m_sync_save_data_count == 0)
+  {
+    // An empty synchronization is still the fresh result for this boot generation. Record it
+    // explicitly so StartGame does not mistake a valid zero-chunk response for stale/missing data.
+    SetWiiSyncData(nullptr, {}, {});
     SyncSaveDataResponse(true);
+  }
   else
     m_dialog->AppendChat(Common::GetStringT("Synchronizing save data..."));
 }
@@ -1955,10 +1962,14 @@ bool NetPlayClient::StartGame(const std::string& path)
   const int local_delay = static_cast<int>(m_local_player->buffer);
   const int prediction_window = static_cast<int>(m_minimum_buffer_size);
   const bool debug_p2_cstick = Config::Get(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK);
+  const bool compare_confirmed_ram =
+      Config::Get(Config::NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM);
 
   if (!Rollback::StartGekkoSession("Project+", m_current_game, num_players, local_seat,
                                    m_rollback_player_endpoints, local_delay, prediction_window,
-                                   debug_p2_cstick, simulate_remote_p2, rollback_stress_test))
+                                   debug_p2_cstick, simulate_remote_p2, rollback_stress_test,
+                                   compare_confirmed_ram, static_cast<Rollback::FrameBoundary>(
+                                       m_net_settings.rollback_frame_boundary)))
   {
     ERROR_LOG_FMT(NETPLAY, "GekkoNet: failed to start native UDP rollback session");
     return false;

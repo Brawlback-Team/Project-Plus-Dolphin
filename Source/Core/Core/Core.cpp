@@ -893,6 +893,7 @@ void Callback_NewField(Core::System& system)
   }
 
   AchievementManager::GetInstance().DoFrame();
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VINewField);
 }
 
 void UpdateTitle(Core::System& system)

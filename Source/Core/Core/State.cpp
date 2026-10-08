@@ -135,8 +135,14 @@ static constexpr bool s_use_compression = true;
 
 static bool ReadHeader(const std::string& filename, StateHeader& header);
 
-static void DoState(Core::System& system, PointerWrap& p)
+static void DoState(Core::System& system, PointerWrap& p, RollbackStateLayout* layout = nullptr,
+                    u8* layout_base = nullptr)
 {
+  const auto note_section_end = [&](std::size_t section) {
+    if (layout && layout_base)
+      layout->section_ends[section] = p.GetOffsetFromPreviousPosition(layout_base);
+  };
+
   bool is_wii = system.IsWii() || system.IsMIOS();
   const bool is_wii_currently = is_wii;
   p.Do(is_wii);
@@ -172,29 +178,36 @@ static void DoState(Core::System& system, PointerWrap& p)
   // state load, and the frame number must be up-to-date.
   system.GetMovie().DoState(p);
   p.DoMarker("Movie");
+  note_section_end(0);
 
   // Begin with video backend, so that it gets a chance to clear its caches and writeback modified
   // things to RAM
   g_video_backend->DoState(p);
   p.DoMarker("video_backend");
+  note_section_end(1);
 
   // CoreTiming needs to be restored before restoring Hardware because
   // the controller code might need to schedule an event if the controller has changed.
   system.GetCoreTiming().DoState(p);
   p.DoMarker("CoreTiming");
+  note_section_end(2);
 
   // HW needs to be restored before PowerPC because the data cache might need to be flushed.
   HW::DoState(system, p);
   p.DoMarker("HW");
+  note_section_end(3);
 
   system.GetPowerPC().DoState(p);
   p.DoMarker("PowerPC");
+  note_section_end(4);
 
   if (system.IsWii())
     Wiimote::DoState(p);
   p.DoMarker("Wiimote");
+  note_section_end(5);
   Gecko::DoState(p);
   p.DoMarker("Gecko");
+  note_section_end(6);
 
 #ifdef USE_RETRO_ACHIEVEMENTS
   AchievementManager::GetInstance().DoState(p);
@@ -230,14 +243,17 @@ static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
 }
 
 // Returns the required size, or 0 on failure.
-static std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer)
+static std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer,
+                                RollbackStateLayout* layout = nullptr)
 {
   // Attempt to save to our provided buffer as-is.
   // If buffer isn't large enough, PointerWrap transitions to MeasureMode,
   //  and then we have our measurement for a second attempt.
   u8* ptr = buffer.data();
   PointerWrap pointer_wrap(&ptr, buffer.size(), PointerWrap::Mode::Write);
-  DoState(system, pointer_wrap);
+  if (layout)
+    *layout = {};
+  DoState(system, pointer_wrap, layout, buffer.data());
   const auto measured_size = pointer_wrap.GetOffsetFromPreviousPosition(buffer.data());
 
   if (pointer_wrap.IsWriteMode())
@@ -251,16 +267,17 @@ static std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& 
     DEBUG_LOG_FMT(CORE, "SaveToBuffer: Growing buffer from size {} to measured size {}",
                   buffer.size(), measured_size);
     buffer.reset(measured_size);
-    return SaveToBuffer(system, buffer);
+    return SaveToBuffer(system, buffer, layout);
   }
 
   // Buffer was large enough but we still failed for some other reason.
   return 0;
 }
 
-std::size_t SaveToBufferForRollback(Core::System& system, Common::UniqueBuffer<u8>& buffer)
+std::size_t SaveToBufferForRollback(Core::System& system, Common::UniqueBuffer<u8>& buffer,
+                                    RollbackStateLayout* layout)
 {
-  return SaveToBuffer(system, buffer);
+  return SaveToBuffer(system, buffer, layout);
 }
 
 bool LoadFromBufferForRollback(Core::System& system, std::span<u8> buffer)

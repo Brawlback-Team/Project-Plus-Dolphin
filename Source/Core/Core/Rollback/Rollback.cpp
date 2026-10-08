@@ -11,6 +11,7 @@
 
 #include "Common/FPURoundMode.h"
 #include "Common/Logging/Log.h"
+#include "Core/HW/DSP.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/FS/HostBackend/FS.h"
 #include "Core/IOS/IOS.h"
@@ -35,6 +36,11 @@ constexpr u32 MEM1_VIRTUAL = 0x80000000u;
 constexpr u32 MEM2_VIRTUAL = 0x90000000u;
 // Effective to physical for MEM1/MEM2 and their uncached mirrors (0x8/0xC -> 0x0, 0x9/0xD -> 0x1).
 constexpr u32 PHYSICAL_MASK = 0x1FFFFFFFu;
+
+double MillisecondsSince(std::chrono::steady_clock::time_point start)
+{
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
 
 // Copies saved RAM back one page at a time, skipping pages that already match. Only changed pages
 // have their JIT blocks invalidated; clearing the whole JIT (as a normal state load does) would
@@ -183,6 +189,23 @@ bool SnapshotRing::Has(s64 frame) const
   return slot && (slot->page_snapshot_id == 0 || DirtyPages::Has(slot->page_snapshot_id));
 }
 
+std::span<const u8> SnapshotRing::LastState() const
+{
+  const Slot& slot = m_slots[m_last];
+  return {slot.state.data(), slot.state_size};
+}
+
+const State::RollbackStateLayout& SnapshotRing::LastStateLayout() const
+{
+  return m_slots[m_last].state_layout;
+}
+
+std::span<const u8> SnapshotRing::StateForFrame(s64 frame) const
+{
+  const Slot* slot = Find(frame);
+  return slot ? std::span<const u8>{slot->state.data(), slot->state_size} : std::span<const u8>{};
+}
+
 void SnapshotRing::Reset(Core::System& system)
 {
   for (Slot& slot : m_slots)
@@ -193,12 +216,17 @@ void SnapshotRing::Reset(Core::System& system)
   DirtyPages::Disarm(this);
   m_dirty_page_tracking.reset();
   m_next = 0;
+  m_initial_trace_events = 0;
   if (IOS::HLE::FS::HostFileSystem* nand = HostNand(system))
     nand->JournalStop();
 }
 
 bool SnapshotRing::Save(Core::System& system, s64 frame)
 {
+  const bool trace = m_initial_trace_events++ < 16;
+  if (trace)
+    NOTICE_LOG_FMT(CORE, "Rollback trace: save frame {} begin", frame);
+  m_last_save_timings = {};
   // Re-saving a frame after a rewind reuses its slot; otherwise take the next one.
   Slot* slot = Find(frame);
   if (!slot)
@@ -210,6 +238,9 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
   Forget(slot);
   bool armed_now;
   const bool dirty_page_tracking = UseDirtyPageTracking(system, &armed_now);
+  if (trace)
+    NOTICE_LOG_FMT(CORE, "Rollback trace: save frame {} tracking ready (dirty={}, armed={})",
+                   frame, dirty_page_tracking, armed_now);
   const auto buffers = [slot] {
     return std::tuple{slot->state.data(), slot->mem1.capacity(), slot->mem2.capacity()};
   };
@@ -217,29 +248,48 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
 
   // Non-RAM state first, so anything DoState writes into RAM is in the RAM snapshot.
   {
+    const auto phase_start = std::chrono::steady_clock::now();
     SnapshotScope scope;
-    slot->state_size = State::SaveToBufferForRollback(system, slot->state);
+    slot->state_size =
+        State::SaveToBufferForRollback(system, slot->state, &slot->state_layout);
+    if (trace)
+      NOTICE_LOG_FMT(CORE, "Rollback trace: save frame {} state done ({} bytes)", frame,
+                     slot->state_size);
+    m_last_save_timings.state_ms = MillisecondsSince(phase_start);
+    m_last_save_timings.state_bytes = slot->state_size;
   }
 
   auto& memory = system.GetMemory();
   // Dirty-page tracking: commit the RAM written since the last snapshot and open this snapshot's
   // undo log. A 0 id means tracking stopped, so fall back to a full copy.
   if (dirty_page_tracking)
+  {
+    const auto phase_start = std::chrono::steady_clock::now();
     slot->page_snapshot_id = DirtyPages::Snapshot();
+    if (trace)
+      NOTICE_LOG_FMT(CORE, "Rollback trace: save frame {} dirty commit done (id={})", frame,
+                     slot->page_snapshot_id);
+    m_last_save_timings.dirty_pages_ms = MillisecondsSince(phase_start);
+  }
   if (slot->page_snapshot_id == 0)
   {
+    const auto phase_start = std::chrono::steady_clock::now();
     slot->mem1.assign(memory.GetRAM(), memory.GetRAM() + memory.GetRamSize());
     if (memory.GetEXRAM())
       slot->mem2.assign(memory.GetEXRAM(), memory.GetEXRAM() + memory.GetExRamSize());
     else
       slot->mem2.clear();
+    m_last_save_timings.dirty_pages_ms = MillisecondsSince(phase_start);
   }
+  const auto l1_start = std::chrono::steady_clock::now();
   slot->l1_cache.assign(memory.GetL1Cache(), memory.GetL1Cache() + memory.GetL1CacheSize());
+  m_last_save_timings.l1_ms = MillisecondsSince(l1_start);
   slot->frame = frame;
 
   // NAND changes older than the oldest snapshot can never be undone, so trim them.
   if (IOS::HLE::FS::HostFileSystem* nand = HostNand(system))
   {
+    const auto phase_start = std::chrono::steady_clock::now();
     slot->nand_journal_mark = nand->LastJournalMark();
     u64 oldest = slot->nand_journal_mark;
     for (const Slot& other : m_slots)
@@ -248,7 +298,11 @@ bool SnapshotRing::Save(Core::System& system, s64 frame)
         oldest = std::min(oldest, other.nand_journal_mark);
     }
     nand->JournalTrim(oldest);
+    m_last_save_timings.journal_ms = MillisecondsSince(phase_start);
   }
+
+  if (trace)
+    NOTICE_LOG_FMT(CORE, "Rollback trace: save frame {} complete", frame);
 
   // Arming allocates and initializes the RAM mirrors; that one-off cost counts as an allocation.
   return armed_now || buffers() != buffers_before;
@@ -261,6 +315,10 @@ bool SnapshotRing::Load(Core::System& system, s64 frame)
 
 bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
 {
+  const bool trace = m_initial_trace_events++ < 16;
+  if (trace)
+    NOTICE_LOG_FMT(CORE, "Rollback trace: load frame {} begin", frame);
+  m_last_load_timings = {};
   Slot* slot = Find(frame);
   if (!slot || slot->state_size == 0)
   {
@@ -272,6 +330,7 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   // requests from RAM while loading, and live RAM may already hold a newer reply. The device-state
   // load writes no RAM in a session, since EFB copies stay on the GPU.
   auto& memory = system.GetMemory();
+  const auto dirty_start = std::chrono::steady_clock::now();
   m_changed_blocks.clear();
   if (slot->page_snapshot_id != 0)
   {
@@ -284,6 +343,8 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
       ERROR_LOG_FMT(CORE, "Rollback: the dirty-page snapshot for frame {} is gone", frame);
       return false;
     }
+    if (trace)
+      NOTICE_LOG_FMT(CORE, "Rollback trace: load frame {} dirty restore done", frame);
   }
   else
   {
@@ -294,20 +355,41 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   std::sort(m_changed_blocks.begin(), m_changed_blocks.end());
   m_changed_blocks.erase(std::unique(m_changed_blocks.begin(), m_changed_blocks.end()),
                          m_changed_blocks.end());
-  // MEM1 is at 0x80000000 and MEM2 at 0x90000000: both are physical | 0x80000000.
+  m_last_load_timings.dirty_pages_ms = MillisecondsSince(dirty_start);
+  m_last_load_timings.changed_blocks = m_changed_blocks.size();
+  // Standalone ARAM is not CPU executable memory. FakeVMEM's canonical bitmap range maps back to
+  // its physical fastmem address for invalidation.
   auto& jit = system.GetJitInterface();
+  const auto jit_start = std::chrono::steady_clock::now();
   for (const u32 physical : m_changed_blocks)
-    jit.InvalidateICache(physical | MEM1_VIRTUAL, static_cast<u32>(RESTORE_PAGE), true);
-  std::memcpy(memory.GetL1Cache(), slot->l1_cache.data(), slot->l1_cache.size());
+  {
+    if (physical >= DirtyPages::GC_ARAM_PHYSICAL &&
+        physical < DirtyPages::GC_ARAM_PHYSICAL + DSP::ARAM_SIZE)
+      continue;
+    const bool fake_vmem = physical >= DirtyPages::GC_FAKE_VMEM_PHYSICAL &&
+                           physical < DirtyPages::GC_FAKE_VMEM_PHYSICAL +
+                                          memory.GetFakeVMemSize();
+    const u32 effective = fake_vmem ? physical | 0x60000000u : physical | MEM1_VIRTUAL;
+    jit.InvalidateICache(effective, static_cast<u32>(RESTORE_PAGE), true);
+  }
   ForgetLearnedJitAddresses(system, m_changed_blocks);
+  m_last_load_timings.jit_ms = MillisecondsSince(jit_start);
+  const auto l1_start = std::chrono::steady_clock::now();
+  std::memcpy(memory.GetL1Cache(), slot->l1_cache.data(), slot->l1_cache.size());
+  m_last_load_timings.l1_ms = MillisecondsSince(l1_start);
 
   bool ok;
   {
+    const auto phase_start = std::chrono::steady_clock::now();
     SnapshotScope scope;
     VideoCommon_SetSnapshotRedisplays(redisplay);
     ok = State::LoadFromBufferForRollback(system,
                                           std::span<u8>(slot->state.data(), slot->state_size));
+    if (trace)
+      NOTICE_LOG_FMT(CORE, "Rollback trace: load frame {} state done (ok={})", frame, ok);
     VideoCommon_SetSnapshotRedisplays(false);
+    m_last_load_timings.state_ms = MillisecondsSince(phase_start);
+    m_last_load_timings.state_bytes = slot->state_size;
   }
   if (!ok)
   {
@@ -315,11 +397,16 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
     return false;
   }
   // The NAND journal must have undone every change since this snapshot.
+  const auto journal_start = std::chrono::steady_clock::now();
   if (IOS::HLE::FS::HostFileSystem* nand = HostNand(system); nand && nand->TakeJournalError())
   {
     ERROR_LOG_FMT(CORE, "Rollback: the NAND could not be restored to frame {}", frame);
     return false;
   }
+  m_last_load_timings.journal_ms = MillisecondsSince(journal_start);
+
+  if (trace)
+    NOTICE_LOG_FMT(CORE, "Rollback trace: load frame {} complete", frame);
 
   // Later frames are about to be re-run and re-saved, so drop their snapshots.
   for (Slot& other : m_slots)

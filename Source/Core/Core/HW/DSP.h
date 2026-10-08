@@ -109,6 +109,7 @@ private:
   static void GlobalCompleteARAM(Core::System& system, u64 userdata, s64 cyclesLate);
   void UpdateInterrupts();
   void Do_ARAM_DMA();
+  void MarkARAMRangeDirty(u32 address, u32 size);
 
   // UARAMCount
   union UARAMCount
