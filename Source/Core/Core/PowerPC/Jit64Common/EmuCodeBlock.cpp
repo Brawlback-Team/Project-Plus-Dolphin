@@ -170,53 +170,80 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
   if (size > 1)
     MOV(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
 
-  MOV(64, R(RSCRATCH2), Imm64(reinterpret_cast<u64>(&bitmap)));
+  const bool tracking_active = bitmap.IsEnabled();
+  const bool have_fake_vmem = m_jit.m_system.GetMemory().GetFakeVMEM() != nullptr;
+  const bool optimized_gc_path = tracking_active && have_fake_vmem;
+  constexpr X64Reg bitmap_base = RSCRATCH2;
+  if (!optimized_gc_path)
+    MOV(64, R(bitmap_base), Imm64(reinterpret_cast<u64>(&bitmap)));
   // DirtyPages clears the JIT block lookup cache whenever tracking changes. Blocks compiled while
   // tracking is active can therefore omit this test. A block that is executing when tracking is
   // armed was compiled with the guarded path and observes the atomic flag immediately, so stores
   // later in that same block are still captured.
   std::optional<FixupBranch> tracking_disabled;
-  if (!bitmap.IsEnabled())
+  if (!tracking_active)
   {
     CMP(8,
-        MDisp(RSCRATCH2,
+        MDisp(bitmap_base,
               static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, tracking_enabled))),
         Imm8(0));
     tracking_disabled = J_CC(CC_E, Jump::Near);
   }
 
-  const bool have_fake_vmem = m_jit.m_system.GetMemory().GetFakeVMEM() != nullptr;
   const u32 fake_vmem_mask = m_jit.m_system.GetMemory().GetFakeVMemMask();
   const auto canonicalize = [&](X64Reg address) {
     if (!have_fake_vmem)
       return;
 
-    // Dolphin's fake-MMU BATs mirror FakeVMEM through both 0x4xxxxxxx and 0x7xxxxxxx. Map every
-    // alias to the backing store's single bitmap range before recording the write.
-    CMP(32, R(address), Imm32(0x40000000u));
-    const FixupBranch below_first = J_CC(CC_B, Jump::Near);
-    CMP(32, R(address), Imm32(0x50000000u));
-    const FixupBranch first_alias = J_CC(CC_B, Jump::Near);
-    CMP(32, R(address), Imm32(0x70000000u));
-    const FixupBranch between_aliases = J_CC(CC_B, Jump::Near);
-    CMP(32, R(address), Imm32(0x80000000u));
-    const FixupBranch above_aliases = J_CC(CC_AE, Jump::Near);
+    // Dolphin's fake-MMU BATs mirror FakeVMEM through 0x4xxxxxxx and 0x7xxxxxxx. Active rollback
+    // blocks can use RDX as temporary storage until the bitmap base is materialized, so classify by
+    // top nibble instead of running four full-address range comparisons on every GC store.
+    if (!tracking_active)
+    {
+      CMP(32, R(address), Imm32(0x40000000u));
+      const FixupBranch below_first = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x50000000u));
+      const FixupBranch first_alias = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x70000000u));
+      const FixupBranch between_aliases = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x80000000u));
+      const FixupBranch above_aliases = J_CC(CC_AE, Jump::Near);
+      SetJumpTarget(first_alias);
+      AND(32, R(address), Imm32(fake_vmem_mask));
+      OR(32, R(address), Imm32(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL));
+      const FixupBranch canonicalized = J(Jump::Near);
+      SetJumpTarget(below_first);
+      SetJumpTarget(between_aliases);
+      SetJumpTarget(above_aliases);
+      SetJumpTarget(canonicalized);
+      return;
+    }
+
+    MOV(32, R(RSCRATCH2), R(address));
+    SHR(32, R(RSCRATCH2), Imm8(28));
+    CMP(32, R(RSCRATCH2), Imm8(4));
+    const FixupBranch first_alias = J_CC(CC_E, Jump::Near);
+    CMP(32, R(RSCRATCH2), Imm8(7));
+    const FixupBranch not_alias = J_CC(CC_NE, Jump::Near);
     SetJumpTarget(first_alias);
     AND(32, R(address), Imm32(fake_vmem_mask));
     OR(32, R(address), Imm32(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL));
-    const FixupBranch canonicalized = J(Jump::Near);
-    SetJumpTarget(below_first);
-    SetJumpTarget(between_aliases);
-    SetJumpTarget(above_aliases);
-    SetJumpTarget(canonicalized);
+    SetJumpTarget(not_alias);
   };
 
   canonicalize(RSCRATCH);
   AND(32, R(RSCRATCH), Imm32(0x1FFFFFFFu));
   SHR(32, R(RSCRATCH), Imm8(12));
-  MOV(8, MComplex(RSCRATCH2, RSCRATCH, SCALE_1,
-                  static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
-      Imm8(1));
+
+  // Keep Wii and guarded pre-session blocks byte-for-byte in their original order. In
+  // particular, issue the first bitmap mark before calculating a possible second page so its
+  // store can overlap that address work. Only the active GC FakeVMEM path needs RDX temporarily.
+  if (!optimized_gc_path)
+  {
+    MOV(8, MComplex(bitmap_base, RSCRATCH, SCALE_1,
+                    static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
+        Imm8(1));
+  }
 
   if (size > 1)
   {
@@ -224,9 +251,21 @@ void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 siz
     canonicalize(RSCRATCH_EXTRA);
     AND(32, R(RSCRATCH_EXTRA), Imm32(0x1FFFFFFFu));
     SHR(32, R(RSCRATCH_EXTRA), Imm8(12));
+  }
+
+  if (optimized_gc_path)
+  {
+    MOV(64, R(bitmap_base), Imm64(reinterpret_cast<u64>(&bitmap)));
+    MOV(8, MComplex(bitmap_base, RSCRATCH, SCALE_1,
+                    static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
+        Imm8(1));
+  }
+
+  if (size > 1)
+  {
     CMP(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
     const FixupBranch same_page = J_CC(CC_E, Jump::Near);
-    MOV(8, MComplex(RSCRATCH2, RSCRATCH_EXTRA, SCALE_1,
+    MOV(8, MComplex(bitmap_base, RSCRATCH_EXTRA, SCALE_1,
                     static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
         Imm8(1));
     SetJumpTarget(same_page);
