@@ -981,6 +981,12 @@ void VideoInterfaceManager::Update(u64 ticks)
     m_half_line_count = 0;
   }
 
+  Rollback::UpdatePreciseVITailArm(
+      m_half_line_count == m_odd_field_first_hl ||
+          m_half_line_count == m_even_field_first_hl,
+      m_half_line_count == m_odd_field_last_hl || m_half_line_count == m_even_field_last_hl,
+      m_half_line_count == odd_field_begin || m_half_line_count == even_field_begin);
+
   if (!(m_half_line_count & 1))
   {
     m_ticks_last_line_start = ticks;

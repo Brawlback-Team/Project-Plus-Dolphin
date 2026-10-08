@@ -48,6 +48,9 @@
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/HW/SystemTimers.h"
+#include "Core/HW/VideoInterface.h"
+#include "Core/IOS/FS/HostBackend/FS.h"
+#include "Core/IOS/IOS.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -335,6 +338,17 @@ struct RamDigest
   int sends = 0;
 };
 
+struct DiagnosticEvent
+{
+  GekkoGameEventType type = GekkoEmptyGameEvent;
+  int frame = -1;
+  bool rolling_back = false;
+  bool running_ahead = false;
+  u64 inputs = 0;
+  u64 ticks = 0;
+  u64 nand_mark = 0;
+};
+
 struct GekkoManager
 {
   std::recursive_mutex mutex;
@@ -358,6 +372,7 @@ struct GekkoManager
   bool ram_diagnostic_dumped = false;
   FrameBoundary frame_boundary = FrameBoundary::VINewField;
   std::atomic<bool> vi_boundary_pending{false};
+  std::atomic<bool> precise_vi_tail{false};
   int configured_local_delay = 0;
   u32 session_id = 0;
   u64 local_input_frame = 0;
@@ -374,6 +389,12 @@ struct GekkoManager
   std::optional<int> first_ram_mismatch_frame;
   std::optional<int> ram_mismatch_details_frame;
   u64 last_advance_input_hash = 0;
+  bool last_advance_has_start = false;
+  bool last_sampled_start = false;
+  std::deque<DiagnosticEvent> diagnostic_events;
+  bool restore_mismatch_reported = false;
+  u64 perf_restore_checks = 0;
+  u64 perf_restore_mismatches = 0;
 
   // Pacing
   double speed_scale = 1.0;
@@ -455,6 +476,89 @@ struct GekkoManager
 };
 
 GekkoManager g_manager;
+
+void LogStartFrameStateDigest(Core::System& system, int frame)
+{
+  if (!g_manager.compare_confirmed_ram || !g_manager.last_advance_has_start || !g_manager.ring)
+    return;
+
+  const std::span<const u8> state = g_manager.ring->LastState();
+  const State::RollbackStateLayout& layout = g_manager.ring->LastStateLayout();
+  std::array<u64, State::ROLLBACK_STATE_SECTION_COUNT> sections{};
+  std::size_t section_start = 0;
+  for (std::size_t i = 0; i < sections.size(); ++i)
+  {
+    const std::size_t section_end = std::min(layout.section_ends[i], state.size());
+    if (section_end < section_start)
+      break;
+    sections[i] = XXH3_64bits(state.data() + section_start, section_end - section_start);
+    section_start = section_end;
+  }
+
+  const auto& ppc = system.GetPPCState();
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet state trace: START save frame {} state={:016x} sections "
+      "Movie={:016x},Video={:016x},CoreTiming={:016x},HW={:016x},PowerPC={:016x},"
+      "Wiimote={:016x},Gecko={:016x}; ticks={}, timebase={}, pc={:08x}, npc={:08x}",
+      frame, XXH3_64bits(state.data(), state.size()), sections[0], sections[1], sections[2],
+      sections[3], sections[4], sections[5], sections[6], system.GetCoreTiming().GetTicks(),
+      system.GetPowerPC().ReadFullTimeBaseValue(), ppc.pc, ppc.npc);
+}
+
+IOS::HLE::FS::HostFileSystem* HostNand(Core::System& system)
+{
+  IOS::HLE::EmulationKernel* ios = system.GetIOS();
+  return ios ? static_cast<IOS::HLE::FS::HostFileSystem*>(ios->GetFS().get()) : nullptr;
+}
+
+std::string_view DiagnosticEventName(GekkoGameEventType type)
+{
+  switch (type)
+  {
+  case GekkoSaveEvent:
+    return "save";
+  case GekkoLoadEvent:
+    return "load";
+  case GekkoAdvanceEvent:
+    return "advance";
+  default:
+    return "other";
+  }
+}
+
+void RecordDiagnosticEvent(Core::System& system, const QueuedEvent& event)
+{
+  if (!g_manager.compare_confirmed_ram)
+    return;
+
+  DiagnosticEvent diagnostic;
+  diagnostic.type = event.type;
+  diagnostic.frame = event.frame;
+  diagnostic.rolling_back = event.rolling_back;
+  diagnostic.running_ahead = event.running_ahead;
+  diagnostic.inputs = event.inputs.empty() ? 0 : XXH3_64bits(event.inputs.data(), event.inputs.size());
+  diagnostic.ticks = system.GetCoreTiming().GetTicks();
+  if (IOS::HLE::FS::HostFileSystem* nand = HostNand(system))
+    diagnostic.nand_mark = nand->LastJournalMark();
+  g_manager.diagnostic_events.push_back(diagnostic);
+  while (g_manager.diagnostic_events.size() > 16)
+    g_manager.diagnostic_events.pop_front();
+}
+
+void LogDiagnosticEventHistory()
+{
+  std::string history;
+  for (const DiagnosticEvent& event : g_manager.diagnostic_events)
+  {
+    if (!history.empty())
+      history += ", ";
+    history += fmt::format("{}(f={},rb={},ra={},in={:016x},ticks={},nand={})",
+                           DiagnosticEventName(event.type), event.frame, event.rolling_back,
+                           event.running_ahead, event.inputs, event.ticks, event.nand_mark);
+  }
+  NOTICE_LOG_FMT(CORE, "Rollback restore diagnostic: preceding events [{}]", history);
+}
 
 void WriteU32(u8* out, u32 value)
 {
@@ -572,6 +676,7 @@ void CompareRamDigest(int remote_player, const ENetAddress* sender, const RamDig
         local.core_ticks, remote.core_ticks, local.timebase, remote.timebase,
         local.fake_tb_start_value, remote.fake_tb_start_value, local.fake_tb_start_ticks,
         remote.fake_tb_start_ticks, local.decrementer, remote.decrementer, differing_sections);
+    LogDiagnosticEventHistory();
   }
 
   // Tell the other peer explicitly so it pauses and preserves the same frame even if its copy of
@@ -649,25 +754,72 @@ bool HandleRamDiagnosticDatagram(const Common::ENet::RollbackDatagram& datagram)
   return true;
 }
 
+void FillRamRegionHashes(Core::System& system, RamDigest* digest)
+{
+  auto& memory = system.GetMemory();
+  digest->mem1 = XXH3_64bits(memory.GetRAM(), memory.GetRamSize());
+  digest->mem2 = memory.GetEXRAM() ? XXH3_64bits(memory.GetEXRAM(), memory.GetExRamSize()) : 0;
+  if (!system.IsWii())
+  {
+    auto& dsp = system.GetDSP();
+    digest->aram = XXH3_64bits(dsp.GetARAMPtr(), dsp.GetARAMSize());
+  }
+  digest->fake_vmem = memory.GetFakeVMEM() ?
+                          XXH3_64bits(memory.GetFakeVMEM(), memory.GetFakeVMemSize()) :
+                          0;
+  digest->l1 = XXH3_64bits(memory.GetL1Cache(), memory.GetL1CacheSize());
+  const std::array<u64, 5> regions{digest->mem1, digest->mem2, digest->aram, digest->fake_vmem,
+                                   digest->l1};
+  digest->root = XXH3_64bits(regions.data(), sizeof(regions));
+}
+
+void VerifyRestoredRam(Core::System& system, int frame)
+{
+  if (!g_manager.compare_confirmed_ram)
+    return;
+
+  const auto expected_it = g_manager.ram_digests.find(frame);
+  if (expected_it == g_manager.ram_digests.end())
+    return;
+
+  ++g_manager.perf_restore_checks;
+  RamDigest actual{};
+  actual.frame = frame;
+  FillRamRegionHashes(system, &actual);
+  const RamDigest& expected = expected_it->second;
+  if (actual.root == expected.root)
+    return;
+
+  ++g_manager.perf_restore_mismatches;
+  if (g_manager.restore_mismatch_reported)
+    return;
+  g_manager.restore_mismatch_reported = true;
+
+  const s64 snapshot_key = static_cast<s64>(frame) + 1;
+  const std::optional<u64> expected_nand = g_manager.ring->NandJournalMarkForFrame(snapshot_key);
+  IOS::HLE::FS::HostFileSystem* nand = HostNand(system);
+  const std::optional<u64> actual_nand = nand ? std::optional<u64>(nand->LastJournalMark()) :
+                                               std::nullopt;
+  NOTICE_LOG_FMT(
+      CORE,
+      "Rollback restore diagnostic: RESTORE MISMATCH frame {} key {} root {:016x}/{:016x}; "
+      "MEM1 {:016x}/{:016x}; MEM2 {:016x}/{:016x}; ARAM {:016x}/{:016x}; "
+      "FakeVMEM {:016x}/{:016x}; L1 {:016x}/{:016x}; NAND mark {}/{}",
+      frame, snapshot_key, expected.root, actual.root, expected.mem1, actual.mem1, expected.mem2,
+      actual.mem2, expected.aram, actual.aram, expected.fake_vmem, actual.fake_vmem, expected.l1,
+      actual.l1, expected_nand ? fmt::format("{}", *expected_nand) : "unavailable",
+      actual_nand ? fmt::format("{}", *actual_nand) : "unavailable");
+  LogDiagnosticEventHistory();
+}
+
 void RecordRamDigest(Core::System& system, int frame)
 {
   if (!g_manager.compare_confirmed_ram)
     return;
 
-  auto& memory = system.GetMemory();
   RamDigest digest{};
   digest.frame = frame;
-  digest.mem1 = XXH3_64bits(memory.GetRAM(), memory.GetRamSize());
-  digest.mem2 = memory.GetEXRAM() ? XXH3_64bits(memory.GetEXRAM(), memory.GetExRamSize()) : 0;
-  if (!system.IsWii())
-  {
-    auto& dsp = system.GetDSP();
-    digest.aram = XXH3_64bits(dsp.GetARAMPtr(), dsp.GetARAMSize());
-  }
-  digest.fake_vmem = memory.GetFakeVMEM() ?
-                         XXH3_64bits(memory.GetFakeVMEM(), memory.GetFakeVMemSize()) :
-                         0;
-  digest.l1 = XXH3_64bits(memory.GetL1Cache(), memory.GetL1CacheSize());
+  FillRamRegionHashes(system, &digest);
   digest.inputs = g_manager.last_advance_input_hash;
   const std::span<const u8> state = g_manager.ring->LastState();
   digest.state = XXH3_64bits(state.data(), state.size());
@@ -688,9 +840,6 @@ void RecordRamDigest(Core::System& system, int frame)
   digest.fake_tb_start_value = core_timing.GetFakeTBStartValue();
   digest.fake_tb_start_ticks = core_timing.GetFakeTBStartTicks();
   digest.decrementer = system.GetSystemTimers().GetFakeDecrementer();
-  const std::array<u64, 5> regions{digest.mem1, digest.mem2, digest.aram, digest.fake_vmem,
-                                   digest.l1};
-  digest.root = XXH3_64bits(regions.data(), sizeof(regions));
   if (frame == -1)
   {
     NOTICE_LOG_FMT(CORE,
@@ -704,6 +853,37 @@ void RecordRamDigest(Core::System& system, int frame)
     g_manager.ram_digests.erase(g_manager.ram_digests.begin());
   while (g_manager.remote_ram_digests.size() > 512)
     g_manager.remote_ram_digests.erase(g_manager.remote_ram_digests.begin());
+}
+
+void LogSparseStateCheckpoint(Core::System& system, int frame)
+{
+  if (!g_manager.compare_confirmed_ram || frame < 0 || frame % 60 != 0 || !g_manager.ring)
+    return;
+
+  RamDigest digest{};
+  FillRamRegionHashes(system, &digest);
+  const std::span<const u8> state = g_manager.ring->LastState();
+  const State::RollbackStateLayout& layout = g_manager.ring->LastStateLayout();
+  std::size_t section_start = 0;
+  for (std::size_t i = 0; i < digest.state_sections.size(); ++i)
+  {
+    const std::size_t section_end = std::min(layout.section_ends[i], state.size());
+    if (section_end < section_start)
+      break;
+    digest.state_sections[i] =
+        XXH3_64bits(state.data() + section_start, section_end - section_start);
+    section_start = section_end;
+  }
+
+  NOTICE_LOG_FMT(
+      CORE,
+      "Rollback sparse checkpoint: frame {} resim={} input={:016x} MEM1={:016x} MEM2={:016x} "
+      "L1={:016x} state={:016x} sections Movie={:016x},Video={:016x},CoreTiming={:016x},"
+      "HW={:016x},PowerPC={:016x},Wiimote={:016x},Gecko={:016x}",
+      frame, Rollback::IsResimulating(), g_manager.last_advance_input_hash, digest.mem1,
+      digest.mem2, digest.l1, XXH3_64bits(state.data(), state.size()), digest.state_sections[0],
+      digest.state_sections[1], digest.state_sections[2], digest.state_sections[3],
+      digest.state_sections[4], digest.state_sections[5], digest.state_sections[6]);
 }
 
 void CompareSettledRamDigests()
@@ -814,6 +994,12 @@ WirePad EncodePad(const GCPadStatus& status)
   return pad;
 }
 
+bool WirePadHasStart(const WirePad& pad)
+{
+  const u16 buttons = static_cast<u16>((pad.data[0] << 8) | pad.data[1]);
+  return (buttons & PAD_BUTTON_START) != 0;
+}
+
 GCPadStatus DecodePad(const WirePad& pad)
 {
   GCPadStatus status{};
@@ -877,8 +1063,7 @@ void SetGekkoLocalDelay(int local_delay)
 bool StartGekkoSession(const std::string& game_name, u32 session_id, int players, int local_player,
                        const std::vector<std::string>& player_endpoints, int local_delay,
                        int prediction_window, bool debug_p2_cstick, bool simulate_remote_p2,
-                       bool stress_test, bool compare_confirmed_ram,
-                       FrameBoundary frame_boundary)
+                       bool stress_test, bool compare_confirmed_ram)
 {
   StopGekkoSession();
 
@@ -900,8 +1085,6 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
     ERROR_LOG_FMT(CORE, "GekkoNet: rollback stress test requires the simulated remote peer");
     return false;
   }
-  if (frame_boundary > FrameBoundary::VINewField)
-    frame_boundary = FrameBoundary::VINewField;
 
   if (!gekko_create(&g_manager.session, GekkoGameSession))
   {
@@ -980,7 +1163,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.stress_test = stress_test;
   g_manager.compare_confirmed_ram = compare_confirmed_ram && !simulate_remote_p2 && players > 1;
   g_manager.ram_diagnostic_dumped = false;
-  g_manager.frame_boundary = frame_boundary;
+  g_manager.frame_boundary = FrameBoundary::VINewField;
   g_manager.vi_boundary_pending.store(false, std::memory_order_relaxed);
   g_manager.configured_local_delay = clamped_delay;
   g_manager.session_id = session_id;
@@ -1000,6 +1183,12 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.first_ram_mismatch_frame.reset();
   g_manager.ram_mismatch_details_frame.reset();
   g_manager.last_advance_input_hash = 0;
+  g_manager.last_advance_has_start = false;
+  g_manager.last_sampled_start = false;
+  g_manager.diagnostic_events.clear();
+  g_manager.restore_mismatch_reported = false;
+  g_manager.perf_restore_checks = 0;
+  g_manager.perf_restore_mismatches = 0;
   g_manager.perf_window_start = {};
   g_manager.perf_dirty_pages_start = DirtyPages::GetCounters();
   g_manager.perf_real_frames = 0;
@@ -1171,6 +1360,8 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
                                                   g_manager.tracked_bitmap_clear,
                                                   g_manager.full_scan_benchmark);
   g_manager.stop_requested.store(false, std::memory_order_relaxed);
+  g_manager.vi_boundary_pending.store(false, std::memory_order_relaxed);
+  g_manager.precise_vi_tail.store(false, std::memory_order_relaxed);
   g_manager.active.store(true, std::memory_order_release);
 
   NOTICE_LOG_FMT(
@@ -1200,6 +1391,7 @@ void StopGekkoSession()
   g_manager.stop_requested.store(true, std::memory_order_relaxed);
   g_manager.active.store(false, std::memory_order_release);
   g_manager.vi_boundary_pending.store(false, std::memory_order_relaxed);
+  g_manager.precise_vi_tail.store(false, std::memory_order_relaxed);
 
   if (g_manager.session)
   {
@@ -1289,6 +1481,18 @@ static void SubmitLocalInput()
   if (g_manager.debug_p2_cstick && g_manager.local_player == 2)
     ApplyDebugCStickPattern(&local_status, g_manager.local_input_frame);
   WirePad wire = EncodePad(local_status);
+
+  const bool sampled_start = WirePadHasStart(wire);
+  if (sampled_start != g_manager.last_sampled_start)
+  {
+    if (g_manager.compare_confirmed_ram)
+    {
+      NOTICE_LOG_FMT(CORE, "GekkoNet input trace: local P{} sampled START {} at input frame {}",
+                     g_manager.local_player, sampled_start ? "DOWN" : "UP",
+                     g_manager.local_input_frame);
+    }
+    g_manager.last_sampled_start = sampled_start;
+  }
 
   if (g_manager.last_local_wire)
   {
@@ -1795,6 +1999,14 @@ static void MaybeLogPerformance(Core::System& system)
       average(static_cast<double>(g_manager.perf_load_phases.jit_blocks_invalidated),
               g_manager.perf_load_count));
 
+  if (g_manager.compare_confirmed_ram)
+  {
+    NOTICE_LOG_FMT(CORE,
+                   "Rollback restore diagnostic: verified {} snapshot loads; {} restore "
+                   "mismatches in this window",
+                   g_manager.perf_restore_checks, g_manager.perf_restore_mismatches);
+  }
+
   g_manager.perf_window_start = now;
   g_manager.perf_dirty_pages_start = dirty_pages;
   g_manager.perf_real_frames = 0;
@@ -1849,6 +2061,8 @@ static void MaybeLogPerformance(Core::System& system)
   g_manager.perf_real_gaps_over_25_ms = 0;
   g_manager.perf_real_gaps_over_33_ms = 0;
   g_manager.perf_real_gaps_over_50_ms = 0;
+  g_manager.perf_restore_checks = 0;
+  g_manager.perf_restore_mismatches = 0;
 }
 
 // Consumes state operations up to one advance. Returning true means that the caller must return
@@ -1861,6 +2075,7 @@ static bool PrepareQueuedFrame(Core::System& system)
   {
     QueuedEvent event = std::move(g_manager.pending_events.front());
     g_manager.pending_events.pop_front();
+    RecordDiagnosticEvent(system, event);
 
     switch (event.type)
     {
@@ -1869,7 +2084,9 @@ static bool PrepareQueuedFrame(Core::System& system)
       {
         const auto start = std::chrono::steady_clock::now();
         g_manager.ring->Save(system, SnapshotFrameKey(event.frame));
+        LogStartFrameStateDigest(system, event.frame);
         RecordRamDigest(system, event.frame);
+        LogSparseStateCheckpoint(system, event.frame);
         const double elapsed = ElapsedMs(start);
         AddSnapshotPhases(&g_manager.perf_save_phases, g_manager.ring->GetLastSaveTimings());
         ++g_manager.perf_save_count;
@@ -1914,6 +2131,7 @@ static bool PrepareQueuedFrame(Core::System& system)
           g_manager.stop_requested.store(true, std::memory_order_relaxed);
           return false;
         }
+        VerifyRestoredRam(system, event.frame);
         if (g_manager.stress_test && event.frame < 10)
         {
           const auto& ppc = system.GetPPCState();
@@ -1937,8 +2155,30 @@ static bool PrepareQueuedFrame(Core::System& system)
     case GekkoAdvanceEvent:
     {
       const bool resimulating = event.rolling_back || event.running_ahead;
-      g_manager.last_advance_input_hash =
-          XXH3_64bits(event.inputs.data(), event.inputs.size());
+      std::string start_players;
+      std::pair<u32, u32> si0_before{};
+      std::pair<u32, u32> si1_before{};
+      if (g_manager.compare_confirmed_ram)
+      {
+        g_manager.last_advance_input_hash =
+            XXH3_64bits(event.inputs.data(), event.inputs.size());
+        for (int p = 0; p < g_manager.players; ++p)
+        {
+          const int handle = g_manager.player_handles[p];
+          if (handle < 0)
+            continue;
+          const std::size_t offset = static_cast<std::size_t>(handle) * sizeof(WirePad);
+          if (event.inputs.size() < offset + sizeof(WirePad))
+            continue;
+          WirePad wire{};
+          std::memcpy(&wire, event.inputs.data() + offset, sizeof(wire));
+          if (WirePadHasStart(wire))
+            start_players += fmt::format("{}P{}", start_players.empty() ? "" : ",", p + 1);
+        }
+        si0_before = system.GetSerialInterface().GetInputRegisters(0);
+        si1_before = system.GetSerialInterface().GetInputRegisters(1);
+      }
+      g_manager.last_advance_has_start = !start_players.empty();
       if (!resimulating)
         MeasureLocalInputDelay(event.frame, event.inputs);
       LatchInputs(event.inputs.data());
@@ -2013,7 +2253,27 @@ static bool PrepareQueuedFrame(Core::System& system)
       g_manager.frame_execution_event_start = GetResimEventStats();
       const auto frame_setup_start =
           resimulating ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      system.GetSerialInterface().RelatchInputs();
+      // VI boundaries select the next rollback input before VI's normally scheduled SI poll.
+      // Relatching here would expose it immediately at a JIT-dependent guest instruction.
+      if (g_manager.frame_boundary == FrameBoundary::BrawlHook)
+        system.GetSerialInterface().RelatchInputs();
+      if (g_manager.compare_confirmed_ram && !start_players.empty())
+      {
+        const auto si0_after = system.GetSerialInterface().GetInputRegisters(0);
+        const auto si1_after = system.GetSerialInterface().GetInputRegisters(1);
+        const auto& ppc = system.GetPPCState();
+        NOTICE_LOG_FMT(
+            CORE,
+            "GekkoNet input trace: advance frame {} START [{}], rollback={}, runahead={}, "
+            "hash={:016x}, ticks={}, timebase={}, vi_halfline={}, pc={:08x}, npc={:08x}, "
+            "si0={:08x}/{:08x}->{:08x}/{:08x}, si1={:08x}/{:08x}->{:08x}/{:08x}",
+            event.frame, start_players, event.rolling_back, event.running_ahead,
+            g_manager.last_advance_input_hash, system.GetCoreTiming().GetTicks(),
+            system.GetPowerPC().ReadFullTimeBaseValue(),
+            system.GetVideoInterface().GetHalfLineCount(), ppc.pc, ppc.npc, si0_before.first,
+            si0_before.second, si0_after.first, si0_after.second, si1_before.first,
+            si1_before.second, si1_after.first, si1_after.second);
+      }
       if (g_manager.stress_test && event.frame < 10)
       {
         NOTICE_LOG_FMT(CORE,
@@ -2158,7 +2418,7 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
       static_cast<float>(g_manager.speed_scale));
 
   static u32 s_boundary_ticks = 0;
-  if (++s_boundary_ticks % 60 == 1)
+  if (++s_boundary_ticks % 60 == 1 && g_manager.compare_confirmed_ram)
   {
     NOTICE_LOG_FMT(CORE,
                    "GekkoNet: Frame boundary tick #{}, boundary={}, local_player={}, ahead={:.2f}, "
@@ -2231,7 +2491,8 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
 void OnFrameBoundary(const Core::CPUThreadGuard& guard)
 {
   ProcessFrameBoundary(guard, FrameBoundary::BrawlHook);
-  if (IsGekkoSessionActive())
+  if (IsGekkoSessionActive() && g_manager.frame_boundary == FrameBoundary::BrawlHook &&
+      !IsResimulating())
   {
     auto& core_timing = guard.GetSystem().GetCoreTiming();
     core_timing.ThrottleForRollbackBoundary(static_cast<s64>(core_timing.GetTicks()));
@@ -2241,7 +2502,36 @@ void OnFrameBoundary(const Core::CPUThreadGuard& guard)
 void SignalVIBoundary(FrameBoundary boundary)
 {
   if (g_manager.active.load(std::memory_order_acquire) && g_manager.frame_boundary == boundary)
+  {
+    g_manager.precise_vi_tail.store(false, std::memory_order_release);
     g_manager.vi_boundary_pending.store(true, std::memory_order_release);
+  }
+}
+
+bool IsVIBoundaryPending()
+{
+  return g_manager.vi_boundary_pending.load(std::memory_order_acquire);
+}
+
+void UpdatePreciseVITailArm(bool next_is_begin_field, bool next_is_end_field,
+                            bool next_is_new_field)
+{
+  const bool active = g_manager.active.load(std::memory_order_acquire);
+  const bool selected =
+      (g_manager.frame_boundary == FrameBoundary::VIBeginField && next_is_begin_field) ||
+      (g_manager.frame_boundary == FrameBoundary::VIEndField && next_is_end_field) ||
+      (g_manager.frame_boundary == FrameBoundary::VINewField && next_is_new_field);
+  g_manager.precise_vi_tail.store(active && selected, std::memory_order_release);
+}
+
+bool IsPreciseVITailArmed()
+{
+  return g_manager.precise_vi_tail.load(std::memory_order_acquire);
+}
+
+bool IsDeterminismDiagnosticsEnabled()
+{
+  return g_manager.compare_confirmed_ram;
 }
 
 void RunPendingVIBoundary(Core::System& system)
@@ -2251,7 +2541,7 @@ void RunPendingVIBoundary(Core::System& system)
 
   // The first VI event can run from the JIT's initial CoreTiming::Advance before a guest block has
   // established NPC. Such a snapshot serializes successfully but cannot resume after a load.
-  // Wait for the first genuine between-block boundary instead of exposing an invalid frame -1.
+  // Wait for the first genuine dispatcher boundary instead of exposing an invalid frame -1.
   const auto& initial_ppc = system.GetPPCState();
   if (initial_ppc.npc == 0)
   {
@@ -2263,7 +2553,7 @@ void RunPendingVIBoundary(Core::System& system)
 
   const Core::CPUThreadGuard guard(system);
   ProcessFrameBoundary(guard, g_manager.frame_boundary);
-  if (IsGekkoSessionActive())
+  if (IsGekkoSessionActive() && !IsResimulating())
   {
     auto& core_timing = system.GetCoreTiming();
     core_timing.ThrottleForRollbackBoundary(static_cast<s64>(core_timing.GetTicks()));

@@ -24,7 +24,9 @@
 #include "Core/CPUThreadConfigCallback.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/SystemTimers.h"
+#include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/GekkoRollback.h"
 #include "Core/Rollback/Rollback.h"
@@ -433,6 +435,11 @@ void CoreTimingManager::Advance()
     {
       evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
     }
+
+    // Do not let later overdue events (in particular VI's scheduled SI poll) cross the rollback
+    // boundary before GekkoNet has selected the input for the new frame.
+    if (Rollback::IsVIBoundaryPending())
+      break;
   }
 
   m_is_global_timer_sane = false;
@@ -441,7 +448,8 @@ void CoreTimingManager::Advance()
   if (!m_event_queue.empty())
   {
     m_globals.slice_length = static_cast<int>(
-        std::min<s64>(m_event_queue.front().time - m_globals.global_timer, MAX_SLICE_LENGTH));
+        std::clamp<s64>(m_event_queue.front().time - m_globals.global_timer, 0,
+                        MAX_SLICE_LENGTH));
   }
 
   ppc_state.downcount = CyclesToDowncount(m_globals.slice_length);
@@ -469,10 +477,6 @@ void CoreTimingManager::Advance()
                                    total_nanoseconds - callback_nanoseconds :
                                    0);
   }
-
-  // VI callbacks only identify the requested logical boundary. Run rollback after the complete
-  // timing batch so save/load never mutates CoreTiming while its event queue is being dispatched.
-  Rollback::RunPendingVIBoundary(m_system);
 
   if (Rollback::IsResimulating())
     s_resim_guest_start = ResimGuestSliceStart{std::chrono::steady_clock::now(), ppc_state.pc};
@@ -672,8 +676,7 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
 
 void CoreTimingManager::ThrottleForRollbackBoundary(const s64 target_cycle)
 {
-  // Gekko sessions pace at their authoritative frame boundary. Do not let Rush Frame
-  // Presentation suppress this replacement for Dolphin's earlier controller-poll throttle.
+  // Pace Gekko sessions at their authoritative boundary instead of an earlier controller poll.
   m_throttled_after_presentation.store(false, std::memory_order_relaxed);
   Throttle(target_cycle);
 }
@@ -827,7 +830,56 @@ void CoreTimingManager::SetFakeTBStartTicks(u64 val)
 
 void GlobalAdvance()
 {
-  Core::System::GetInstance().GetCoreTiming().Advance();
+  auto& system = Core::System::GetInstance();
+  auto& core_timing = system.GetCoreTiming();
+  auto& ppc_state = system.GetPPCState();
+
+  for (;;)
+  {
+    core_timing.Advance();
+    // A rollback load replaces CoreTiming state. Do it only after Advance has fully returned, never
+    // while Advance still owns local state derived from the timeline being replaced.
+    Rollback::RunPendingVIBoundary(system);
+
+    if (!Rollback::IsPreciseVITailArmed() || ppc_state.npc == 0 ||
+        system.GetCPU().GetState() != CPU::State::Running)
+    {
+      return;
+    }
+
+    const auto tail_start = std::chrono::steady_clock::now();
+    const u64 start_tick = core_timing.GetTicks();
+    const u32 start_pc = ppc_state.pc;
+    u32 instructions = 0;
+    u32 cycles = 0;
+
+    while (ppc_state.downcount > 0 && Rollback::IsPreciseVITailArmed() &&
+           system.GetCPU().GetState() == CPU::State::Running)
+    {
+      const int instruction_cycles = system.GetInterpreter().SingleStepInner();
+      ppc_state.downcount -= instruction_cycles;
+      cycles += static_cast<u32>(instruction_cycles);
+      ++instructions;
+    }
+
+    static u64 s_precise_tail_count = 0;
+    ++s_precise_tail_count;
+    if (Rollback::IsDeterminismDiagnosticsEnabled() &&
+        (s_precise_tail_count <= 16 || s_precise_tail_count % 300 == 0))
+    {
+      const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - tail_start)
+                                  .count();
+      NOTICE_LOG_FMT(CORE,
+                     "GekkoNet precise VI tail #{}: start_tick={}, start_pc={:08x}, "
+                     "instructions={}, cycles={}, final_downcount={}, host_us={}",
+                     s_precise_tail_count, start_tick, start_pc, instructions, cycles,
+                     ppc_state.downcount, elapsed_us);
+    }
+
+    // The interpreter exhausted this timing slice. Advance again here rather than returning to the
+    // JIT, which would otherwise execute one whole block before checking the expired downcount.
+  }
 }
 
 void GlobalIdle()

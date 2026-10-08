@@ -159,6 +159,7 @@ public:
   std::span<const u8> LastState() const;
   const State::RollbackStateLayout& LastStateLayout() const;
   std::span<const u8> StateForFrame(s64 frame) const;
+  std::optional<u64> NandJournalMarkForFrame(s64 frame) const;
   const SnapshotPhaseTimings& GetLastSaveTimings() const { return m_last_save_timings; }
   const SnapshotPhaseTimings& GetLastLoadTimings() const { return m_last_load_timings; }
   // Forgets every snapshot and stops the NAND journal. Call while emulation is still running.

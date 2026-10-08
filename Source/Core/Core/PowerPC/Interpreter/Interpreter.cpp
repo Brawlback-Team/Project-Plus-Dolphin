@@ -22,6 +22,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCTables.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 namespace
@@ -200,6 +201,7 @@ void Interpreter::SingleStep()
 
   // Declare start of new slice
   core_timing.Advance();
+  Rollback::RunPendingVIBoundary(m_system);
 
   SingleStepInner();
 
@@ -234,6 +236,7 @@ void Interpreter::Run()
     // one so it must always be called at the start. At boot, we are in slice -1 and must
     // advance into slice 0 to get a correct slice length before executing any cycles.
     core_timing.Advance();
+    Rollback::RunPendingVIBoundary(m_system);
 
     // we have to check exceptions at branches apparently (or maybe just rfi?)
     if (Config::IsDebuggingEnabled())

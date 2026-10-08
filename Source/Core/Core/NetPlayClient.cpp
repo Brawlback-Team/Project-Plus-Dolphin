@@ -1968,8 +1968,7 @@ bool NetPlayClient::StartGame(const std::string& path)
   if (!Rollback::StartGekkoSession("Project+", m_current_game, num_players, local_seat,
                                    m_rollback_player_endpoints, local_delay, prediction_window,
                                    debug_p2_cstick, simulate_remote_p2, rollback_stress_test,
-                                   compare_confirmed_ram, static_cast<Rollback::FrameBoundary>(
-                                       m_net_settings.rollback_frame_boundary)))
+                                   compare_confirmed_ram))
   {
     ERROR_LOG_FMT(NETPLAY, "GekkoNet: failed to start native UDP rollback session");
     return false;

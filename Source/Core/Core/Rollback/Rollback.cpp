@@ -432,6 +432,14 @@ bool SnapshotRing::Load(Core::System& system, s64 frame)
   return LoadSlot(system, frame, false);
 }
 
+std::optional<u64> SnapshotRing::NandJournalMarkForFrame(s64 frame) const
+{
+  const Slot* slot = Find(frame);
+  if (!slot)
+    return std::nullopt;
+  return slot->nand_journal_mark;
+}
+
 bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
 {
   const bool trace = m_initial_trace_events++ < 16;

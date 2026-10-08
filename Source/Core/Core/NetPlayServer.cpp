@@ -1553,8 +1553,8 @@ bool NetPlayServer::SetupNetSettings()
   settings.use_fma = DoAllPlayersHaveHardwareFMA();
   settings.hide_remote_gbas = Config::Get(Config::NETPLAY_HIDE_REMOTE_GBAS);
   settings.spectator_mode = Config::Get(Config::NETPLAY_SPECTATOR_MODE);
-  settings.rollback_frame_boundary = static_cast<u8>(
-      std::min<u32>(Config::Get(Config::NETPLAY_ROLLBACK_FRAME_BOUNDARY), 3));
+  // The generic rollback path uses the instruction-precise VI New Field boundary on every peer.
+  settings.rollback_frame_boundary = 3;
 
   // Unload GameINI to restore things to normal
   Config::RemoveLayer(Config::LayerType::GlobalGame);

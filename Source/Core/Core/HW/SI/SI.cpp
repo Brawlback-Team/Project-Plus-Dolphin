@@ -567,6 +567,13 @@ void SerialInterfaceManager::RelatchInputs()
   }
 }
 
+std::pair<u32, u32> SerialInterfaceManager::GetInputRegisters(u32 channel) const
+{
+  if (channel >= MAX_SI_CHANNELS)
+    return {};
+  return {m_channel[channel].in_hi.hex, m_channel[channel].in_lo.hex};
+}
+
 
 SIDevices SerialInterfaceManager::GetDeviceType(int channel) const
 {
