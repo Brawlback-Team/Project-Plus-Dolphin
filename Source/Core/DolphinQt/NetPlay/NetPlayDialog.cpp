@@ -153,10 +153,8 @@ void NetPlayDialog::CreateMainLayout()
   m_frame_boundary_combo->addItem(tr("VI Begin Field"), 1);
   m_frame_boundary_combo->addItem(tr("VI End Field"), 2);
   m_frame_boundary_combo->addItem(tr("VI New Field"), 3);
-  m_frame_boundary_combo->setToolTip(
-      tr("Choose where Dolphin advances GekkoNet and takes rollback snapshots. The host selection "
-         "is synchronized to every client when the session starts. Brawl Hook is the known-safe "
-         "default; the VI choices are experimental."));
+  m_frame_boundary_label->hide();
+  m_frame_boundary_combo->hide();
   m_quit_button = new QPushButton(tr("Quit"));
   m_brawlmusic_off = new QCheckBox(tr("Client Side Music Off"));
   m_spectator_mode = new QCheckBox(tr("Spectator"));
@@ -1304,7 +1302,9 @@ void NetPlayDialog::LoadSettings()
   m_player_buffer_size_box->setValue(player_buffer_size);
   const int frame_boundary_index =
       m_frame_boundary_combo->findData(static_cast<int>(rollback_frame_boundary));
-  m_frame_boundary_combo->setCurrentIndex(frame_boundary_index >= 0 ? frame_boundary_index : 0);
+  const int default_frame_boundary_index = m_frame_boundary_combo->findData(3);
+  m_frame_boundary_combo->setCurrentIndex(
+      frame_boundary_index >= 0 ? frame_boundary_index : default_frame_boundary_index);
 
   if (!savedata_load)
     m_savedata_none_action->setChecked(true);

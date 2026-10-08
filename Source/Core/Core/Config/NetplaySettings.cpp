@@ -47,7 +47,7 @@ const Info<u32> NETPLAY_CLIENT_BUFFER_SIZE{{System::Main, "NetPlay", "BufferSize
 const Info<u32> NETPLAY_ROLLBACK_FRAMES{{System::Main, "NetPlay", "RollbackFrames"}, 7};
 const Info<u32> NETPLAY_ROLLBACK_INPUT_DELAY{{System::Main, "NetPlay", "RollbackInputDelay"}, 2};
 const Info<u32> NETPLAY_ROLLBACK_FRAME_BOUNDARY{
-    {System::Main, "NetPlay", "RollbackFrameBoundary"}, 0};
+    {System::Main, "NetPlay", "RollbackFrameBoundary"}, 3};
 
 const Info<bool> NETPLAY_BRAWL_MUSIC_OFF{{System::Main, "NetPlay", "BrawlMusicOff"}, false};
 const Info<bool> NETPLAY_SPECTATOR_MODE{{System::Main, "NetPlay", "IsSpectator"}, false};

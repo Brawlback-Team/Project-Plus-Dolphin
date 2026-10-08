@@ -184,24 +184,10 @@ FSCore::ScopedFd FSCore::Open(FS::Uid uid, FS::Gid gid, const std::string& path,
   ticks.Add(IPC_OVERHEAD_TICKS);
 
   if (m_fd_map.size() >= 16)
-  {
-    std::string open_names;
-    for (const auto& [fd, handle] : m_fd_map)
-    {
-      if (!open_names.empty())
-        open_names += ", ";
-      open_names += fmt::format("{}:{}", fd, handle.name.data());
-    }
-    ERROR_LOG_FMT(CORE, "NAND proxy open diagnosis: no free fd for {} (open={})", path,
-                  open_names);
     return {this, ConvertResult(ResultCode::NoFreeHandle), ticks};
-  }
 
   if (path.size() >= 64)
-  {
-    ERROR_LOG_FMT(CORE, "NAND proxy open diagnosis: path too long ({}): {}", path.size(), path);
     return {this, ConvertResult(ResultCode::Invalid), ticks};
-  }
 
   const u64 fd = ipc_fd.has_value() ? u64(*ipc_fd) : m_next_fd++;
 

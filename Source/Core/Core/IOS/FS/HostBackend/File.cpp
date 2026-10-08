@@ -79,23 +79,17 @@ Result<FileHandle> HostFileSystem::OpenFile(Uid, Gid, const std::string& path, M
 {
   Handle* handle = AssignFreeHandle();
   if (!handle)
-  {
-    ERROR_LOG_FMT(CORE, "NAND open diagnosis: no free handle for {}", path);
     return std::unexpected{ResultCode::NoFreeHandle};
-  }
 
   const std::string host_path = BuildFilename(path).host_path;
   if (File::IsDirectory(host_path))
   {
-    ERROR_LOG_FMT(CORE, "NAND open diagnosis: {} resolves to directory {}", path, host_path);
-    DiagnoseMissingJournalPath(host_path);
     *handle = Handle{};
     return std::unexpected{ResultCode::Invalid};
   }
 
   if (!File::IsFile(host_path))
   {
-    DiagnoseMissingJournalPath(host_path);
     *handle = Handle{};
     return std::unexpected{ResultCode::NotFound};
   }
@@ -103,8 +97,6 @@ Result<FileHandle> HostFileSystem::OpenFile(Uid, Gid, const std::string& path, M
   handle->host_file = OpenHostFile(host_path);
   if (!handle->host_file)
   {
-    ERROR_LOG_FMT(CORE, "NAND open diagnosis: host open denied for {} ({})", path, host_path);
-    DiagnoseMissingJournalPath(host_path);
     *handle = Handle{};
     return std::unexpected{ResultCode::AccessDenied};
   }

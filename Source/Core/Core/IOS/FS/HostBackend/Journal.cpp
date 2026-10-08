@@ -47,13 +47,12 @@ bool CollectTree(const File::FSTEntry& entry, std::vector<std::string>* paths,
   return ok;
 }
 
-bool RemoveHostPath(const std::string& host_path)
+void RemoveHostPath(const std::string& host_path)
 {
   if (File::IsDirectory(host_path))
-    return File::DeleteDirRecursively(host_path) && !File::Exists(host_path);
-  if (File::Exists(host_path))
-    return File::Delete(host_path) && !File::Exists(host_path);
-  return true;
+    File::DeleteDirRecursively(host_path);
+  else if (File::Exists(host_path))
+    File::Delete(host_path);
 }
 }  // namespace
 
@@ -103,20 +102,11 @@ void HostFileSystem::UndoJournalEntry(const JournalEntry& entry)
     break;
 
   case JournalEntry::Kind::Created:
-    if (!RemoveHostPath(entry.host_path))
-    {
-      ERROR_LOG_FMT(CORE, "NAND journal: could not remove created path {}", entry.host_path);
-      m_journal_error = true;
-    }
+    RemoveHostPath(entry.host_path);
     break;
 
   case JournalEntry::Kind::Removed:
-    if (!RemoveHostPath(entry.host_path))
-    {
-      ERROR_LOG_FMT(CORE, "NAND journal: could not clear removed path {} before restoring it",
-                    entry.host_path);
-      m_journal_error = true;
-    }
+    RemoveHostPath(entry.host_path);
     for (std::size_t i = 0; i < entry.removed_paths.size(); ++i)
     {
       const std::string& path = entry.removed_paths[i];
@@ -254,61 +244,5 @@ void HostFileSystem::JournalRenamed(const std::string& old_host_path,
   entry.seq = m_journal_next_seq++;
   entry.host_path = old_host_path;
   entry.new_host_path = new_host_path;
-}
-
-void HostFileSystem::DiagnoseMissingJournalPath(const std::string& host_path) const
-{
-  if (!m_journal_active)
-    return;
-
-  const JournalEntry* latest = nullptr;
-  bool matched_rename_destination = false;
-  std::size_t matches = 0;
-  for (const JournalEntry& entry : m_journal)
-  {
-    const bool path_match = entry.host_path == host_path;
-    const bool rename_destination =
-        entry.kind == JournalEntry::Kind::Renamed && entry.new_host_path == host_path;
-    if (path_match || rename_destination)
-    {
-      latest = &entry;
-      matched_rename_destination = rename_destination;
-      ++matches;
-    }
-  }
-
-  if (!latest)
-  {
-    ERROR_LOG_FMT(CORE,
-                  "NAND journal diagnosis: missing {} has no retained path operation "
-                  "(mark={}, next={}, entries={})",
-                  host_path, m_journal_mark, m_journal_next_seq, m_journal.size());
-    return;
-  }
-
-  const char* kind = "unknown";
-  switch (latest->kind)
-  {
-  case JournalEntry::Kind::Fst:
-    kind = "fst";
-    break;
-  case JournalEntry::Kind::Created:
-    kind = "created";
-    break;
-  case JournalEntry::Kind::Removed:
-    kind = "removed";
-    break;
-  case JournalEntry::Kind::Written:
-    kind = "written";
-    break;
-  case JournalEntry::Kind::Renamed:
-    kind = matched_rename_destination ? "renamed-to" : "renamed-from";
-    break;
-  }
-  ERROR_LOG_FMT(CORE,
-                "NAND journal diagnosis: missing {} latest={} seq={} "
-                "(matches={}, mark={}, next={}, entries={})",
-                host_path, kind, latest->seq, matches, m_journal_mark, m_journal_next_seq,
-                m_journal.size());
 }
 }  // namespace IOS::HLE::FS

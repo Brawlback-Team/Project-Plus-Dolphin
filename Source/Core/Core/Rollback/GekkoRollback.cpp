@@ -353,7 +353,7 @@ struct GekkoManager
   bool full_scan_benchmark = false;
   bool compare_confirmed_ram = false;
   bool ram_diagnostic_dumped = false;
-  FrameBoundary frame_boundary = FrameBoundary::BrawlHook;
+  FrameBoundary frame_boundary = FrameBoundary::VINewField;
   std::atomic<bool> vi_boundary_pending{false};
   int configured_local_delay = 0;
   u32 session_id = 0;
@@ -892,7 +892,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
     return false;
   }
   if (frame_boundary > FrameBoundary::VINewField)
-    frame_boundary = FrameBoundary::BrawlHook;
+    frame_boundary = FrameBoundary::VINewField;
 
   if (!gekko_create(&g_manager.session, GekkoGameSession))
   {
