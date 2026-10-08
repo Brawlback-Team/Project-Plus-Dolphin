@@ -32,6 +32,7 @@
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FifoPlayer/FifoRecorder.h"
 #include "Core/HW/Memmap.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/AbstractFramebuffer.h"
@@ -2213,8 +2214,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
   bool copy_to_vram = g_backend_info.bSupportsCopyToVram && !g_ActiveConfig.bDisableCopyToVRAM;
   bool copy_to_ram =
-      !(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||
-      !copy_to_vram;
+      (!(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||
+       !copy_to_vram) &&
+      !Rollback::IsGekkoSessionActive();
 
   // tex_w and tex_h are the native size of the texture in the GC memory.
   // The size scaled_* represents the emulated texture. Those differ
