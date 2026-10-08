@@ -5,11 +5,14 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <functional>
+#include <span>
 #include <string>
 #include <type_traits>
 
+#include "Common/Buffer.h"
 #include "Common/CommonTypes.h"
 
 namespace Core
@@ -19,6 +22,15 @@ class System;
 
 namespace State
 {
+constexpr std::size_t ROLLBACK_STATE_SECTION_COUNT = 7;
+
+// Byte offsets immediately after each top-level DoState marker. Used only to attribute rollback
+// determinism diagnostics without changing the serialized state format.
+struct RollbackStateLayout
+{
+  std::array<std::size_t, ROLLBACK_STATE_SECTION_COUNT> section_ends{};
+};
+
 // number of states
 static const u32 NUM_STATES = 10;
 
@@ -106,4 +118,10 @@ void UndoLoadState(Core::System& system);
 // for calling back into UI code without introducing a dependency on it in core
 using AfterLoadCallbackFunc = std::function<void()>;
 void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
+
+// In-memory save and load for the rollback core (Core/Rollback): no files, no compression, no
+// OSD. Call inside a Rollback::SnapshotScope.
+std::size_t SaveToBufferForRollback(Core::System& system, Common::UniqueBuffer<u8>& buffer,
+                                    RollbackStateLayout* layout = nullptr);
+bool LoadFromBufferForRollback(Core::System& system, std::span<u8> buffer);
 }  // namespace State

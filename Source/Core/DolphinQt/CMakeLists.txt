@@ -478,6 +478,7 @@ PRIVATE
   uicommon
   imgui
   implot
+  GekkoNet
 )
 
 if(ENABLE_SDL)

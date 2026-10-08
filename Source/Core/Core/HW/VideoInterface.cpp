@@ -29,6 +29,7 @@
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Movie.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 #include "DiscIO/Enums.h"
@@ -875,6 +876,7 @@ void VideoInterfaceManager::BeginField(FieldType field, u64 ticks)
   // going to change the VI registers while a frame is scanning out.
   if (Config::Get(Config::GFX_HACK_EARLY_XFB_OUTPUT))
     OutputField(field, ticks);
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VIBeginField);
 }
 
 void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
@@ -892,12 +894,13 @@ void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
   // That setting intends to minimize input latency and throttling would be counterproductive.
   // The Rush Frame Presentation setting is handled by Throttle itself.
   const bool is_vblank_data_wanted = !g_ActiveConfig.bImmediateXFB;
-  if (is_vblank_data_wanted)
+  if (is_vblank_data_wanted && !Rollback::IsGekkoSessionActive())
     m_system.GetCoreTiming().Throttle(ticks);
 
   m_system.GetPerfMetrics().CountVBlank();
   m_system.GetVideoEvents().vi_end_field_event.Trigger();
   Core::OnFrameEnd(m_system);
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VIEndField);
 }
 
 // Purpose: Send VI interrupt when triggered
@@ -950,7 +953,8 @@ void VideoInterfaceManager::Update(u64 ticks)
   if (m_half_line_count == m_half_line_of_next_si_poll)
   {
     // Throttle before SI poll so user input is taken just before needed. (lower input latency)
-    core_timing.Throttle(ticks);
+    if (!Rollback::IsGekkoSessionActive())
+      core_timing.Throttle(ticks);
 
     Core::UpdateInputGate(!Config::Get(Config::MAIN_INPUT_BACKGROUND_INPUT),
                           Config::Get(Config::MAIN_LOCK_CURSOR));
@@ -976,6 +980,12 @@ void VideoInterfaceManager::Update(u64 ticks)
   {
     m_half_line_count = 0;
   }
+
+  Rollback::UpdatePreciseVITailArm(
+      m_half_line_count == m_odd_field_first_hl ||
+          m_half_line_count == m_even_field_first_hl,
+      m_half_line_count == m_odd_field_last_hl || m_half_line_count == m_even_field_last_hl,
+      m_half_line_count == odd_field_begin || m_half_line_count == even_field_begin);
 
   if (!(m_half_line_count & 1))
   {

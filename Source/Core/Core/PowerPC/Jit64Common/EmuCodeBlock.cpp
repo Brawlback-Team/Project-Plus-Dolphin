@@ -3,7 +3,9 @@
 
 #include "Core/PowerPC/Jit64Common/EmuCodeBlock.h"
 
+#include <cstddef>
 #include <functional>
+#include <optional>
 
 #include "Common/Assert.h"
 #include "Common/CPUDetect.h"
@@ -18,6 +20,8 @@
 #include "Core/PowerPC/Jit64Common/Jit64PowerPCState.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
 #include "Core/System.h"
 
 using namespace Gen;
@@ -137,9 +141,199 @@ FixupBranch EmuCodeBlock::CheckIfSafeAddress(const OpArg& reg_value, X64Reg reg_
   return J_CC(CC_Z, m_far_code.Enabled() ? Jump::Near : Jump::Short);
 }
 
-void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int accessSize, s32 offset,
-                                       bool swap, MovInfo* info)
+void EmuCodeBlock::EmitJITDirtyBitmapUpdate(X64Reg reg_addr, s32 offset, u32 size,
+                                            BitSet32 registers_to_preserve)
 {
+  ASSERT(size != 0);
+  auto& bitmap = Rollback::JITDirtyBitmap::Get();
+  // Full-scan benchmark mode makes snapshot boundaries find changes without JIT instrumentation.
+  if (!bitmap.ShouldEmitUpdates())
+    return;
+
+  // RSCRATCH and RSCRATCH2 are normally dead here. Preserve them only when they carry the store's
+  // address/value; preserve allocatable RSCRATCH_EXTRA only when the register cache says it is live.
+  registers_to_preserve |= BitSet32{static_cast<int>(reg_addr)};
+  const bool preserve_scratch = registers_to_preserve[RSCRATCH];
+  const bool preserve_scratch2 = registers_to_preserve[RSCRATCH2];
+  const bool preserve_extra = size > 1 && registers_to_preserve[RSCRATCH_EXTRA];
+  if (preserve_scratch)
+    PUSH(RSCRATCH);
+  if (preserve_scratch2)
+    PUSH(RSCRATCH2);
+  if (preserve_extra)
+    PUSH(RSCRATCH_EXTRA);
+
+  if (reg_addr != RSCRATCH)
+    MOV(32, R(RSCRATCH), R(reg_addr));
+  if (offset != 0)
+    ADD(32, R(RSCRATCH), Imm32(static_cast<u32>(offset)));
+  if (size > 1)
+    MOV(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
+
+  const bool tracking_active = bitmap.IsEnabled();
+  const bool have_fake_vmem = m_jit.m_system.GetMemory().GetFakeVMEM() != nullptr;
+  const bool optimized_gc_path = tracking_active && have_fake_vmem;
+  constexpr X64Reg bitmap_base = RSCRATCH2;
+  if (!optimized_gc_path)
+    MOV(64, R(bitmap_base), Imm64(reinterpret_cast<u64>(&bitmap)));
+  // DirtyPages clears the JIT block lookup cache whenever tracking changes. Blocks compiled while
+  // tracking is active can therefore omit this test. A block that is executing when tracking is
+  // armed was compiled with the guarded path and observes the atomic flag immediately, so stores
+  // later in that same block are still captured.
+  std::optional<FixupBranch> tracking_disabled;
+  if (!tracking_active)
+  {
+    CMP(8,
+        MDisp(bitmap_base,
+              static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, tracking_enabled))),
+        Imm8(0));
+    tracking_disabled = J_CC(CC_E, Jump::Near);
+  }
+
+  const u32 fake_vmem_mask = m_jit.m_system.GetMemory().GetFakeVMemMask();
+  const auto canonicalize = [&](X64Reg address) {
+    if (!have_fake_vmem)
+      return;
+
+    // Dolphin's fake-MMU BATs mirror FakeVMEM through 0x4xxxxxxx and 0x7xxxxxxx. Active rollback
+    // blocks can use RDX as temporary storage until the bitmap base is materialized, so classify by
+    // top nibble instead of running four full-address range comparisons on every GC store.
+    if (!tracking_active)
+    {
+      CMP(32, R(address), Imm32(0x40000000u));
+      const FixupBranch below_first = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x50000000u));
+      const FixupBranch first_alias = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x70000000u));
+      const FixupBranch between_aliases = J_CC(CC_B, Jump::Near);
+      CMP(32, R(address), Imm32(0x80000000u));
+      const FixupBranch above_aliases = J_CC(CC_AE, Jump::Near);
+      SetJumpTarget(first_alias);
+      AND(32, R(address), Imm32(fake_vmem_mask));
+      OR(32, R(address), Imm32(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL));
+      const FixupBranch canonicalized = J(Jump::Near);
+      SetJumpTarget(below_first);
+      SetJumpTarget(between_aliases);
+      SetJumpTarget(above_aliases);
+      SetJumpTarget(canonicalized);
+      return;
+    }
+
+    MOV(32, R(RSCRATCH2), R(address));
+    SHR(32, R(RSCRATCH2), Imm8(28));
+    CMP(32, R(RSCRATCH2), Imm8(4));
+    const FixupBranch first_alias = J_CC(CC_E, Jump::Near);
+    CMP(32, R(RSCRATCH2), Imm8(7));
+    const FixupBranch not_alias = J_CC(CC_NE, Jump::Near);
+    SetJumpTarget(first_alias);
+    AND(32, R(address), Imm32(fake_vmem_mask));
+    OR(32, R(address), Imm32(Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL));
+    SetJumpTarget(not_alias);
+  };
+
+  canonicalize(RSCRATCH);
+  AND(32, R(RSCRATCH), Imm32(0x1FFFFFFFu));
+  SHR(32, R(RSCRATCH), Imm8(12));
+
+  // Keep Wii and guarded pre-session blocks byte-for-byte in their original order. In
+  // particular, issue the first bitmap mark before calculating a possible second page so its
+  // store can overlap that address work. Only the active GC FakeVMEM path needs RDX temporarily.
+  if (!optimized_gc_path)
+  {
+    MOV(8, MComplex(bitmap_base, RSCRATCH, SCALE_1,
+                    static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
+        Imm8(1));
+  }
+
+  if (size > 1)
+  {
+    ADD(32, R(RSCRATCH_EXTRA), Imm32(size - 1));
+    canonicalize(RSCRATCH_EXTRA);
+    AND(32, R(RSCRATCH_EXTRA), Imm32(0x1FFFFFFFu));
+    SHR(32, R(RSCRATCH_EXTRA), Imm8(12));
+  }
+
+  if (optimized_gc_path)
+  {
+    MOV(64, R(bitmap_base), Imm64(reinterpret_cast<u64>(&bitmap)));
+    MOV(8, MComplex(bitmap_base, RSCRATCH, SCALE_1,
+                    static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
+        Imm8(1));
+  }
+
+  if (size > 1)
+  {
+    CMP(32, R(RSCRATCH_EXTRA), R(RSCRATCH));
+    const FixupBranch same_page = J_CC(CC_E, Jump::Near);
+    MOV(8, MComplex(bitmap_base, RSCRATCH_EXTRA, SCALE_1,
+                    static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries))),
+        Imm8(1));
+    SetJumpTarget(same_page);
+  }
+
+  if (tracking_disabled)
+    SetJumpTarget(*tracking_disabled);
+
+  if (preserve_extra)
+    POP(RSCRATCH_EXTRA);
+  if (preserve_scratch2)
+    POP(RSCRATCH2);
+  if (preserve_scratch)
+    POP(RSCRATCH);
+}
+
+void EmuCodeBlock::EmitJITDirtyBitmapUpdate(u32 address, u32 size, X64Reg value_reg)
+{
+  ASSERT(size != 0);
+  auto& bitmap = Rollback::JITDirtyBitmap::Get();
+  if (!bitmap.ShouldEmitUpdates())
+    return;
+
+  // Pick the always-scratch register that does not contain the value being stored.
+  const X64Reg scratch = value_reg == RSCRATCH ? RSCRATCH2 : RSCRATCH;
+  MOV(64, R(scratch), Imm64(reinterpret_cast<u64>(&bitmap)));
+  std::optional<FixupBranch> tracking_disabled;
+  if (!bitmap.IsEnabled())
+  {
+    CMP(8, MDisp(scratch, static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, tracking_enabled))),
+        Imm8(0));
+    tracking_disabled = J_CC(CC_E, Jump::Near);
+  }
+
+  const auto canonicalize = [this](u32 value) {
+    auto& memory = m_jit.m_system.GetMemory();
+    const u32 top_nibble = value >> 28;
+    if (memory.GetFakeVMEM() && (top_nibble == 0x4 || top_nibble == 0x7))
+    {
+      return Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL |
+             (value & memory.GetFakeVMemMask());
+    }
+    return value & 0x1fffffffu;
+  };
+  const u32 first_page = canonicalize(address) / Rollback::DIRTY_PAGE_SIZE;
+  const u32 last_page =
+      canonicalize(address + size - 1) / Rollback::DIRTY_PAGE_SIZE;
+  MOV(8, MDisp(scratch, static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries) + first_page)),
+      Imm8(1));
+  if (last_page != first_page)
+  {
+    MOV(8, MDisp(scratch, static_cast<s32>(offsetof(Rollback::JITDirtyBitmap, entries) + last_page)),
+        Imm8(1));
+  }
+
+  if (tracking_disabled)
+    SetJumpTarget(*tracking_disabled);
+}
+
+void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int accessSize, s32 offset,
+                                       bool swap, MovInfo* info, BitSet32 registers_in_use)
+{
+  // Before info is taken, so the bitmap update stays inside the backpatched region. The slow path
+  // that a fault backpatches to marks the page itself.
+  if (reg_value.IsSimpleReg())
+    registers_in_use |= BitSet32{static_cast<int>(reg_value.GetSimpleReg())};
+  EmitJITDirtyBitmapUpdate(reg_addr, offset, static_cast<u32>(accessSize >> 3), registers_in_use);
+
   if (info)
   {
     info->address = GetWritableCodePtr();
@@ -164,9 +358,10 @@ void EmuCodeBlock::UnsafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acc
 }
 
 void EmuCodeBlock::UnsafeWriteRegToReg(Gen::X64Reg reg_value, Gen::X64Reg reg_addr, int accessSize,
-                                       s32 offset, bool swap, Gen::MovInfo* info)
+                                       s32 offset, bool swap, Gen::MovInfo* info,
+                                       BitSet32 registers_in_use)
 {
-  UnsafeWriteRegToReg(R(reg_value), reg_addr, accessSize, offset, swap, info);
+  UnsafeWriteRegToReg(R(reg_value), reg_addr, accessSize, offset, swap, info, registers_in_use);
 }
 
 bool EmuCodeBlock::UnsafeLoadToReg(X64Reg reg_value, OpArg opAddress, int accessSize, s32 offset,
@@ -508,7 +703,7 @@ void EmuCodeBlock::SafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acces
   {
     u8* backpatchStart = GetWritableCodePtr();
     MovInfo mov;
-    UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, offset, swap, &mov);
+    UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, offset, swap, &mov, registersInUse);
     TrampolineInfo& info = m_back_patch_info[mov.address];
     info.pc = js.compilerPC;
     info.nonAtomicSwapStoreSrc = mov.nonAtomicSwapStore ? mov.nonAtomicSwapStoreSrc : INVALID_REG;
@@ -554,7 +749,7 @@ void EmuCodeBlock::SafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acces
   if (fast_check_address)
   {
     FixupBranch slow = CheckIfSafeAddress(reg_value, reg_addr, registersInUse);
-    UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, 0, swap);
+    UnsafeWriteRegToReg(reg_value, reg_addr, accessSize, 0, swap, nullptr, registersInUse);
     if (m_far_code.Enabled())
       SwitchToFarCode();
     else
@@ -691,6 +886,7 @@ void EmuCodeBlock::WriteToConstRamAddress(int accessSize, OpArg arg, u32 address
   if (arg.IsImm())
   {
     arg = SwapImmediate(accessSize, arg);
+    EmitJITDirtyBitmapUpdate(address, static_cast<u32>(accessSize >> 3), INVALID_REG);
     MOV(32, R(RSCRATCH), Imm32(address));
     MOV(accessSize, MRegSum(RMEM, RSCRATCH), arg);
     return;
@@ -706,6 +902,7 @@ void EmuCodeBlock::WriteToConstRamAddress(int accessSize, OpArg arg, u32 address
     reg = arg.GetSimpleReg();
   }
 
+  EmitJITDirtyBitmapUpdate(address, static_cast<u32>(accessSize >> 3), reg);
   MOV(32, R(RSCRATCH2), Imm32(address));
   if (swap)
     SwapAndStore(accessSize, MRegSum(RMEM, RSCRATCH2), reg);

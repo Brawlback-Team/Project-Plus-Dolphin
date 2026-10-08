@@ -23,6 +23,8 @@
 #include "Common/Assert.h"
 #endif
 #if defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
+#include <signal.h>
+
 #include "Common/Thread.h"
 #endif
 
@@ -192,8 +194,8 @@ static void ExceptionThread(mach_port_t port)
 
     thread_state64_t* state = (thread_state64_t*)msg_in.old_state;
 
-    bool ok =
-        Core::System::GetInstance().GetJitInterface().HandleFault((uintptr_t)msg_in.code[1], state);
+    bool ok = Core::System::GetInstance().GetJitInterface().HandleFault((uintptr_t)msg_in.code[1],
+                                                                        state);
 
     // Set up the reply.
     msg_out.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(msg_in.Head.msgh_bits), 0);

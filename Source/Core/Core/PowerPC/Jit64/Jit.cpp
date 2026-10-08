@@ -3,6 +3,7 @@
 
 #include "Core/PowerPC/Jit64/Jit.h"
 
+#include <chrono>
 #include <map>
 #include <span>
 #include <sstream>
@@ -46,6 +47,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 using namespace Gen;
@@ -781,7 +783,17 @@ void Jit64::Trace()
 
 void Jit64::Jit(u32 em_address)
 {
+  const bool measure_resim_compile = Rollback::IsResimulating();
+  const auto compile_start = std::chrono::steady_clock::now();
   Jit(em_address, true);
+  if (measure_resim_compile)
+  {
+    const u64 nanoseconds = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             compile_start)
+            .count());
+    Rollback::RecordResimJitCompile(nanoseconds);
+  }
 }
 
 void Jit64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)

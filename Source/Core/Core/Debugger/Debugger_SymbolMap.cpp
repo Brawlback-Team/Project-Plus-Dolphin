@@ -122,7 +122,7 @@ void PrintCallstack(const Core::CPUThreadGuard& guard, Common::Log::LogType type
 void PrintDataBuffer(const Core::System& system, Common::Log::LogType type, u32 address, u32 size,
                      std::string_view title)
 {
-  const u8* data = system.GetMemory().GetPointerForRange(address, size);
+  const u8* data = system.GetMemory().GetPointerForRangeReadOnly(address, size);
 
   GENERIC_LOG_FMT(type, Common::Log::LogLevel::LDEBUG, "{}", title);
   for (u32 j = 0; j < size;)

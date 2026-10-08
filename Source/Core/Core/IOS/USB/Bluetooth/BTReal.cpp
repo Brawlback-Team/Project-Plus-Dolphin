@@ -24,6 +24,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/Device.h"
 #include "Core/IOS/USB/Host.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/OnScreenDisplay.h"
@@ -300,7 +301,8 @@ void BluetoothRealDevice::TryToFillACLEndpoint()
 
   // Throttle to minimize input latency.
   auto& core_timing = GetSystem().GetCoreTiming();
-  core_timing.Throttle(core_timing.GetTicks());
+  if (!Rollback::IsGekkoSessionActive())
+    core_timing.Throttle(core_timing.GetTicks());
 
   const auto buffer = m_lib_usb_bt_adapter->ReceiveACLData();
   if (buffer.empty())

@@ -53,6 +53,8 @@
 #include "Core/HW/DSP.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/GBAPad.h"
+#include "Core/Rollback/GekkoRollback.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/HW.h"
@@ -280,6 +282,8 @@ void Stop(Core::System& system)  // - Hammertime!
   HostDispatchJobs(system);
 
   system.GetFifo().EmulatorState(false);
+
+  Rollback::StopGekkoSession();
 
   INFO_LOG_FMT(CONSOLE, "Stop [Main Thread]\t\t---- Shutting down ----");
 
@@ -579,7 +583,6 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   HW::Init(system,
            NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
-
   Common::ScopeGuard hw_guard{[&system] {
     INFO_LOG_FMT(CONSOLE, "{}", StopMessage(false, "Shutting down HW"));
     HW::Shutdown(system);
@@ -890,6 +893,7 @@ void Callback_NewField(Core::System& system)
   }
 
   AchievementManager::GetInstance().DoFrame();
+  Rollback::SignalVIBoundary(Rollback::FrameBoundary::VINewField);
 }
 
 void UpdateTitle(Core::System& system)

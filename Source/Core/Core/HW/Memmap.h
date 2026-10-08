@@ -58,6 +58,9 @@ struct LogicalMemoryView
 {
   void* mapped_pointer;
   u32 mapped_size;
+  // The guest physical address the view starts at, and whether it is mapped writeable.
+  u32 physical_address;
+  bool writeable;
 };
 
 class MemoryManager
@@ -107,6 +110,13 @@ public:
   void DoState(PointerWrap& p);
 
   void UpdateDBATMappings(const PowerPC::BatTable& dbat_table);
+  // A further mapping of MEM1 (or MEM2) that nothing else uses, so rollback snapshots can read and
+  // restore pages whatever their protection elsewhere. Made on first use; null if it can't be.
+  u8* GetRollbackAlias(bool exram);
+  bool HasPageTableMappings() const { return !m_page_table_mapped_entries.empty(); }
+  // The JIT dirty bitmap derives a physical page by masking the effective address. This is exact
+  // only for the normal mirrored BAT layout and cannot represent page-table mappings.
+  bool HasNonCanonicalMappingsForRollback() const;
   void AddPageTableMapping(u32 logical_address, u32 translated_address, bool writeable);
   void RemovePageTableMappings(const std::set<u32>& mappings);
   void RemoveAllPageTableMappings();
@@ -124,6 +134,9 @@ public:
 
   // If the specified range is within a single valid memory region, returns a pointer to the start
   // of the corresponding range in host memory. Otherwise, returns nullptr.
+  // Use the read-only form when the caller cannot write through the returned pointer; the legacy
+  // form conservatively marks the range because its mutable pointer may be used as an output.
+  u8* GetPointerForRangeReadOnly(u32 address, size_t size) const;
   u8* GetPointerForRange(u32 address, size_t size) const;
   void CopyFromEmu(void* data, u32 address, size_t size) const;
   void CopyToEmu(u32 address, const void* data, size_t size);
@@ -144,7 +157,7 @@ public:
   template <typename T>
   void CopyFromEmuSwapped(T* data, u32 address, size_t size) const
   {
-    const T* src = reinterpret_cast<T*>(GetPointerForRange(address, size));
+    const T* src = reinterpret_cast<T*>(GetPointerForRangeReadOnly(address, size));
 
     if (src == nullptr)
       return;
@@ -195,6 +208,8 @@ private:
   u8* m_exram = nullptr;
   u8* m_l1_cache = nullptr;
   u8* m_fake_vmem = nullptr;
+  // GetRollbackAlias's mappings of MEM1 and MEM2.
+  std::array<u8*, 2> m_rollback_alias{};
 
   // m_ram_size is the amount allocated by the emulator, whereas m_ram_size_real
   // is what will be reported in lowmem, and thus used by emulated software.
@@ -271,7 +286,7 @@ private:
   // TODO: Do we want to handle the mirrors of the GC RAM?
   std::array<PhysicalMemoryRegion, 4> m_physical_regions{};
 
-  // The key is the logical address
+  // The key is the logical address the view is mapped at
   std::map<u32, LogicalMemoryView> m_dbat_mapped_entries;
   std::map<u32, LogicalMemoryView> m_page_table_mapped_entries;
 

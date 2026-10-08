@@ -389,6 +389,9 @@ public:
   u32 GetTicksPerHalfLine() const;
   u32 GetTicksPerField() const;
 
+  // Exposes the serialized VI phase for lightweight rollback boundary diagnostics.
+  u32 GetHalfLineCount() const { return m_half_line_count; }
+
   // Not adjusted by VBI Clock Override.
   u32 GetNominalTicksPerHalfLine() const;
 

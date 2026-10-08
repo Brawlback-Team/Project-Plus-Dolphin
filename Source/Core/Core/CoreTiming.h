@@ -20,6 +20,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -75,6 +76,20 @@ struct Event
   }
 };
 
+struct RollbackThrottleStats
+{
+  u64 normal_calls = 0;
+  u64 normal_requested_ns = 0;
+  u64 normal_requested_max_ns = 0;
+  u64 normal_actual_ns = 0;
+  u64 normal_actual_max_ns = 0;
+  u64 post_burst_calls = 0;
+  u64 post_burst_requested_ns = 0;
+  u64 post_burst_requested_max_ns = 0;
+  u64 post_burst_actual_ns = 0;
+  u64 post_burst_actual_max_ns = 0;
+};
+
 enum class FromThread
 {
   CPU,
@@ -103,6 +118,18 @@ public:
   u64 GetTicks() const;
   u64 GetIdleTicks() const;
   TimePoint GetTargetHostTime(s64 target_cycle);
+
+  // Orca rollback pacing (CPU thread). The throttle maps an emulated cycle to a host time. A
+  // rollback restores that reference once the re-run catches up, so the rollback's cost is made up
+  // instead of delaying every later frame. ResetThrottleToNow drops any lead or lag.
+  std::pair<s64, TimePoint> GetThrottleReference() const;
+  void SetThrottleReference(const std::pair<s64, TimePoint>& reference);
+  void ResetThrottleToNow();
+  RollbackThrottleStats TakeRollbackThrottleStats();
+
+  // Rollback timesync scale (set by netplay, read by throttle). 1.0 means no adjustment;
+  // values above 1.0 speed up the host throttle limit, below 1.0 slow it down.
+  void SetTimesyncScale(float scale);
 
   void RefreshConfig();
 
@@ -161,6 +188,7 @@ public:
 
   // Throttle the CPU to the specified target cycle.
   void Throttle(const s64 target_cycle);
+  void ThrottleForRollbackBoundary(const s64 target_cycle);
 
   // May be used from CPU or GPU thread.
   void SleepUntil(TimePoint time_point);
@@ -240,6 +268,11 @@ private:
   // Used to optionally minimize throttling for improving input latency.
   std::atomic_bool m_throttled_after_presentation = false;
   DT m_max_throttle_skip_time{};
+
+  // Rollback timesync scale applied to the per-frame throttle target.
+  float m_timesync_scale = 1.0f;
+  bool m_rollback_throttle_pending = false;
+  RollbackThrottleStats m_rollback_throttle_stats{};
 };
 
 }  // namespace CoreTiming

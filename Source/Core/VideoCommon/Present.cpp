@@ -3,12 +3,17 @@
 
 #include "VideoCommon/Present.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+
 #include "Common/ChunkFile.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/Host.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
@@ -22,6 +27,7 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/VideoState.h"
 #include "VideoCommon/Widescreen.h"
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -980,18 +986,163 @@ void Presenter::Present(PresentInfo* present_info)
   {
     std::lock_guard<std::mutex> guard(m_swap_mutex);
 
+    double presentation_wait_ms = 0.0;
+
     if (present_info != nullptr)
     {
       const auto present_time = GetUpdatedPresentationTime(present_info->intended_present_time);
 
+      const TimePoint wait_start = Clock::now();
       Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
+      presentation_wait_ms =
+          std::chrono::duration<double, std::milli>(Clock::now() - wait_start).count();
 
       // Perhaps in the future a more accurate time can be acquired from the various backends.
       present_info->actual_present_time = Clock::now();
       present_info->present_time_accuracy = PresentInfo::PresentTimeAccuracy::PresentInProgress;
     }
 
+    const TimePoint backend_start = Clock::now();
     g_gfx->PresentBackbuffer();
+    const double backend_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - backend_start).count();
+
+    // Measure actual submissions to the window system. Correlating them with completed rollback
+    // bursts distinguishes time spent replaying from presentation waits and ordinary frame work.
+    static std::optional<TimePoint> s_last_present_time;
+    static std::array<double, 300> s_intervals{};
+    static std::size_t s_interval_count = 0;
+    static double s_interval_sum = 0.0;
+    static double s_interval_squared_sum = 0.0;
+    static double s_wait_sum = 0.0;
+    static double s_backend_sum = 0.0;
+    static u64 s_over_20 = 0;
+    static u64 s_over_25 = 0;
+    static u64 s_over_33 = 0;
+    static u64 s_over_50 = 0;
+    static u64 s_long_short_pairs = 0;
+    static std::optional<double> s_previous_interval;
+    static u64 s_last_burst_serial = 0;
+    static u64 s_burst_intervals = 0;
+    static u64 s_bursts_observed = 0;
+    static double s_burst_interval_sum = 0.0;
+    static double s_burst_duration_sum = 0.0;
+    static double s_burst_wait_sum = 0.0;
+    static double s_burst_backend_sum = 0.0;
+    static double s_burst_end_to_present_sum = 0.0;
+    static u64 s_clean_intervals = 0;
+    static double s_clean_interval_sum = 0.0;
+    const TimePoint actual_present_time = Clock::now();
+    const u64 actual_present_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(actual_present_time.time_since_epoch())
+            .count());
+    const Rollback::RollbackBurstMarker burst = Rollback::GetLastRollbackBurst();
+    if (!s_last_present_time)
+      s_last_burst_serial = burst.serial;
+    if (s_last_present_time)
+    {
+      const double interval_ms =
+          std::chrono::duration<double, std::milli>(actual_present_time - *s_last_present_time)
+              .count();
+      s_intervals[s_interval_count++] = interval_ms;
+      s_interval_sum += interval_ms;
+      s_interval_squared_sum += interval_ms * interval_ms;
+      s_wait_sum += presentation_wait_ms;
+      s_backend_sum += backend_ms;
+      s_over_20 += interval_ms > 20.0;
+      s_over_25 += interval_ms > 25.0;
+      s_over_33 += interval_ms > (100.0 / 3.0);
+      s_over_50 += interval_ms > 50.0;
+      if (s_previous_interval && *s_previous_interval > 25.0 && interval_ms < 10.0)
+        ++s_long_short_pairs;
+      s_previous_interval = interval_ms;
+
+      const u64 previous_present_ns = static_cast<u64>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              s_last_present_time->time_since_epoch())
+              .count());
+      const bool contains_burst = burst.serial != s_last_burst_serial &&
+                                  burst.end_time_ns > previous_present_ns &&
+                                  burst.end_time_ns <= actual_present_ns;
+      if (contains_burst)
+      {
+        ++s_burst_intervals;
+        s_bursts_observed += burst.serial - s_last_burst_serial;
+        s_burst_interval_sum += interval_ms;
+        s_burst_duration_sum += static_cast<double>(burst.duration_ns) / 1'000'000.0;
+        s_burst_wait_sum += presentation_wait_ms;
+        s_burst_backend_sum += backend_ms;
+        s_burst_end_to_present_sum +=
+            static_cast<double>(actual_present_ns - burst.end_time_ns) / 1'000'000.0;
+      }
+      else
+      {
+        ++s_clean_intervals;
+        s_clean_interval_sum += interval_ms;
+      }
+      s_last_burst_serial = burst.serial;
+
+      if (s_interval_count == s_intervals.size())
+      {
+        std::array<double, 300> sorted = s_intervals;
+        std::ranges::sort(sorted);
+        const auto percentile = [&sorted](double fraction) {
+          const std::size_t index = static_cast<std::size_t>(
+              std::ceil(fraction * static_cast<double>(sorted.size() - 1)));
+          return sorted[index];
+        };
+        const double mean = s_interval_sum / static_cast<double>(s_interval_count);
+        const double variance = std::max(
+            0.0, s_interval_squared_sum / static_cast<double>(s_interval_count) - mean * mean);
+        const auto average = [](double total, u64 count) { return count ? total / count : 0.0; };
+        NOTICE_LOG_FMT(
+            CORE,
+            "Present cadence: interval min/p50/p90/p95/p99/max {:.3f}/{:.3f}/{:.3f}/{:.3f}/"
+            "{:.3f}/{:.3f} ms, avg {:.3f}, stddev {:.3f}; gaps >20/>25/>33.3/>50 "
+            "{}/{}/{}/{}; long-to-short pairs {} (300)",
+            sorted.front(), percentile(0.50), percentile(0.90), percentile(0.95),
+            percentile(0.99), sorted.back(), mean, std::sqrt(variance), s_over_20, s_over_25,
+            s_over_33, s_over_50, s_long_short_pairs);
+        NOTICE_LOG_FMT(
+            CORE,
+            "Present rollback correlation: burst intervals {} ({} bursts), interval {:.3f} ms, "
+            "burst {:.3f} ms, burst-end-to-present {:.3f} ms, present-wait {:.3f} ms, backend "
+            "{:.3f} ms, remainder {:.3f} ms; clean intervals {} avg {:.3f} ms; all present-wait "
+            "{:.3f} ms, backend {:.3f} ms",
+            s_burst_intervals, s_bursts_observed,
+            average(s_burst_interval_sum, s_burst_intervals),
+            average(s_burst_duration_sum, s_burst_intervals),
+            average(s_burst_end_to_present_sum, s_burst_intervals),
+            average(s_burst_wait_sum, s_burst_intervals),
+            average(s_burst_backend_sum, s_burst_intervals),
+            average(s_burst_interval_sum - s_burst_duration_sum - s_burst_wait_sum -
+                        s_burst_backend_sum,
+                    s_burst_intervals),
+            s_clean_intervals, average(s_clean_interval_sum, s_clean_intervals),
+            s_wait_sum / static_cast<double>(s_interval_count),
+            s_backend_sum / static_cast<double>(s_interval_count));
+        s_interval_count = 0;
+        s_interval_sum = 0.0;
+        s_interval_squared_sum = 0.0;
+        s_wait_sum = 0.0;
+        s_backend_sum = 0.0;
+        s_over_20 = 0;
+        s_over_25 = 0;
+        s_over_33 = 0;
+        s_over_50 = 0;
+        s_long_short_pairs = 0;
+        s_burst_intervals = 0;
+        s_bursts_observed = 0;
+        s_burst_interval_sum = 0.0;
+        s_burst_duration_sum = 0.0;
+        s_burst_wait_sum = 0.0;
+        s_burst_backend_sum = 0.0;
+        s_burst_end_to_present_sum = 0.0;
+        s_clean_intervals = 0;
+        s_clean_interval_sum = 0.0;
+      }
+    }
+    s_last_present_time = actual_present_time;
   }
 
   if (m_xfb_entry)
@@ -1069,8 +1220,9 @@ void Presenter::DoState(PointerWrap& p)
   p.Do(m_last_xfb_stride);
   p.Do(m_last_xfb_height);
 
-  // If we're loading and there is a last XFB, re-display it.
-  if (p.IsReadMode() && m_last_xfb_stride != 0)
+  // If we're loading and there is a last XFB, re-display it. (Orca: not on a rollback load; the
+  // re-run frames present the corrected frame themselves.)
+  if (p.IsReadMode() && m_last_xfb_stride != 0 && VideoCommon_LoadRedisplays())
   {
     // This technically counts as the end of the frame
     GetVideoEvents().after_frame_event.Trigger(Core::System::GetInstance());

@@ -38,6 +38,9 @@
 #include "Core/HW/Memmap.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 namespace DSP
@@ -78,7 +81,11 @@ constexpr int DSP_MAIL_SLICE = 72;
 
 void DSPManager::DoState(PointerWrap& p)
 {
-  if (!m_aram.wii_mode)
+  const bool tracked_rollback_aram =
+      !m_aram.wii_mode && Rollback::InSnapshotDoState() &&
+      Rollback::DirtyPages::IsTrackingArea(m_aram.ptr, Rollback::DirtyPages::GC_ARAM_PHYSICAL,
+                                           m_aram.size);
+  if (!m_aram.wii_mode && !tracked_rollback_aram)
     p.DoArray(m_aram.ptr, m_aram.size);
   p.Do(m_dsp_control);
   p.Do(m_audio_dma);
@@ -535,6 +542,15 @@ void DSPManager::Do_ARAM_DMA()
 
     if (m_aram_dma.ARAddr < m_aram.size)
     {
+      const u32 dirty_address = m_aram_dma.ARAddr;
+      const u32 dirty_size = m_aram_dma.Cnt.count;
+      MarkARAMRangeDirty(dirty_address, dirty_size);
+      // ARAM mode 4 mirrors the first 4 MB into the following 4 MB.
+      if ((m_aram_info.Hex & 0xf) == 4 && dirty_address < 0x400000)
+      {
+        MarkARAMRangeDirty(dirty_address + 0x400000,
+                           std::min(dirty_size, 0x400000u - dirty_address));
+      }
       while (m_aram_dma.Cnt.count)
       {
         if ((m_aram_info.Hex & 0xf) == 3)
@@ -611,6 +627,21 @@ void DSPManager::WriteARAM(u8 value, u32 address)
 {
   // TODO: verify this on Wii
   m_aram.ptr[address & m_aram.mask] = value;
+  MarkARAMRangeDirty(address, 1);
+}
+
+void DSPManager::MarkARAMRangeDirty(u32 address, u32 size)
+{
+  if (size == 0)
+    return;
+
+  const u32 offset = address & m_aram.mask;
+  const u32 first_size = std::min(size, m_aram.size - offset);
+  const u32 physical_base =
+      m_aram.wii_mode ? 0x10000000u : Rollback::DirtyPages::GC_ARAM_PHYSICAL;
+  Rollback::MarkPhysicalRangeDirty(physical_base + offset, first_size);
+  if (size > first_size)
+    Rollback::MarkPhysicalRangeDirty(physical_base, std::min(size - first_size, m_aram.size));
 }
 
 u8* DSPManager::GetARAMPtr() const

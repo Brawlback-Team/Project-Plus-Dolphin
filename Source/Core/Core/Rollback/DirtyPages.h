@@ -1,0 +1,83 @@
+// Copyright 2026 YouGame
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// Rollback snapshots of guest memory (MEM1, MEM2, GameCube FakeVMEM, and standalone GameCube ARAM)
+// that copy only what changed.
+//
+// Writes are tracked by the dirty page bitmap (DirtyBitmap.h). The tracker keeps a mirror of RAM as
+// it was at the newest snapshot. A snapshot copies the pages the bitmap marks, and only those whose
+// bytes really differ from the mirror, into the newest undo log before the new snapshot opens.
+// Restores and checksums are rebuilt from the mirror and the logs.
+//
+// Invariant: a page that is not marked dirty has the same bytes live as in the mirror. Every guest
+// RAM write must therefore set the bitmap: JIT stores do it inline, and the other writers go
+// through MemoryManager pointer accessors (GetPointerForRange) or call MarkPhysicalRangeDirty.
+//
+// Threading: the CPU thread drives this, and the bitmap can be set from other threads, so all
+// tracker state is behind a lock. One snapshot ring owns the tracker at a time.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+#include "Common/CommonTypes.h"
+
+namespace Core
+{
+class System;
+}
+
+namespace Rollback::DirtyPages
+{
+// Standalone GameCube ARAM has no guest CPU physical address. Reserve an otherwise unused part of
+// the dirty bitmap so it can use the same undo logs as MEM1 and MEM2.
+constexpr u32 GC_ARAM_PHYSICAL = 0x18000000u;
+// FakeVMEM is exposed at 0x7e000000, but the bitmap has one entry per byte in the lower 512 MB.
+// Masking its physical address to that bitmap gives this collision-free canonical range.
+constexpr u32 GC_FAKE_VMEM_PHYSICAL = 0x1e000000u;
+// A tracked region of guest physical memory and a host mapping of it that the tracker can read and
+// write freely.
+struct Area
+{
+  u8* alias;
+  u32 physical_address;
+  u32 size;
+};
+
+// Starts tracking `areas` for `owner` (a snapshot ring). False if another owner is tracking, the
+// areas are unaligned, or the host's JIT does not set the bitmap.
+bool Arm(const void* owner, const std::vector<Area>& areas, bool force_full_scan);
+// Arm over MEM1 and MEM2 of the running machine.
+bool ArmForSystem(Core::System& system, const void* owner, bool force_full_scan);
+// Stops tracking if `owner` holds it and drops every log.
+void Disarm(const void* owner);
+bool IsArmedFor(const void* owner);
+// True when the active tracker owns this exact host memory range.
+bool IsTrackingArea(const u8* alias, u32 physical_address, u32 size);
+
+// Takes a snapshot and opens an empty undo log for it. Returns its id (never 0).
+u64 Snapshot();
+bool Has(u64 id);
+// Puts RAM back as it was at snapshot `id`, calling changed() for each 32-byte guest cache line
+// whose contents differed. Newer snapshots are dropped and `id` becomes the newest, with an empty
+// log. False if `id` is not held.
+bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed,
+             bool tracked_bitmap_clear);
+// Forgets snapshot `id`; its saved pages merge into the next older snapshot's log.
+void Drop(u64 id);
+// Memmap calls this when the host mappings of guest RAM change. Tracking stops if RAM is now
+// reachable through page tables, which the bitmap cannot see.
+void OnMappingsChanged(Core::System& system);
+// Stops tracking regardless of owner. Must run before the RAM mappings are removed.
+void StopTracking();
+
+struct Counters
+{
+  u64 dirty_pages = 0;     // pages found dirty at snapshots and restores
+  u64 pages_recorded = 0;  // changed pages saved into undo logs
+};
+Counters GetCounters();
+}  // namespace Rollback::DirtyPages

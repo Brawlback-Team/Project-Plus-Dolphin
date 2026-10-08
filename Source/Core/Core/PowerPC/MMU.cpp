@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -53,6 +54,9 @@
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/DirtyBitmap.h"
+#include "Core/Rollback/DirtyPages.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/EFBInterface.h"
@@ -469,7 +473,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
       m_ppc_state.dCache.Write(m_memory, em_address, &swapped_data, size, HID0(m_ppc_state).DLOCK);
 
     if (!m_ppc_state.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+    {
       std::memcpy(&m_memory.GetRAM()[em_address], &swapped_data, size);
+      Rollback::MarkPhysicalRangeDirty(em_address, size);
+    }
 
     return;
   }
@@ -486,7 +493,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
     }
 
     if (!m_ppc_state.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+    {
       std::memcpy(&m_memory.GetEXRAM()[em_address], &swapped_data, size);
+      Rollback::MarkPhysicalRangeDirty(0x10000000u + em_address, size);  // MEM2
+    }
 
     return;
   }
@@ -498,6 +508,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
   {
     std::memcpy(&m_memory.GetFakeVMEM()[em_address & m_memory.GetFakeVMemMask()], &swapped_data,
                 size);
+    Rollback::MarkPhysicalRangeDirty(
+        Rollback::DirtyPages::GC_FAKE_VMEM_PHYSICAL |
+            (em_address & m_memory.GetFakeVMemMask()),
+        size);
     return;
   }
 
@@ -2074,7 +2088,18 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
 template <std::unsigned_integral T>
 Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
 {
-  return mmu.Read<T>(address);
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
+  const Common::MakeAtLeastU32<T> result = mmu.Read<T>(address);
+  if (profile)
+  {
+    Rollback::RecordResimJitMemoryHelper(
+        false, static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count()));
+  }
+  return result;
 }
 template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
 template u32 ReadFromJit<u16>(MMU& mmu, u32 address);
@@ -2084,7 +2109,17 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
 template <std::unsigned_integral T>
 void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write<T>(var, address);
+  if (profile)
+  {
+    Rollback::RecordResimJitMemoryHelper(
+        true, static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count()));
+  }
 }
 template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
 template void WriteFromJit<u16>(MMU& mmu, u32 var, u32 address);
@@ -2092,14 +2127,38 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
 template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
 void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U16_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 void WriteU32SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U32_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 void WriteU64SwapFromJit(MMU& mmu, u64 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U64_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 }  // namespace PowerPC

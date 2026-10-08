@@ -20,6 +20,7 @@
 #include "Core/HW/DVD/AMMediaboard.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/Memmap.h"
+#include "Core/Rollback/DirtyBitmap.h"
 #include "Core/System.h"
 
 static bool s_interrupt_set = false;
@@ -158,6 +159,7 @@ void CEXIBaseboard::DMARead(u32 addr, u32 size)
   NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: Backup DMA Read: {:08x} {:x}", addr, size);
 
   m_backup.Seek(m_backup_offset, File::SeekOrigin::Begin);
+  Rollback::MarkPhysicalRangeDirty(addr, size);
   m_backup.ReadBytes(span.data(), size);
 }
 

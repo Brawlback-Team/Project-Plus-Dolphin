@@ -42,9 +42,18 @@ extern const Info<u32> NETPLAY_CHUNKED_UPLOAD_LIMIT;
 extern const Info<u32> NETPLAY_MINIMUM_BUFFER_SIZE;
 extern const Info<u32> NETPLAY_PLAYER_BUFFER_SIZE;
 extern const Info<u32> NETPLAY_CLIENT_BUFFER_SIZE;
+extern const Info<u32> NETPLAY_ROLLBACK_FRAMES;
+extern const Info<u32> NETPLAY_ROLLBACK_INPUT_DELAY;
+extern const Info<u32> NETPLAY_ROLLBACK_FRAME_BOUNDARY;
 
 extern const Info<bool> NETPLAY_BRAWL_MUSIC_OFF;
 extern const Info<bool> NETPLAY_SPECTATOR_MODE;
+extern const Info<bool> NETPLAY_ROLLBACK_DEBUG_P2_CSTICK;
+extern const Info<bool> NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2;
+extern const Info<bool> NETPLAY_ROLLBACK_STRESS_TEST;
+extern const Info<bool> NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR;
+extern const Info<bool> NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK;
+extern const Info<bool> NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM;
 
 extern const Info<bool> NETPLAY_SAVEDATA_LOAD;
 extern const Info<bool> NETPLAY_SAVEDATA_WRITE;

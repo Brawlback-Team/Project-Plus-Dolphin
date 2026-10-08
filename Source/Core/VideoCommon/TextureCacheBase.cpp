@@ -32,6 +32,7 @@
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FifoPlayer/FifoRecorder.h"
 #include "Core/HW/Memmap.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/AbstractFramebuffer.h"
@@ -57,6 +58,7 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
+#include "VideoCommon/VideoState.h"
 
 static const u64 TEXHASH_INVALID = 0;
 // Sonic the Fighters (inside Sonic Gems Collection) loops a 64 frames animation
@@ -1843,7 +1845,7 @@ RcTcacheEntry TextureCacheBase::GetXFBTexture(u32 address, u32 width, u32 height
 
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
-  const u8* src_data = memory.GetPointerForRange(address, total_size);
+  const u8* src_data = memory.GetPointerForRangeReadOnly(address, total_size);
   if (!src_data)
   {
     ERROR_LOG_FMT(VIDEO, "Trying to load XFB texture from invalid address {:#010x}", address);
@@ -2212,8 +2214,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
   bool copy_to_vram = g_backend_info.bSupportsCopyToVram && !g_ActiveConfig.bDisableCopyToVRAM;
   bool copy_to_ram =
-      !(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||
-      !copy_to_vram;
+      (!(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||
+       !copy_to_vram) &&
+      !Rollback::IsGekkoSessionActive();
 
   // tex_w and tex_h are the native size of the texture in the GC memory.
   // The size scaled_* represents the emulated texture. Those differ
@@ -2264,6 +2267,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   if (dst == nullptr)
   {
     ERROR_LOG_FMT(VIDEO, "Trying to copy from EFB to invalid address {:#010x}", dstAddr);
+    return;
+  }
+
+  // Orca: no GPU copy on a skipped frame. A texture-only copy still writes its placeholder, so
+  // RAM matches a rendered frame; a copy to RAM leaves the old pixels.
+  if (VideoCommon_IsSkippingRender())
+  {
+    if (!copy_to_ram)
+    {
+      if (is_xfb_copy)
+        UninitializeXFBMemory(dst, dstStride, bytes_per_row, num_blocks_y);
+      else
+        UninitializeEFBMemory(dst, dstStride, bytes_per_row, num_blocks_y);
+    }
     return;
   }
 

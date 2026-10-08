@@ -396,6 +396,7 @@ add_library(core
   IOS/FS/HostBackend/File.cpp
   IOS/FS/HostBackend/FS.cpp
   IOS/FS/HostBackend/FS.h
+  IOS/FS/HostBackend/Journal.cpp
   IOS/IOS.cpp
   IOS/IOS.h
   IOS/IOSC.cpp
@@ -571,6 +572,15 @@ add_library(core
   PowerPC/SignatureDB/SignatureDB.h
   State.cpp
   State.h
+  Rollback/DirtyPages.cpp
+  Rollback/DirtyPages.h
+  Rollback/DirtyBitmap.h
+  Rollback/GekkoRollback.cpp
+  Rollback/GekkoRollback.h
+  Rollback/Rollback.cpp
+  Rollback/Rollback.h
+  Rollback/UndoLog.cpp
+  Rollback/UndoLog.h
   SyncIdentifier.h
   SysConf.cpp
   SysConf.h
@@ -699,8 +709,10 @@ PUBLIC
 PRIVATE
   FatFs
   fmt::fmt
+  GekkoNet
   LZO::LZO
   LZ4::LZ4
+  xxhash::xxhash
   ZLIB::ZLIB
 )
 

@@ -461,6 +461,7 @@ void Jit64::dcbz(UGeckoInstruction inst)
     FixupBranch slow = J_CC(CC_Z, Jump::Near);
 
     // Fast path: compute full address, then zero out 32 bytes of memory.
+    EmitJITDirtyBitmapUpdate(RSCRATCH, 0, 32);
     if (cpu_info.bAVX)
     {
       VXORPS(XMM0, XMM0, R(XMM0));

@@ -16,6 +16,7 @@
 #include "Core/HW/SystemTimers.h"
 #include "Core/Movie.h"
 #include "Core/NetPlayProto.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
 
@@ -144,12 +145,15 @@ GCPadStatus CSIDevice_GCController::GetPadStatus()
 
   // For netplay, the local controllers are polled in GetNetPads(), and
   // the remote controllers receive their status there as well
-  if (!NetPlay::IsNetPlayRunning())
+  if (!NetPlay::IsNetPlayRunning() || Rollback::IsGekkoSessionActive())
   {
     pad_status = Pad::GetStatus(m_device_number);
   }
 
   HandleMoviePadStatus(m_system.GetMovie(), m_device_number, &pad_status);
+
+  if (const auto rb_pad = Rollback::GetRollbackPad(m_device_number))
+    pad_status = *rb_pad;
 
   // Our GCAdapter code sets PAD_GET_ORIGIN when a new device has been connected.
   // Watch for this to calibrate real controllers on connection.

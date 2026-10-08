@@ -123,6 +123,7 @@ struct NetSettings
   bool golf_mode = false;
   bool use_fma = false;
   bool hide_remote_gbas = false;
+  u8 rollback_frame_boundary = 0;
 
   Sram sram;
 
@@ -176,6 +177,7 @@ enum class MessageID : u8
   PadHostData = 0x63,
   GBAConfig = 0x64,
   PadBufferPlayer = 0x66,
+  GekkoInputDelay = 0x67,
 
   WiimoteData = 0x70,
   WiimoteMapping = 0x71,
@@ -197,7 +199,6 @@ enum class MessageID : u8
 
   TimeBase = 0xB0,
   DesyncDetected = 0xB1,
-
   ComputeGameDigest = 0xC0,
   GameDigestProgress = 0xC1,
   GameDigestResult = 0xC2,

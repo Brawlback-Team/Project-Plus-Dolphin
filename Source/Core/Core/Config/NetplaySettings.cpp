@@ -44,9 +44,25 @@ const Info<u32> NETPLAY_CHUNKED_UPLOAD_LIMIT{{System::Main, "NetPlay", "ChunkedU
 const Info<u32> NETPLAY_MINIMUM_BUFFER_SIZE{{System::Main, "NetPlay", "MinimumBufferSize"}, 3};
 const Info<u32> NETPLAY_PLAYER_BUFFER_SIZE{{System::Main, "NetPlay", "PlayerBufferSize"}, 3};
 const Info<u32> NETPLAY_CLIENT_BUFFER_SIZE{{System::Main, "NetPlay", "BufferSizeClient"}, 1};
+const Info<u32> NETPLAY_ROLLBACK_FRAMES{{System::Main, "NetPlay", "RollbackFrames"}, 7};
+const Info<u32> NETPLAY_ROLLBACK_INPUT_DELAY{{System::Main, "NetPlay", "RollbackInputDelay"}, 2};
+const Info<u32> NETPLAY_ROLLBACK_FRAME_BOUNDARY{
+    {System::Main, "NetPlay", "RollbackFrameBoundary"}, 3};
 
 const Info<bool> NETPLAY_BRAWL_MUSIC_OFF{{System::Main, "NetPlay", "BrawlMusicOff"}, false};
 const Info<bool> NETPLAY_SPECTATOR_MODE{{System::Main, "NetPlay", "IsSpectator"}, false};
+const Info<bool> NETPLAY_ROLLBACK_DEBUG_P2_CSTICK{
+    {System::Main, "NetPlay", "RollbackDebugP2CStick"}, false};
+const Info<bool> NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2{
+    {System::Main, "NetPlay", "RollbackSimulateRemoteP2"}, false};
+const Info<bool> NETPLAY_ROLLBACK_STRESS_TEST{
+    {System::Main, "NetPlay", "RollbackStressTest7F3F"}, false};
+const Info<bool> NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR{
+    {System::Main, "NetPlay", "RollbackTrackedBitmapClear"}, false};
+const Info<bool> NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK{
+    {System::Main, "NetPlay", "RollbackFullScanBenchmark"}, false};
+const Info<bool> NETPLAY_ROLLBACK_COMPARE_CONFIRMED_RAM{
+    {System::Main, "NetPlay", "RollbackCompareConfirmedRAM"}, false};
 
 const Info<bool> NETPLAY_SAVEDATA_LOAD{{System::Main, "NetPlay", "SyncSaves"}, true};
 const Info<bool> NETPLAY_SAVEDATA_WRITE{{System::Main, "NetPlay", "WriteSaveData"}, false};

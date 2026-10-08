@@ -24,6 +24,8 @@ Dolphin includes or links code of the following third-party software projects:
    [BSD 1-Clause](http://elm-chan.org/fsw/ff/doc/appnote.html#license)
 - [GCEmu](http://sourceforge.net/projects/gcemu-project/):
    GPLv2+
+- [GekkoNet](https://github.com/NyxTheShield/RMG-Gekkonet):
+   [BSD 2-Clause](GekkoNet/LICENSE)
 - [gettext](https://www.gnu.org/software/gettext/):
    [GPLv3+](http://git.savannah.gnu.org/cgit/gettext.git/tree/COPYING)
 - [googletest](https://github.com/google/googletest):

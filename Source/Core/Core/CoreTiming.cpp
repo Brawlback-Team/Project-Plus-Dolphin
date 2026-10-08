@@ -4,8 +4,11 @@
 #include "Core/CoreTiming.h"
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -21,8 +24,12 @@
 #include "Core/CPUThreadConfigCallback.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/SystemTimers.h"
+#include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Rollback/GekkoRollback.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/Fifo.h"
@@ -35,6 +42,30 @@
 namespace CoreTiming
 {
 static constexpr int MAX_SLICE_LENGTH = 20000;
+struct ResimGuestSliceStart
+{
+  std::chrono::steady_clock::time_point time;
+  u32 pc;
+};
+static std::optional<ResimGuestSliceStart> s_resim_guest_start;
+
+Rollback::ResimEventCategory ClassifyResimEvent(std::string_view name)
+{
+  if (name == "SyncGPUCallback")
+    return Rollback::ResimEventCategory::Fifo;
+  if (name == "VICallback" || name == "GPUSleeper")
+    return Rollback::ResimEventCategory::VideoInterface;
+  if (name == "DSPCallback" || name == "AudioDMACallback" || name == "AICallback" ||
+      name == "DSPint" || name == "ARAMint")
+    return Rollback::ResimEventCategory::DspAudio;
+  if (name.find("IPC") != std::string_view::npos || name.starts_with("IOS") ||
+      name == "FinishDICommand")
+    return Rollback::ResimEventCategory::IosIpc;
+  if (name.starts_with("SI") || name.starts_with("EXI") ||
+      name.find("DVD") != std::string_view::npos)
+    return Rollback::ResimEventCategory::Devices;
+  return Rollback::ResimEventCategory::Other;
+}
 
 static void EmptyTimedCallback(Core::System& system, u64 userdata, s64 cyclesLate)
 {
@@ -346,6 +377,24 @@ void CoreTimingManager::MoveEvents()
 
 void CoreTimingManager::Advance()
 {
+  const bool profile_resim = Rollback::IsResimulating();
+  const auto profile_start = profile_resim ? std::chrono::steady_clock::now() :
+                                             std::chrono::steady_clock::time_point{};
+  u64 profile_guest_nanoseconds = 0;
+  u32 profile_guest_pc = 0;
+  if (profile_resim && s_resim_guest_start)
+  {
+    profile_guest_nanoseconds = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(profile_start -
+                                                             s_resim_guest_start->time)
+            .count());
+    profile_guest_pc = s_resim_guest_start->pc;
+    Rollback::RecordResimEvent(
+        Rollback::ResimEventCategory::GuestCpu, profile_guest_nanoseconds);
+  }
+  const Rollback::ResimEventStats profile_events_start =
+      profile_resim ? Rollback::GetResimEventStats() : Rollback::ResimEventStats{};
+
   CPUThreadConfigCallback::CheckForConfigChanges();
 
   MoveEvents();
@@ -354,6 +403,11 @@ void CoreTimingManager::Advance()
   auto& ppc_state = power_pc.GetPPCState();
 
   int cyclesExecuted = m_globals.slice_length - DowncountToCycles(ppc_state.downcount);
+  if (profile_guest_nanoseconds != 0)
+  {
+    Rollback::RecordResimGuestSlice(profile_guest_pc, profile_guest_nanoseconds,
+                                    static_cast<u64>(std::max(cyclesExecuted, 0)));
+  }
   m_globals.global_timer += cyclesExecuted;
   m_last_oc_factor = m_config_oc_factor;
   m_globals.last_OC_factor_inverted = m_config_oc_inv_factor;
@@ -366,7 +420,26 @@ void CoreTimingManager::Advance()
     Event evt = m_event_queue.front();
     std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
     m_event_queue.pop_back();
-    evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+    // FIFO work is measured inside RunGpuOnCpu so synchronous register-access runs are included
+    // and the scheduled SyncGPU callback does not count the same work twice.
+    if (Rollback::IsResimulating() && *evt.type->name != "SyncGPUCallback")
+    {
+      const auto start = std::chrono::steady_clock::now();
+      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+      const auto elapsed = std::chrono::steady_clock::now() - start;
+      Rollback::RecordResimEvent(
+          ClassifyResimEvent(*evt.type->name),
+          static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+    }
+    else
+    {
+      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+    }
+
+    // Do not let later overdue events (in particular VI's scheduled SI poll) cross the rollback
+    // boundary before GekkoNet has selected the input for the new frame.
+    if (Rollback::IsVIBoundaryPending())
+      break;
   }
 
   m_is_global_timer_sane = false;
@@ -375,7 +448,8 @@ void CoreTimingManager::Advance()
   if (!m_event_queue.empty())
   {
     m_globals.slice_length = static_cast<int>(
-        std::min<s64>(m_event_queue.front().time - m_globals.global_timer, MAX_SLICE_LENGTH));
+        std::clamp<s64>(m_event_queue.front().time - m_globals.global_timer, 0,
+                        MAX_SLICE_LENGTH));
   }
 
   ppc_state.downcount = CyclesToDowncount(m_globals.slice_length);
@@ -385,18 +459,86 @@ void CoreTimingManager::Advance()
   // until the next slice:
   //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
   power_pc.CheckExternalExceptions();
+
+  if (profile_resim)
+  {
+    const auto elapsed = std::chrono::steady_clock::now() - profile_start;
+    const Rollback::ResimEventStats events_now = Rollback::GetResimEventStats();
+    u64 callback_nanoseconds = 0;
+    for (std::size_t i = 0; i < events_now.nanoseconds.size(); ++i)
+    {
+      if (i != static_cast<std::size_t>(Rollback::ResimEventCategory::CoreTiming))
+        callback_nanoseconds += events_now.nanoseconds[i] - profile_events_start.nanoseconds[i];
+    }
+    const u64 total_nanoseconds = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    Rollback::RecordResimEvent(Rollback::ResimEventCategory::CoreTiming,
+                               total_nanoseconds > callback_nanoseconds ?
+                                   total_nanoseconds - callback_nanoseconds :
+                                   0);
+  }
+
+  if (Rollback::IsResimulating())
+    s_resim_guest_start = ResimGuestSliceStart{std::chrono::steady_clock::now(), ppc_state.pc};
+  else
+    s_resim_guest_start.reset();
 }
 
 TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)
 {
   const s64 elapsed_cycles = target_cycle - m_throttle_reference_cycle;
+  // Apply rollback timesync scale: scale > 1.0 speeds up (shorter wait), < 1.0 slows down.
+  const double effective_clock =
+      static_cast<double>(m_throttle_adj_clock_per_sec) * m_timesync_scale;
+  const auto scaled_duration =
+      Clock::duration{std::chrono::seconds{elapsed_cycles}} / effective_clock;
   return m_throttle_reference_time +
-         Clock::duration{std::chrono::seconds{elapsed_cycles}} / m_throttle_adj_clock_per_sec;
+         Clock::duration{static_cast<s64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             scaled_duration).count())};
 }
 
 bool CoreTimingManager::IsSpeedUnlimited() const
 {
-  return m_throttle_adj_clock_per_sec == 0 || Core::GetIsThrottlerTempDisabled();
+  // Orca: frames re-run after a rollback load catch up to the present as fast as possible.
+  return m_throttle_adj_clock_per_sec == 0 || Core::GetIsThrottlerTempDisabled() ||
+         Rollback::IsResimulating();
+}
+
+std::pair<s64, TimePoint> CoreTimingManager::GetThrottleReference() const
+{
+  return {m_throttle_reference_cycle, m_throttle_reference_time};
+}
+
+void CoreTimingManager::SetThrottleReference(const std::pair<s64, TimePoint>& reference)
+{
+  m_throttle_reference_cycle = reference.first;
+  m_throttle_reference_time = reference.second;
+}
+
+void CoreTimingManager::ResetThrottleToNow()
+{
+  ResetThrottle(static_cast<s64>(GetTicks()));
+}
+
+RollbackThrottleStats CoreTimingManager::TakeRollbackThrottleStats()
+{
+  RollbackThrottleStats result = m_rollback_throttle_stats;
+  m_rollback_throttle_stats = {};
+  return result;
+}
+
+void CoreTimingManager::SetTimesyncScale(float scale)
+{
+  const float clamped_scale = std::clamp(scale, 0.97f, 1.03f);
+  if (clamped_scale == m_timesync_scale)
+    return;
+
+  // Re-anchor before changing the divisor. Otherwise the new scale retroactively shifts the
+  // target for every cycle since the old reference and creates an increasing timing jump.
+  const s64 current_cycle = static_cast<s64>(GetTicks());
+  m_throttle_reference_time = CalculateTargetHostTimeInternal(current_cycle);
+  m_throttle_reference_cycle = current_cycle;
+  m_timesync_scale = clamped_scale;
 }
 
 TimePoint CoreTimingManager::GetTargetHostTime(s64 target_cycle)
@@ -437,6 +579,9 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
 {
   const TimePoint time = Clock::now();
 
+  if (Rollback::IsResimulating())
+    m_rollback_throttle_pending = true;
+
   const bool already_throttled =
       m_throttled_after_presentation.exchange(true, std::memory_order_relaxed);
 
@@ -469,8 +614,12 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
     const s64 sec_adj = (target_cycle - m_throttle_reference_cycle) / m_throttle_adj_clock_per_sec;
     const s64 cycle_adj = sec_adj * m_throttle_adj_clock_per_sec;
 
+    // Carry the scaled target forward. Advancing host time by an unscaled second here erases the
+    // accumulated GekkoNet pacing correction at every reference rollover.
+    const TimePoint adjusted_reference_time =
+        CalculateTargetHostTimeInternal(m_throttle_reference_cycle + cycle_adj);
     m_throttle_reference_cycle += cycle_adj;
-    m_throttle_reference_time += std::chrono::seconds{sec_adj};
+    m_throttle_reference_time = adjusted_reference_time;
   }
 
   TimePoint target_time = CalculateTargetHostTimeInternal(target_cycle);
@@ -491,7 +640,45 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
 
   UpdateVISkip(time, target_time);
 
+  const bool measure_rollback_throttle = Rollback::IsGekkoSessionActive();
+  const bool first_after_burst = measure_rollback_throttle && m_rollback_throttle_pending;
+  const u64 requested_ns =
+      target_time > time ?
+          static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(target_time - time)
+                               .count()) :
+          0;
+  const TimePoint sleep_start = Clock::now();
   SleepUntil(target_time);
+  if (measure_rollback_throttle)
+  {
+    const u64 actual_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - sleep_start).count());
+    ++m_rollback_throttle_stats.normal_calls;
+    m_rollback_throttle_stats.normal_requested_ns += requested_ns;
+    m_rollback_throttle_stats.normal_requested_max_ns =
+        std::max(m_rollback_throttle_stats.normal_requested_max_ns, requested_ns);
+    m_rollback_throttle_stats.normal_actual_ns += actual_ns;
+    m_rollback_throttle_stats.normal_actual_max_ns =
+        std::max(m_rollback_throttle_stats.normal_actual_max_ns, actual_ns);
+    if (first_after_burst)
+    {
+      ++m_rollback_throttle_stats.post_burst_calls;
+      m_rollback_throttle_stats.post_burst_requested_ns += requested_ns;
+      m_rollback_throttle_stats.post_burst_requested_max_ns =
+          std::max(m_rollback_throttle_stats.post_burst_requested_max_ns, requested_ns);
+      m_rollback_throttle_stats.post_burst_actual_ns += actual_ns;
+      m_rollback_throttle_stats.post_burst_actual_max_ns =
+          std::max(m_rollback_throttle_stats.post_burst_actual_max_ns, actual_ns);
+      m_rollback_throttle_pending = false;
+    }
+  }
+}
+
+void CoreTimingManager::ThrottleForRollbackBoundary(const s64 target_cycle)
+{
+  // Pace Gekko sessions at their authoritative boundary instead of an earlier controller poll.
+  m_throttled_after_presentation.store(false, std::memory_order_relaxed);
+  Throttle(target_cycle);
 }
 
 void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
@@ -643,7 +830,56 @@ void CoreTimingManager::SetFakeTBStartTicks(u64 val)
 
 void GlobalAdvance()
 {
-  Core::System::GetInstance().GetCoreTiming().Advance();
+  auto& system = Core::System::GetInstance();
+  auto& core_timing = system.GetCoreTiming();
+  auto& ppc_state = system.GetPPCState();
+
+  for (;;)
+  {
+    core_timing.Advance();
+    // A rollback load replaces CoreTiming state. Do it only after Advance has fully returned, never
+    // while Advance still owns local state derived from the timeline being replaced.
+    Rollback::RunPendingVIBoundary(system);
+
+    if (!Rollback::IsPreciseVITailArmed() || ppc_state.npc == 0 ||
+        system.GetCPU().GetState() != CPU::State::Running)
+    {
+      return;
+    }
+
+    const auto tail_start = std::chrono::steady_clock::now();
+    const u64 start_tick = core_timing.GetTicks();
+    const u32 start_pc = ppc_state.pc;
+    u32 instructions = 0;
+    u32 cycles = 0;
+
+    while (ppc_state.downcount > 0 && Rollback::IsPreciseVITailArmed() &&
+           system.GetCPU().GetState() == CPU::State::Running)
+    {
+      const int instruction_cycles = system.GetInterpreter().SingleStepInner();
+      ppc_state.downcount -= instruction_cycles;
+      cycles += static_cast<u32>(instruction_cycles);
+      ++instructions;
+    }
+
+    static u64 s_precise_tail_count = 0;
+    ++s_precise_tail_count;
+    if (Rollback::IsDeterminismDiagnosticsEnabled() &&
+        (s_precise_tail_count <= 16 || s_precise_tail_count % 300 == 0))
+    {
+      const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - tail_start)
+                                  .count();
+      NOTICE_LOG_FMT(CORE,
+                     "GekkoNet precise VI tail #{}: start_tick={}, start_pc={:08x}, "
+                     "instructions={}, cycles={}, final_downcount={}, host_us={}",
+                     s_precise_tail_count, start_tick, start_pc, instructions, cycles,
+                     ppc_state.downcount, elapsed_us);
+    }
+
+    // The interpreter exhausted this timing slice. Advance again here rather than returning to the
+    // JIT, which would otherwise execute one whole block before checking the expired downcount.
+  }
 }
 
 void GlobalIdle()

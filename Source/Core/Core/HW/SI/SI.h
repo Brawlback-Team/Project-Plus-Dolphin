@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <utility>
 
 #include "Common/BitField.h"
 #include "Common/CommonTypes.h"
@@ -65,6 +66,9 @@ public:
   SIDevices GetDeviceType(int channel) const;
 
   u32 GetPollXLines();
+
+  void RelatchInputs();
+  std::pair<u32, u32> GetInputRegisters(u32 channel) const;
 
   static constexpr u32 BUFFER_SIZE = 128;
 
