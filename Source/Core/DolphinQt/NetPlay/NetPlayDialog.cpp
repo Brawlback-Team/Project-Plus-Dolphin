@@ -1338,18 +1338,24 @@ void NetPlayDialog::SaveSettings()
   Config::SetBase(Config::NETPLAY_HIDE_REMOTE_GBAS, m_hide_remote_gbas_action->isChecked());
   Config::SetBase(Config::NETPLAY_BRAWL_MUSIC_OFF, m_brawlmusic_off->isChecked());
   Config::SetBase(Config::NETPLAY_SPECTATOR_MODE, m_spectator_mode->isChecked());
-  Config::SetBase(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK,
-                  m_rollback_debug_p2_cstick_action->isChecked());
-  Config::SetBase(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2,
-                  m_rollback_simulate_remote_p2_action->isChecked());
-  Config::SetBase(Config::NETPLAY_ROLLBACK_STRESS_TEST,
-                  m_rollback_stress_test_action->isChecked());
-  // NetPlay can have a CurrentRun layer active while the lobby remains open. Update whichever
-  // layer currently supplies the value so the next session observes the menu state immediately.
-  Config::SetBaseOrCurrent(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR,
-                           m_rollback_tracked_bitmap_clear_action->isChecked());
-  Config::SetBaseOrCurrent(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK,
-                           m_rollback_full_scan_benchmark_action->isChecked());
+  // Keep test controls persistent while also updating a live CurrentRun layer. SetBaseOrCurrent
+  // alone can select the temporary layer and lose the selection when Dolphin exits.
+  const auto set_rollback_test_setting = [](const Config::Info<bool>& info, bool value) {
+    const Config::LayerType active_layer = Config::GetActiveLayerForConfig(info);
+    Config::SetBase(info, value);
+    if (active_layer != Config::LayerType::Base)
+      Config::SetCurrent(info, value);
+  };
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_DEBUG_P2_CSTICK,
+                            m_rollback_debug_p2_cstick_action->isChecked());
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_SIMULATE_REMOTE_P2,
+                            m_rollback_simulate_remote_p2_action->isChecked());
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_STRESS_TEST,
+                            m_rollback_stress_test_action->isChecked());
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_TRACKED_BITMAP_CLEAR,
+                            m_rollback_tracked_bitmap_clear_action->isChecked());
+  set_rollback_test_setting(Config::NETPLAY_ROLLBACK_FULL_SCAN_BENCHMARK,
+                            m_rollback_full_scan_benchmark_action->isChecked());
 
   std::string network_mode;
   if (m_fixed_delay_action->isChecked())
