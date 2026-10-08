@@ -141,6 +141,7 @@ private:
   void JournalRemoved(const std::string& host_path);
   void JournalWritten(const std::string& host_path, File::IOFile& file, u64 offset, u64 count);
   void JournalRenamed(const std::string& old_host_path, const std::string& new_host_path);
+  void DiagnoseMissingJournalPath(const std::string& host_path) const;
 
   Handle* GetHandleFromFd(Fd fd);
   Fd ConvertHandleToFd(const Handle* handle) const;

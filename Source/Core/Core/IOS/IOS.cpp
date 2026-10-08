@@ -910,6 +910,12 @@ void EmulationKernel::DoState(PointerWrap& p)
           break;
         }
       }
+      else
+      {
+        // A descriptor opened after the state was saved must not survive the load, or the next
+        // open returns a different fd than it did when the state was current.
+        m_fdmap[i].reset();
+      }
     }
   }
   else

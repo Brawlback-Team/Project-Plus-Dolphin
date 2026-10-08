@@ -22,6 +22,10 @@ static void DoStateForMessage(EmulationKernel& ios, PointerWrap& p, std::unique_
     IOCtlVRequest request{ios.GetSystem(), request_address};
     message = std::make_unique<T>(ios, request);
   }
+  else
+  {
+    message.reset();
+  }
 }
 
 void BackUpBTInfoSection(const SysConf* sysconf);

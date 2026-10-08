@@ -68,8 +68,8 @@ constexpr int MAX_PORTS = 4;
 constexpr int RING_SNAPSHOT_SLOTS = 12;
 constexpr int WAIT_SLEEP_US = 100;
 constexpr auto SIMULATED_P2_LATENCY = std::chrono::milliseconds(40);
-constexpr u64 STRESS_PACKET_DELAY_FRAMES = 3;
-constexpr u64 STRESS_INPUT_PERIOD_FRAMES = 10;
+constexpr u64 STRESS_PACKET_DELAY_FRAMES = 7;
+constexpr u64 STRESS_INPUT_PERIOD_FRAMES = 3;
 constexpr std::string_view SIMULATED_P1_ADDRESS = "in-process-p1";
 constexpr std::string_view SIMULATED_P2_ADDRESS = "in-process-p2";
 constexpr u32 BRAWL_FRAME_HOOK_ADDR = 0x80017504;
@@ -901,8 +901,11 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   }
 
   const int clamped_delay = std::clamp(local_delay, 0, 60);
+  // Gekko allows prediction only while prediction_window > frames_already_predicted. The stress
+  // transport therefore needs one slot beyond its seven-frame packet delay, or both simulated
+  // peers reach the cap and stop the emulated frame clock that releases their queued packets.
   const int clamped_prediction =
-      std::clamp(std::max(prediction_window, stress_test ? 3 : 1), 1, 10);
+      std::clamp(std::max(prediction_window, stress_test ? 8 : 1), 1, 10);
 
   GekkoConfig config{};
   config.num_players = static_cast<unsigned char>(players);
@@ -1157,7 +1160,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
       "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, "
       "delay={}, "
       "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-      "simulated_one_way_latency_ms={}, stress_3f_every_10f={}, tracked_bitmap_clear={}, "
+      "simulated_one_way_latency_ms={}, stress_7f_every_3f={}, tracked_bitmap_clear={}, "
       "full_scan_benchmark={}, compare_confirmed_ram={}, frame_boundary={})",
       game_name, players, local_player, session_id, clamped_delay, clamped_prediction,
       g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad", debug_p2_cstick,
@@ -1237,7 +1240,7 @@ static void ApplyDebugCStickPattern(GCPadStatus* status, u64 frame)
 
 static void ApplyStressCStickPattern(GCPadStatus* status, u64 frame)
 {
-  // A transition every ten frames defeats repeat-last-input prediction. Alternating left/right
+  // A transition every three frames defeats repeat-last-input prediction. Alternating left/right
   // avoids a neutral interval whose first prediction could accidentally be correct.
   const bool right = ((frame / STRESS_INPUT_PERIOD_FRAMES) & 1) == 0;
   status->substickX = static_cast<u8>(GCPadStatus::C_STICK_CENTER_X + (right ? 90 : -90));
@@ -1498,6 +1501,7 @@ static void AddSnapshotPhases(SnapshotPhaseTimings* total, const SnapshotPhaseTi
   total->journal_ms += sample.journal_ms;
   total->state_bytes += sample.state_bytes;
   total->changed_blocks += sample.changed_blocks;
+  total->changed_cache_lines += sample.changed_cache_lines;
   total->jit_blocks_invalidated += sample.jit_blocks_invalidated;
 }
 
@@ -1543,7 +1547,7 @@ static void MaybeLogPerformance()
       "delay_measure cfg={} verified={}/{} mismatch={} missing={} observed "
       "{:.2f}/{}/{} frames avg/min/max ({} transitions); "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
-      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_3f_every_10f={}; "
+      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_7f_every_3f={}; "
       "tracked_bitmap_clear={}; full_scan_benchmark={}",
       fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
       g_manager.perf_save_max_ms, g_manager.perf_save_count,
@@ -1605,7 +1609,8 @@ static void MaybeLogPerformance()
       CORE,
       "GekkoNet snapshot phases: save state {:.3f} dirty {:.3f} l1 {:.3f} journal {:.3f} "
       "other {:.3f} ms, state {:.1f} KiB; load dirty {:.3f} jit {:.3f} l1 {:.3f} state "
-      "{:.3f} journal {:.3f} other {:.3f} ms, changed {:.1f} pages, invalidated {:.1f} JIT blocks",
+      "{:.3f} journal {:.3f} other {:.3f} ms, changed {:.1f} pages/{:.1f} cache lines, "
+      "invalidated {:.1f} JIT blocks",
       average(g_manager.perf_save_phases.state_ms, g_manager.perf_save_count),
       average(g_manager.perf_save_phases.dirty_pages_ms, g_manager.perf_save_count),
       average(g_manager.perf_save_phases.l1_ms, g_manager.perf_save_count),
@@ -1623,6 +1628,8 @@ static void MaybeLogPerformance()
       average(std::max(0.0, g_manager.perf_load_ms - load_known_ms),
               g_manager.perf_load_count),
       average(static_cast<double>(g_manager.perf_load_phases.changed_blocks),
+              g_manager.perf_load_count),
+      average(static_cast<double>(g_manager.perf_load_phases.changed_cache_lines),
               g_manager.perf_load_count),
       average(static_cast<double>(g_manager.perf_load_phases.jit_blocks_invalidated),
               g_manager.perf_load_count));
@@ -2003,8 +2010,8 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
         {
           s_stress_frame_delay_active = true;
           s_last_stress_peer_update_frame = 0;
-          NOTICE_LOG_FMT(CORE, "GekkoNet benchmark: deterministic 3-frame packets active; Player 2 "
-                               "changes input every 10 frames");
+          NOTICE_LOG_FMT(CORE, "GekkoNet benchmark: deterministic 7-frame packets active; Player 2 "
+                               "changes input every 3 frames");
         }
         break;
       default:

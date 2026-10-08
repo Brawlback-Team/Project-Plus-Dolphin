@@ -279,10 +279,10 @@ void NetPlayDialog::CreateMainLayout()
          "transitions trigger rollback."));
   m_rollback_simulate_remote_p2_action->setCheckable(true);
   m_rollback_stress_test_action =
-      m_other_menu->addAction(tr("Rollback Benchmark: Force 3F Every 10F"));
+      m_other_menu->addAction(tr("Rollback Benchmark: Force 7F Every 3F"));
   m_rollback_stress_test_action->setToolTip(
-      tr("In a host-alone lobby, run an in-process Player 2 whose input changes every 10 frames "
-         "and whose GekkoNet packets arrive exactly 3 emulated frames late. GekkoNet remains "
+      tr("In a host-alone lobby, run an in-process Player 2 whose input changes every 3 frames "
+         "and whose GekkoNet packets arrive exactly 7 emulated frames late. GekkoNet remains "
          "responsible for detecting and requesting every rollback."));
   m_rollback_stress_test_action->setCheckable(true);
   m_rollback_tracked_bitmap_clear_action =

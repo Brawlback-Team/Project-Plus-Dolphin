@@ -34,6 +34,7 @@ std::atomic<u64> s_resim_jit_compile_blocks{0};
 std::atomic<u64> s_resim_jit_compile_nanoseconds{0};
 
 constexpr std::size_t RESTORE_PAGE = 4096;
+constexpr std::size_t JIT_CACHE_LINE = 32;
 constexpr u32 MEM1_VIRTUAL = 0x80000000u;
 constexpr u32 MEM2_VIRTUAL = 0x90000000u;
 // Effective to physical for MEM1/MEM2 and their uncached mirrors (0x8/0xC -> 0x0, 0x9/0xD -> 0x1).
@@ -48,7 +49,7 @@ double MillisecondsSince(std::chrono::steady_clock::time_point start)
 // have their JIT blocks invalidated; clearing the whole JIT (as a normal state load does) would
 // recompile the hot code after every rollback. Changed pages are collected by physical address.
 void RestoreRam(u8* live, const std::vector<u8>& saved, u32 virtual_base,
-                std::vector<u32>* changed_pages)
+                std::vector<u32>* changed_pages, std::vector<ChangedMemoryRange>* changed_ranges)
 {
   const std::size_t size = saved.size();
   for (std::size_t offset = 0; offset < size; offset += RESTORE_PAGE)
@@ -56,9 +57,18 @@ void RestoreRam(u8* live, const std::vector<u8>& saved, u32 virtual_base,
     const std::size_t length = std::min(RESTORE_PAGE, size - offset);
     if (std::memcmp(live + offset, saved.data() + offset, length) == 0)
       continue;
+    const u32 physical = (virtual_base + static_cast<u32>(offset)) & PHYSICAL_MASK;
+    for (std::size_t line = 0; line < length; line += JIT_CACHE_LINE)
+    {
+      const std::size_t line_length = std::min(JIT_CACHE_LINE, length - line);
+      if (std::memcmp(live + offset + line, saved.data() + offset + line, line_length) != 0)
+      {
+        changed_ranges->push_back(
+            {physical + static_cast<u32>(line), static_cast<u32>(line_length)});
+      }
+    }
     std::memcpy(live + offset, saved.data() + offset, length);
-    const u32 address = virtual_base + static_cast<u32>(offset);
-    changed_pages->push_back(address & PHYSICAL_MASK);
+    changed_pages->push_back(physical);
   }
 }
 
@@ -137,6 +147,7 @@ SnapshotRing::SnapshotRing(std::size_t slots, bool tracked_bitmap_clear, bool fo
       m_force_full_scan(force_full_scan)
 {
   m_changed_blocks.reserve(4096);
+  m_changed_ranges.reserve(32768);
 }
 
 SnapshotRing::~SnapshotRing()
@@ -346,13 +357,19 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   auto& memory = system.GetMemory();
   const auto dirty_start = std::chrono::steady_clock::now();
   m_changed_blocks.clear();
+  m_changed_ranges.clear();
   if (slot->page_snapshot_id != 0)
   {
     // The undo logs of this snapshot and every newer one list exactly the pages written since.
-    if (!DirtyPages::Restore(slot->page_snapshot_id, [this](u32 physical, u32 length) {
-          for (u32 offset = 0; offset < length; offset += static_cast<u32>(RESTORE_PAGE))
-            m_changed_blocks.push_back(physical + offset);
-        }, m_tracked_bitmap_clear))
+    if (!DirtyPages::Restore(
+            slot->page_snapshot_id,
+            [this](u32 physical, u32 length) {
+              m_changed_ranges.push_back({physical, length});
+              const u32 page = physical & ~static_cast<u32>(RESTORE_PAGE - 1);
+              if (m_changed_blocks.empty() || m_changed_blocks.back() != page)
+                m_changed_blocks.push_back(page);
+            },
+            m_tracked_bitmap_clear))
     {
       ERROR_LOG_FMT(CORE, "Rollback: the dirty-page snapshot for frame {} is gone", frame);
       return false;
@@ -362,22 +379,25 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   }
   else
   {
-    RestoreRam(memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &m_changed_blocks);
+    RestoreRam(memory.GetRAM(), slot->mem1, MEM1_VIRTUAL, &m_changed_blocks, &m_changed_ranges);
     if (memory.GetEXRAM() && !slot->mem2.empty())
-      RestoreRam(memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &m_changed_blocks);
+      RestoreRam(memory.GetEXRAM(), slot->mem2, MEM2_VIRTUAL, &m_changed_blocks,
+                 &m_changed_ranges);
   }
   std::sort(m_changed_blocks.begin(), m_changed_blocks.end());
   m_changed_blocks.erase(std::unique(m_changed_blocks.begin(), m_changed_blocks.end()),
                          m_changed_blocks.end());
   m_last_load_timings.dirty_pages_ms = MillisecondsSince(dirty_start);
   m_last_load_timings.changed_blocks = m_changed_blocks.size();
+  m_last_load_timings.changed_cache_lines = m_changed_ranges.size();
   // Standalone ARAM is not CPU executable memory. FakeVMEM's canonical bitmap range maps back to
   // its physical fastmem address for invalidation.
   auto& jit = system.GetJitInterface();
   const std::size_t jit_blocks_before = jit.GetBlockCount();
   const auto jit_start = std::chrono::steady_clock::now();
-  for (const u32 physical : m_changed_blocks)
+  for (const ChangedMemoryRange& range : m_changed_ranges)
   {
+    const u32 physical = range.physical_address;
     if (physical >= DirtyPages::GC_ARAM_PHYSICAL &&
         physical < DirtyPages::GC_ARAM_PHYSICAL + DSP::ARAM_SIZE)
       continue;
@@ -385,7 +405,7 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
                            physical < DirtyPages::GC_FAKE_VMEM_PHYSICAL +
                                           memory.GetFakeVMemSize();
     const u32 effective = fake_vmem ? physical | 0x60000000u : physical | MEM1_VIRTUAL;
-    jit.InvalidateICache(effective, static_cast<u32>(RESTORE_PAGE), true);
+    jit.InvalidateICache(effective, range.length, true);
   }
   ForgetLearnedJitAddresses(system, m_changed_blocks);
   m_last_load_timings.jit_ms = MillisecondsSince(jit_start);

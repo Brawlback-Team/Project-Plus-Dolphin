@@ -23,6 +23,7 @@ namespace Rollback::DirtyPages
 namespace
 {
 constexpr std::size_t PAGE = DIRTY_PAGE_SIZE;
+constexpr std::size_t JIT_CACHE_LINE = 32;
 constexpr u32 MEM2_PHYSICAL = 0x10000000u;
 // Spare page buffers kept ready at each snapshot.
 constexpr std::size_t RESERVE_PAGES = 2048;
@@ -74,14 +75,20 @@ u32 PhysicalOf(const Area& area, std::size_t page_in_area)
   return area.physical_address + static_cast<u32>(page_in_area * PAGE);
 }
 
-// Copies `contents` over the live page at `live` if they differ, reporting the change.
+// Copies `contents` over the live page at `live` if they differ. Report the exact changed guest
+// cache lines so the caller does not invalidate JIT code merely because unrelated data shares its
+// 4 KiB dirty-tracking page.
 void ReplacePage(u8* live, const u8* contents, u32 physical,
                  const std::function<void(u32, u32)>& changed)
 {
   if (std::memcmp(live, contents, PAGE) == 0)
     return;
+  for (std::size_t offset = 0; offset < PAGE; offset += JIT_CACHE_LINE)
+  {
+    if (std::memcmp(live + offset, contents + offset, JIT_CACHE_LINE) != 0)
+      changed(physical + static_cast<u32>(offset), static_cast<u32>(JIT_CACHE_LINE));
+  }
   std::memcpy(live, contents, PAGE);
-  changed(physical, static_cast<u32>(PAGE));
 }
 
 // Settles the pages written since the newest snapshot. A page whose bytes changed keeps its old

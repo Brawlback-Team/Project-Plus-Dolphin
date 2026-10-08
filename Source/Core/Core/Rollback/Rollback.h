@@ -41,6 +41,7 @@ struct SnapshotPhaseTimings
   double journal_ms = 0.0;
   std::size_t state_bytes = 0;
   std::size_t changed_blocks = 0;
+  std::size_t changed_cache_lines = 0;
   std::size_t jit_blocks_invalidated = 0;
 };
 
@@ -48,6 +49,12 @@ struct ResimJitCompileStats
 {
   u64 blocks = 0;
   u64 nanoseconds = 0;
+};
+
+struct ChangedMemoryRange
+{
+  u32 physical_address = 0;
+  u32 length = 0;
 };
 
 // True while a rollback snapshot is being saved or loaded (CPU thread; single core only).
@@ -142,6 +149,7 @@ private:
   std::size_t m_last = 0;
   // Reused by loads to avoid allocating page vectors and unordered-set nodes every rollback.
   std::vector<u32> m_changed_blocks;
+  std::vector<ChangedMemoryRange> m_changed_ranges;
   std::optional<bool> m_dirty_page_tracking;
   const bool m_tracked_bitmap_clear;
   const bool m_force_full_scan;

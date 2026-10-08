@@ -61,9 +61,9 @@ bool IsTrackingArea(const u8* alias, u32 physical_address, u32 size);
 // Takes a snapshot and opens an empty undo log for it. Returns its id (never 0).
 u64 Snapshot();
 bool Has(u64 id);
-// Puts RAM back as it was at snapshot `id`, calling changed() for each 4 KB block that differed.
-// Newer snapshots are dropped and `id` becomes the newest, with an empty log. False if `id` is
-// not held.
+// Puts RAM back as it was at snapshot `id`, calling changed() for each 32-byte guest cache line
+// whose contents differed. Newer snapshots are dropped and `id` becomes the newest, with an empty
+// log. False if `id` is not held.
 bool Restore(u64 id, const std::function<void(u32 physical_address, u32 length)>& changed,
              bool tracked_bitmap_clear);
 // Forgets snapshot `id`; its saved pages merge into the next older snapshot's log.
