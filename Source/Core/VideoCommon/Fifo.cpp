@@ -4,6 +4,7 @@
 #include "VideoCommon/Fifo.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 
 #include "Common/Assert.h"
@@ -20,6 +21,7 @@
 #include "Core/HW/GPFifo.h"
 #include "Core/HW/Memmap.h"
 #include "Core/Host.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/AsyncRequests.h"
@@ -434,6 +436,9 @@ void FifoManager::RunGpu()
 
 int FifoManager::RunGpuOnCpu(int ticks)
 {
+  const bool profile_resim = Rollback::IsResimulating();
+  const auto profile_start = profile_resim ? std::chrono::steady_clock::now() :
+                                             std::chrono::steady_clock::time_point{};
   auto& command_processor = m_system.GetCommandProcessor();
   auto& fifo = command_processor.GetFifo();
   bool reset_simd_state = false;
@@ -487,11 +492,18 @@ int FifoManager::RunGpuOnCpu(int ticks)
   m_sync_ticks.store(std::min(available_ticks, 0));
 
   // If the GPU is idle, drop the handler.
-  if (available_ticks >= 0)
-    return -1;
+  const int next = available_ticks >= 0 ? -1 : -available_ticks + GPU_TIME_SLOT_SIZE;
 
-  // Always wait at least for GPU_TIME_SLOT_SIZE cycles.
-  return -available_ticks + GPU_TIME_SLOT_SIZE;
+  if (profile_resim)
+  {
+    const auto elapsed = std::chrono::steady_clock::now() - profile_start;
+    Rollback::RecordResimEvent(
+        Rollback::ResimEventCategory::Fifo,
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+  }
+
+  // A busy FIFO always waits at least for GPU_TIME_SLOT_SIZE cycles.
+  return next;
 }
 
 void FifoManager::UpdateWantDeterminism(bool want)

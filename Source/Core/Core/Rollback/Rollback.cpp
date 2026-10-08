@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <tuple>
+#include <unordered_map>
 
 #include "Common/FPURoundMode.h"
 #include "Common/Logging/Log.h"
@@ -32,6 +33,9 @@ std::atomic<bool> s_in_snapshot{false};
 std::atomic<bool> s_resimulating{false};
 std::atomic<u64> s_resim_jit_compile_blocks{0};
 std::atomic<u64> s_resim_jit_compile_nanoseconds{0};
+ResimEventStats s_resim_event_stats;
+std::unordered_map<u32, ResimGuestHotspot> s_resim_guest_hotspots;
+ResimJitMemoryStats s_resim_jit_memory_stats;
 
 constexpr std::size_t RESTORE_PAGE = 4096;
 constexpr std::size_t JIT_CACHE_LINE = 32;
@@ -126,6 +130,62 @@ ResimJitCompileStats GetResimJitCompileStats()
 {
   return {s_resim_jit_compile_blocks.load(std::memory_order_relaxed),
           s_resim_jit_compile_nanoseconds.load(std::memory_order_relaxed)};
+}
+
+void RecordResimGuestSlice(u32 pc, u64 nanoseconds, u64 cycles)
+{
+  auto [it, inserted] = s_resim_guest_hotspots.try_emplace(pc);
+  ResimGuestHotspot& hotspot = it->second;
+  if (inserted)
+    hotspot.pc = pc;
+  hotspot.nanoseconds += nanoseconds;
+  hotspot.cycles += cycles;
+  ++hotspot.slices;
+}
+
+std::vector<ResimGuestHotspot> TakeResimGuestHotspots(std::size_t limit)
+{
+  std::vector<ResimGuestHotspot> hotspots;
+  hotspots.reserve(s_resim_guest_hotspots.size());
+  for (const auto& [pc, hotspot] : s_resim_guest_hotspots)
+    hotspots.push_back(hotspot);
+  s_resim_guest_hotspots.clear();
+
+  std::ranges::sort(hotspots, std::greater{}, &ResimGuestHotspot::nanoseconds);
+  if (hotspots.size() > limit)
+    hotspots.resize(limit);
+  return hotspots;
+}
+
+void RecordResimJitMemoryHelper(bool write, u64 nanoseconds)
+{
+  if (write)
+  {
+    ++s_resim_jit_memory_stats.write_calls;
+    s_resim_jit_memory_stats.write_nanoseconds += nanoseconds;
+  }
+  else
+  {
+    ++s_resim_jit_memory_stats.read_calls;
+    s_resim_jit_memory_stats.read_nanoseconds += nanoseconds;
+  }
+}
+
+ResimJitMemoryStats TakeResimJitMemoryStats()
+{
+  return std::exchange(s_resim_jit_memory_stats, {});
+}
+
+void RecordResimEvent(ResimEventCategory category, u64 nanoseconds)
+{
+  const std::size_t index = static_cast<std::size_t>(category);
+  s_resim_event_stats.nanoseconds[index] += nanoseconds;
+  ++s_resim_event_stats.callbacks[index];
+}
+
+ResimEventStats GetResimEventStats()
+{
+  return s_resim_event_stats;
 }
 
 SnapshotScope::SnapshotScope()

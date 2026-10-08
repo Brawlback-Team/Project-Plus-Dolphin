@@ -4,8 +4,11 @@
 #include "Core/CoreTiming.h"
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +40,30 @@
 namespace CoreTiming
 {
 static constexpr int MAX_SLICE_LENGTH = 20000;
+struct ResimGuestSliceStart
+{
+  std::chrono::steady_clock::time_point time;
+  u32 pc;
+};
+static std::optional<ResimGuestSliceStart> s_resim_guest_start;
+
+Rollback::ResimEventCategory ClassifyResimEvent(std::string_view name)
+{
+  if (name == "SyncGPUCallback")
+    return Rollback::ResimEventCategory::Fifo;
+  if (name == "VICallback" || name == "GPUSleeper")
+    return Rollback::ResimEventCategory::VideoInterface;
+  if (name == "DSPCallback" || name == "AudioDMACallback" || name == "AICallback" ||
+      name == "DSPint" || name == "ARAMint")
+    return Rollback::ResimEventCategory::DspAudio;
+  if (name.find("IPC") != std::string_view::npos || name.starts_with("IOS") ||
+      name == "FinishDICommand")
+    return Rollback::ResimEventCategory::IosIpc;
+  if (name.starts_with("SI") || name.starts_with("EXI") ||
+      name.find("DVD") != std::string_view::npos)
+    return Rollback::ResimEventCategory::Devices;
+  return Rollback::ResimEventCategory::Other;
+}
 
 static void EmptyTimedCallback(Core::System& system, u64 userdata, s64 cyclesLate)
 {
@@ -348,6 +375,24 @@ void CoreTimingManager::MoveEvents()
 
 void CoreTimingManager::Advance()
 {
+  const bool profile_resim = Rollback::IsResimulating();
+  const auto profile_start = profile_resim ? std::chrono::steady_clock::now() :
+                                             std::chrono::steady_clock::time_point{};
+  u64 profile_guest_nanoseconds = 0;
+  u32 profile_guest_pc = 0;
+  if (profile_resim && s_resim_guest_start)
+  {
+    profile_guest_nanoseconds = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(profile_start -
+                                                             s_resim_guest_start->time)
+            .count());
+    profile_guest_pc = s_resim_guest_start->pc;
+    Rollback::RecordResimEvent(
+        Rollback::ResimEventCategory::GuestCpu, profile_guest_nanoseconds);
+  }
+  const Rollback::ResimEventStats profile_events_start =
+      profile_resim ? Rollback::GetResimEventStats() : Rollback::ResimEventStats{};
+
   CPUThreadConfigCallback::CheckForConfigChanges();
 
   MoveEvents();
@@ -356,6 +401,11 @@ void CoreTimingManager::Advance()
   auto& ppc_state = power_pc.GetPPCState();
 
   int cyclesExecuted = m_globals.slice_length - DowncountToCycles(ppc_state.downcount);
+  if (profile_guest_nanoseconds != 0)
+  {
+    Rollback::RecordResimGuestSlice(profile_guest_pc, profile_guest_nanoseconds,
+                                    static_cast<u64>(std::max(cyclesExecuted, 0)));
+  }
   m_globals.global_timer += cyclesExecuted;
   m_last_oc_factor = m_config_oc_factor;
   m_globals.last_OC_factor_inverted = m_config_oc_inv_factor;
@@ -368,7 +418,21 @@ void CoreTimingManager::Advance()
     Event evt = m_event_queue.front();
     std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
     m_event_queue.pop_back();
-    evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+    // FIFO work is measured inside RunGpuOnCpu so synchronous register-access runs are included
+    // and the scheduled SyncGPU callback does not count the same work twice.
+    if (Rollback::IsResimulating() && *evt.type->name != "SyncGPUCallback")
+    {
+      const auto start = std::chrono::steady_clock::now();
+      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+      const auto elapsed = std::chrono::steady_clock::now() - start;
+      Rollback::RecordResimEvent(
+          ClassifyResimEvent(*evt.type->name),
+          static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+    }
+    else
+    {
+      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+    }
   }
 
   m_is_global_timer_sane = false;
@@ -388,9 +452,32 @@ void CoreTimingManager::Advance()
   //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
   power_pc.CheckExternalExceptions();
 
+  if (profile_resim)
+  {
+    const auto elapsed = std::chrono::steady_clock::now() - profile_start;
+    const Rollback::ResimEventStats events_now = Rollback::GetResimEventStats();
+    u64 callback_nanoseconds = 0;
+    for (std::size_t i = 0; i < events_now.nanoseconds.size(); ++i)
+    {
+      if (i != static_cast<std::size_t>(Rollback::ResimEventCategory::CoreTiming))
+        callback_nanoseconds += events_now.nanoseconds[i] - profile_events_start.nanoseconds[i];
+    }
+    const u64 total_nanoseconds = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    Rollback::RecordResimEvent(Rollback::ResimEventCategory::CoreTiming,
+                               total_nanoseconds > callback_nanoseconds ?
+                                   total_nanoseconds - callback_nanoseconds :
+                                   0);
+  }
+
   // VI callbacks only identify the requested logical boundary. Run rollback after the complete
   // timing batch so save/load never mutates CoreTiming while its event queue is being dispatched.
   Rollback::RunPendingVIBoundary(m_system);
+
+  if (Rollback::IsResimulating())
+    s_resim_guest_start = ResimGuestSliceStart{std::chrono::steady_clock::now(), ppc_state.pc};
+  else
+    s_resim_guest_start.reset();
 }
 
 TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -55,6 +56,7 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/DirtyPages.h"
+#include "Core/Rollback/Rollback.h"
 #include "Core/System.h"
 
 #include "VideoCommon/EFBInterface.h"
@@ -2086,7 +2088,18 @@ void ClearDCacheLineFromJit(MMU& mmu, u32 address)
 template <std::unsigned_integral T>
 Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
 {
-  return mmu.Read<T>(address);
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
+  const Common::MakeAtLeastU32<T> result = mmu.Read<T>(address);
+  if (profile)
+  {
+    Rollback::RecordResimJitMemoryHelper(
+        false, static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count()));
+  }
+  return result;
 }
 template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
 template u32 ReadFromJit<u16>(MMU& mmu, u32 address);
@@ -2096,7 +2109,17 @@ template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
 template <std::unsigned_integral T>
 void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write<T>(var, address);
+  if (profile)
+  {
+    Rollback::RecordResimJitMemoryHelper(
+        true, static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count()));
+  }
 }
 template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
 template void WriteFromJit<u16>(MMU& mmu, u32 var, u32 address);
@@ -2104,14 +2127,38 @@ template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
 template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
 void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U16_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 void WriteU32SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U32_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 void WriteU64SwapFromJit(MMU& mmu, u64 var, u32 address)
 {
+  const bool profile = Rollback::IsResimulating();
+  const auto start = profile ? std::chrono::steady_clock::now() :
+                               std::chrono::steady_clock::time_point{};
   mmu.Write_U64_Swap(var, address);
+  if (profile)
+    Rollback::RecordResimJitMemoryHelper(true, static_cast<u64>(std::chrono::duration_cast<
+                                                   std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - start)
+                                                   .count()));
 }
 }  // namespace PowerPC

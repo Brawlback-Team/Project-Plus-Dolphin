@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -48,6 +49,7 @@
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/PowerPC/JitInterface.h"
+#include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/Rollback/DirtyBitmap.h"
 #include "Core/Rollback/DirtyPages.h"
@@ -68,7 +70,6 @@ constexpr int MAX_PORTS = 4;
 constexpr int RING_SNAPSHOT_SLOTS = 12;
 constexpr int WAIT_SLEEP_US = 100;
 constexpr auto SIMULATED_P2_LATENCY = std::chrono::milliseconds(40);
-constexpr u64 STRESS_PACKET_DELAY_FRAMES = 7;
 constexpr u64 STRESS_INPUT_PERIOD_FRAMES = 3;
 constexpr std::string_view SIMULATED_P1_ADDRESS = "in-process-p1";
 constexpr std::string_view SIMULATED_P2_ADDRESS = "in-process-p2";
@@ -165,6 +166,7 @@ std::vector<GekkoNetResult*> s_fake_results;
 std::vector<GekkoNetResult*> s_shared_results;
 u64 s_simulated_link_frame = 0;
 u64 s_last_stress_peer_update_frame = 0;
+u64 s_stress_packet_delay_frames = 0;
 bool s_stress_mode = false;
 bool s_stress_frame_delay_active = false;
 
@@ -230,7 +232,7 @@ void QueueSimulatedPacket(std::deque<SimulatedPacket>* destination, const char* 
   packet.data.assign(data, data + length);
   if (s_stress_mode && s_stress_frame_delay_active)
   {
-    packet.delivery_frame = s_simulated_link_frame + STRESS_PACKET_DELAY_FRAMES;
+    packet.delivery_frame = s_simulated_link_frame + s_stress_packet_delay_frames;
     packet.frame_delayed = true;
   }
   else
@@ -308,6 +310,7 @@ void ResetSimulatedLink()
   s_fake_results.clear();
   s_simulated_link_frame = 0;
   s_last_stress_peer_update_frame = 0;
+  s_stress_packet_delay_frames = 0;
   s_stress_mode = false;
   s_stress_frame_delay_active = false;
 }
@@ -412,11 +415,13 @@ struct GekkoManager
   bool frame_execution_resim = false;
   int frame_execution_gekko_frame = -1;
   ResimJitCompileStats frame_execution_jit_start{};
+  ResimEventStats frame_execution_event_start{};
   u64 perf_replay_exec_count = 0;
   double perf_replay_exec_ms = 0.0;
   double perf_replay_exec_max_ms = 0.0;
   u64 perf_replay_jit_blocks = 0;
   u64 perf_replay_jit_nanoseconds = 0;
+  ResimEventStats perf_replay_events{};
   u64 perf_replay_save_count = 0;
   double perf_replay_save_ms = 0.0;
   double perf_replay_save_max_ms = 0.0;
@@ -443,6 +448,10 @@ struct GekkoManager
   u64 perf_real_interval_count = 0;
   double perf_real_interval_ms = 0.0;
   double perf_real_interval_max_ms = 0.0;
+  u64 perf_real_gaps_over_20_ms = 0;
+  u64 perf_real_gaps_over_25_ms = 0;
+  u64 perf_real_gaps_over_33_ms = 0;
+  u64 perf_real_gaps_over_50_ms = 0;
 };
 
 GekkoManager g_manager;
@@ -901,11 +910,12 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   }
 
   const int clamped_delay = std::clamp(local_delay, 0, 60);
+  const int clamped_rollback_window = std::clamp(prediction_window, 1, 10);
   // Gekko allows prediction only while prediction_window > frames_already_predicted. The stress
-  // transport therefore needs one slot beyond its seven-frame packet delay, or both simulated
-  // peers reach the cap and stop the emulated frame clock that releases their queued packets.
+  // transport therefore gets one internal prediction slot beyond the selected rollback distance,
+  // or both simulated peers can reach the cap and stop the emulated clock that releases packets.
   const int clamped_prediction =
-      std::clamp(std::max(prediction_window, stress_test ? 8 : 1), 1, 10);
+      stress_test ? clamped_rollback_window + 1 : clamped_rollback_window;
 
   GekkoConfig config{};
   config.num_players = static_cast<unsigned char>(players);
@@ -1021,11 +1031,13 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.frame_execution_resim = false;
   g_manager.frame_execution_gekko_frame = -1;
   g_manager.frame_execution_jit_start = GetResimJitCompileStats();
+  g_manager.frame_execution_event_start = GetResimEventStats();
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
   g_manager.perf_replay_jit_blocks = 0;
   g_manager.perf_replay_jit_nanoseconds = 0;
+  g_manager.perf_replay_events = {};
   g_manager.perf_replay_save_count = 0;
   g_manager.perf_replay_save_ms = 0.0;
   g_manager.perf_replay_save_max_ms = 0.0;
@@ -1052,6 +1064,10 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.perf_real_interval_count = 0;
   g_manager.perf_real_interval_ms = 0.0;
   g_manager.perf_real_interval_max_ms = 0.0;
+  g_manager.perf_real_gaps_over_20_ms = 0;
+  g_manager.perf_real_gaps_over_25_ms = 0;
+  g_manager.perf_real_gaps_over_33_ms = 0;
+  g_manager.perf_real_gaps_over_50_ms = 0;
   g_manager.throttle_reference_before_load.reset();
 
   for (int p = 1; p <= players; ++p)
@@ -1119,6 +1135,8 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   {
     ResetSimulatedLink();
     s_stress_mode = stress_test;
+    s_stress_packet_delay_frames =
+        stress_test ? static_cast<u64>(clamped_rollback_window) : 0;
     if (!gekko_create(&g_manager.simulated_peer_session, GekkoGameSession))
     {
       ERROR_LOG_FMT(CORE, "GekkoNet: Failed to create simulated player 2 peer session");
@@ -1159,13 +1177,16 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
       CORE,
       "GekkoNet: Started {} shared NetPlay UDP session (players={}, local={}, session={}, "
       "delay={}, "
-      "rollback_window={}, local_input_source={}, debug_p2_cstick={}, simulate_remote_p2={}, "
-      "simulated_one_way_latency_ms={}, stress_7f_every_3f={}, tracked_bitmap_clear={}, "
+      "rollback_window={}, gekko_prediction_window={}, local_input_source={}, "
+      "debug_p2_cstick={}, simulate_remote_p2={}, simulated_one_way_latency_ms={}, "
+      "stress_every_3f={}, stress_rollback_frames={}, tracked_bitmap_clear={}, "
       "full_scan_benchmark={}, compare_confirmed_ram={}, frame_boundary={})",
-      game_name, players, local_player, session_id, clamped_delay, clamped_prediction,
+      game_name, players, local_player, session_id, clamped_delay, clamped_rollback_window,
+      clamped_prediction,
       g_manager.local_uses_gc_adapter ? "gc_adapter" : "emulated_pad", debug_p2_cstick,
       simulate_remote_p2, simulate_remote_p2 && !stress_test ? SIMULATED_P2_LATENCY.count() : 0,
-      stress_test, g_manager.tracked_bitmap_clear, g_manager.full_scan_benchmark,
+      stress_test, s_stress_packet_delay_frames, g_manager.tracked_bitmap_clear,
+      g_manager.full_scan_benchmark,
       g_manager.compare_confirmed_ram, FrameBoundaryName(g_manager.frame_boundary));
   return true;
 }
@@ -1521,7 +1542,7 @@ static void RecordPumpTime(std::chrono::steady_clock::time_point start)
   g_manager.perf_pump_max_ms = std::max(g_manager.perf_pump_max_ms, elapsed);
 }
 
-static void MaybeLogPerformance()
+static void MaybeLogPerformance(Core::System& system)
 {
   constexpr u64 REPORT_FRAMES = 300;
   if (g_manager.perf_real_frames < REPORT_FRAMES)
@@ -1534,12 +1555,17 @@ static void MaybeLogPerformance()
   const auto average = [](double total, u64 count) { return count ? total / count : 0.0; };
   const DirtyPages::Counters dirty_pages = DirtyPages::GetCounters();
   const Common::ENet::RollbackDatagramStats udp = Common::ENet::GetRollbackDatagramStats();
+  const ResimJitMemoryStats jit_memory = TakeResimJitMemoryStats();
+  const std::vector<ResimGuestHotspot> guest_hotspots = TakeResimGuestHotspots(8);
 
   NOTICE_LOG_FMT(
       CORE,
       "GekkoNet perf: {:.1f} fps over {} real frames; save {:.3f}/{:.3f} ms avg/max ({}); "
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
       "replay_exec {:.3f}/{:.3f} ms ({}); replay_jit {:.3f} ms/frame, {:.2f} blocks/frame; "
+      "replay_subsystems cpu_jit {:.3f} unaccounted {:.3f} boundary_setup {:.3f} "
+      "scheduler {:.3f} fifo {:.3f} vi {:.3f} dsp_audio {:.3f} ios_ipc {:.3f} devices {:.3f} "
+      "events_other {:.3f} ms/frame; "
       "replay_save {:.3f}/{:.3f} ms ({}); "
       "burst {:.3f}/{:.3f} ms ({}); burst_parts load {:.3f}/{:.3f} exec {:.3f}/{:.3f} "
       "save {:.3f}/{:.3f} other {:.3f}/{:.3f} ms avg/max; "
@@ -1547,7 +1573,8 @@ static void MaybeLogPerformance()
       "delay_measure cfg={} verified={}/{} mismatch={} missing={} observed "
       "{:.2f}/{}/{} frames avg/min/max ({} transitions); "
       "rollback_depth {:.2f}/{} avg/max; RAM dirty/saved/unchanged pages {}/{}/{}; "
-      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_7f_every_3f={}; "
+      "udp tx/rx/reject {}/{}/{}; ahead={:.2f}; stress_every_3f={}; "
+      "stress_rollback_frames={}; "
       "tracked_bitmap_clear={}; full_scan_benchmark={}",
       fps, g_manager.perf_real_frames, average(g_manager.perf_save_ms, g_manager.perf_save_count),
       g_manager.perf_save_max_ms, g_manager.perf_save_count,
@@ -1559,6 +1586,50 @@ static void MaybeLogPerformance()
       average(static_cast<double>(g_manager.perf_replay_jit_nanoseconds) / 1'000'000.0,
               g_manager.perf_replay_exec_count),
       average(static_cast<double>(g_manager.perf_replay_jit_blocks),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::GuestCpu)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(std::max(
+                  0.0,
+                  g_manager.perf_replay_exec_ms -
+                      static_cast<double>(std::accumulate(
+                          g_manager.perf_replay_events.nanoseconds.begin(),
+                          g_manager.perf_replay_events.nanoseconds.end(), u64{0})) /
+                          1'000'000.0),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::FrameSetup)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::CoreTiming)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::Fifo)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::VideoInterface)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::DspAudio)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::IosIpc)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::Devices)]) /
+                  1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(
+                  ResimEventCategory::Other)]) /
+                  1'000'000.0,
               g_manager.perf_replay_exec_count),
       average(g_manager.perf_replay_save_ms, g_manager.perf_replay_save_count),
       g_manager.perf_replay_save_max_ms, g_manager.perf_replay_save_count,
@@ -1594,7 +1665,75 @@ static void MaybeLogPerformance()
       (dirty_pages.dirty_pages - g_manager.perf_dirty_pages_start.dirty_pages) -
           (dirty_pages.pages_recorded - g_manager.perf_dirty_pages_start.pages_recorded),
       udp.sent, udp.received, udp.rejected, gekko_frames_ahead(g_manager.session),
-      g_manager.stress_test, g_manager.tracked_bitmap_clear, g_manager.full_scan_benchmark);
+      g_manager.stress_test, s_stress_packet_delay_frames, g_manager.tracked_bitmap_clear,
+      g_manager.full_scan_benchmark);
+
+  NOTICE_LOG_FMT(CORE,
+                 "GekkoNet presentation cadence: gaps >20/>25/>33.3/>50 ms = {}/{}/{}/{} of {} "
+                 "real frames",
+                 g_manager.perf_real_gaps_over_20_ms, g_manager.perf_real_gaps_over_25_ms,
+                 g_manager.perf_real_gaps_over_33_ms, g_manager.perf_real_gaps_over_50_ms,
+                 g_manager.perf_real_interval_count);
+
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet replay callbacks: cpu_slices {:.2f}, boundary_setups {:.2f}, fifo {:.2f}, "
+      "vi {:.2f}, dsp_audio {:.2f}, ios_ipc {:.2f}, devices {:.2f}, events_other {:.2f} "
+      "callbacks/frame",
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::GuestCpu)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::FrameSetup)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::Fifo)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::VideoInterface)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::DspAudio)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::IosIpc)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::Devices)]),
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_events.callbacks[static_cast<size_t>(
+                  ResimEventCategory::Other)]),
+              g_manager.perf_replay_exec_count));
+
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet replay JIT memory helpers: reads {:.2f} calls/{:.3f} ms, writes {:.2f} "
+      "calls/{:.3f} ms per replay frame",
+      average(static_cast<double>(jit_memory.read_calls), g_manager.perf_replay_exec_count),
+      average(static_cast<double>(jit_memory.read_nanoseconds) / 1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(jit_memory.write_calls), g_manager.perf_replay_exec_count),
+      average(static_cast<double>(jit_memory.write_nanoseconds) / 1'000'000.0,
+              g_manager.perf_replay_exec_count));
+
+  const u64 guest_total_nanoseconds =
+      g_manager.perf_replay_events.nanoseconds[static_cast<size_t>(ResimEventCategory::GuestCpu)];
+  for (const ResimGuestHotspot& hotspot : guest_hotspots)
+  {
+    const double percent = guest_total_nanoseconds == 0 ?
+                               0.0 :
+                               100.0 * static_cast<double>(hotspot.nanoseconds) /
+                                   static_cast<double>(guest_total_nanoseconds);
+    NOTICE_LOG_FMT(
+        CORE,
+        "GekkoNet replay CPU hotspot: pc={:08x} '{}' {:.3f} ms/frame ({:.1f}% CPU/JIT), "
+        "{:.1f} slices/frame, {:.0f} guest cycles/frame",
+        hotspot.pc, system.GetPPCSymbolDB().GetDescription(hotspot.pc),
+        average(static_cast<double>(hotspot.nanoseconds) / 1'000'000.0,
+                g_manager.perf_replay_exec_count),
+        percent, average(static_cast<double>(hotspot.slices), g_manager.perf_replay_exec_count),
+        average(static_cast<double>(hotspot.cycles), g_manager.perf_replay_exec_count));
+  }
 
   const double save_known_ms = g_manager.perf_save_phases.state_ms +
                                g_manager.perf_save_phases.dirty_pages_ms +
@@ -1664,6 +1803,7 @@ static void MaybeLogPerformance()
   g_manager.perf_replay_exec_max_ms = 0.0;
   g_manager.perf_replay_jit_blocks = 0;
   g_manager.perf_replay_jit_nanoseconds = 0;
+  g_manager.perf_replay_events = {};
   g_manager.perf_replay_save_count = 0;
   g_manager.perf_replay_save_ms = 0.0;
   g_manager.perf_replay_save_max_ms = 0.0;
@@ -1683,6 +1823,10 @@ static void MaybeLogPerformance()
   g_manager.perf_real_interval_count = 0;
   g_manager.perf_real_interval_ms = 0.0;
   g_manager.perf_real_interval_max_ms = 0.0;
+  g_manager.perf_real_gaps_over_20_ms = 0;
+  g_manager.perf_real_gaps_over_25_ms = 0;
+  g_manager.perf_real_gaps_over_33_ms = 0;
+  g_manager.perf_real_gaps_over_50_ms = 0;
 }
 
 // Consumes state operations up to one advance. Returning true means that the caller must return
@@ -1829,6 +1973,10 @@ static bool PrepareQueuedFrame(Core::System& system)
           g_manager.perf_real_interval_ms += interval;
           g_manager.perf_real_interval_max_ms =
               std::max(g_manager.perf_real_interval_max_ms, interval);
+          g_manager.perf_real_gaps_over_20_ms += interval > 20.0;
+          g_manager.perf_real_gaps_over_25_ms += interval > 25.0;
+          g_manager.perf_real_gaps_over_33_ms += interval > (100.0 / 3.0);
+          g_manager.perf_real_gaps_over_50_ms += interval > 50.0;
         }
         g_manager.last_real_advance = advance_now;
         if (g_manager.perf_real_frames == 0)
@@ -1839,6 +1987,9 @@ static bool PrepareQueuedFrame(Core::System& system)
       g_manager.frame_execution_resim = resimulating;
       g_manager.frame_execution_gekko_frame = event.frame;
       g_manager.frame_execution_jit_start = GetResimJitCompileStats();
+      g_manager.frame_execution_event_start = GetResimEventStats();
+      const auto frame_setup_start =
+          resimulating ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       system.GetSerialInterface().RelatchInputs();
       if (g_manager.stress_test && event.frame < 10)
       {
@@ -1851,6 +2002,14 @@ static bool PrepareQueuedFrame(Core::System& system)
       {
         DEBUG_LOG_FMT(CORE, "GekkoNet: Replaying frame {} (rollback={}, runahead={})", event.frame,
                       event.rolling_back, event.running_ahead);
+      }
+      if (resimulating)
+      {
+        RecordResimEvent(
+            ResimEventCategory::FrameSetup,
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - frame_setup_start)
+                                 .count()));
       }
       return true;
     }
@@ -1898,11 +2057,19 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
       const u64 jit_blocks = jit_now.blocks - g_manager.frame_execution_jit_start.blocks;
       const u64 jit_nanoseconds =
           jit_now.nanoseconds - g_manager.frame_execution_jit_start.nanoseconds;
+      const ResimEventStats event_now = GetResimEventStats();
       ++g_manager.perf_replay_exec_count;
       g_manager.perf_replay_exec_ms += elapsed;
       g_manager.perf_replay_exec_max_ms = std::max(g_manager.perf_replay_exec_max_ms, elapsed);
       g_manager.perf_replay_jit_blocks += jit_blocks;
       g_manager.perf_replay_jit_nanoseconds += jit_nanoseconds;
+      for (std::size_t i = 0; i < g_manager.perf_replay_events.nanoseconds.size(); ++i)
+      {
+        g_manager.perf_replay_events.nanoseconds[i] +=
+            event_now.nanoseconds[i] - g_manager.frame_execution_event_start.nanoseconds[i];
+        g_manager.perf_replay_events.callbacks[i] +=
+            event_now.callbacks[i] - g_manager.frame_execution_event_start.callbacks[i];
+      }
       if (g_manager.rollback_burst_start)
         g_manager.current_burst_exec_ms += elapsed;
       if (elapsed >= 10.0)
@@ -1918,7 +2085,7 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
     g_manager.frame_execution_start.reset();
   }
 
-  MaybeLogPerformance();
+  MaybeLogPerformance(system);
 
   // A rollback batch is replayed one emulated frame at a time. State saves left after the prior
   // advance are intentionally handled now, after that frame has completed.
@@ -2010,8 +2177,10 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
         {
           s_stress_frame_delay_active = true;
           s_last_stress_peer_update_frame = 0;
-          NOTICE_LOG_FMT(CORE, "GekkoNet benchmark: deterministic 7-frame packets active; Player 2 "
-                               "changes input every 3 frames");
+          NOTICE_LOG_FMT(CORE,
+                         "GekkoNet benchmark: deterministic {}-frame packets active; Player 2 "
+                         "changes input every 3 frames",
+                         s_stress_packet_delay_frames);
         }
         break;
       default:

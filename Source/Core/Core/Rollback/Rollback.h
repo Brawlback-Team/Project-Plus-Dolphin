@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -51,6 +52,42 @@ struct ResimJitCompileStats
   u64 nanoseconds = 0;
 };
 
+struct ResimGuestHotspot
+{
+  u32 pc = 0;
+  u64 nanoseconds = 0;
+  u64 cycles = 0;
+  u64 slices = 0;
+};
+
+struct ResimJitMemoryStats
+{
+  u64 read_calls = 0;
+  u64 read_nanoseconds = 0;
+  u64 write_calls = 0;
+  u64 write_nanoseconds = 0;
+};
+
+enum class ResimEventCategory : u8
+{
+  GuestCpu,
+  FrameSetup,
+  Fifo,
+  VideoInterface,
+  DspAudio,
+  IosIpc,
+  Devices,
+  Other,
+  CoreTiming,
+  Count,
+};
+
+struct ResimEventStats
+{
+  std::array<u64, static_cast<std::size_t>(ResimEventCategory::Count)> nanoseconds{};
+  std::array<u64, static_cast<std::size_t>(ResimEventCategory::Count)> callbacks{};
+};
+
 struct ChangedMemoryRange
 {
   u32 physical_address = 0;
@@ -65,6 +102,12 @@ bool IsResimulating();
 void SetResimulating(bool resimulating);
 void RecordResimJitCompile(u64 nanoseconds);
 ResimJitCompileStats GetResimJitCompileStats();
+void RecordResimGuestSlice(u32 pc, u64 nanoseconds, u64 cycles);
+std::vector<ResimGuestHotspot> TakeResimGuestHotspots(std::size_t limit);
+void RecordResimJitMemoryHelper(bool write, u64 nanoseconds);
+ResimJitMemoryStats TakeResimJitMemoryStats();
+void RecordResimEvent(ResimEventCategory category, u64 nanoseconds);
+ResimEventStats GetResimEventStats();
 
 // Holds InSnapshotDoState() true for its lifetime.
 class SnapshotScope
