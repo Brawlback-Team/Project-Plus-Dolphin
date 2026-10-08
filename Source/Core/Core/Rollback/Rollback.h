@@ -94,6 +94,13 @@ struct ChangedMemoryRange
   u32 length = 0;
 };
 
+struct RollbackBurstMarker
+{
+  u64 serial = 0;
+  u64 end_time_ns = 0;
+  u64 duration_ns = 0;
+};
+
 // True while a rollback snapshot is being saved or loaded (CPU thread; single core only).
 bool InSnapshotDoState();
 
@@ -108,6 +115,8 @@ void RecordResimJitMemoryHelper(bool write, u64 nanoseconds);
 ResimJitMemoryStats TakeResimJitMemoryStats();
 void RecordResimEvent(ResimEventCategory category, u64 nanoseconds);
 ResimEventStats GetResimEventStats();
+void RecordRollbackBurst(u64 duration_ns);
+RollbackBurstMarker GetLastRollbackBurst();
 
 // Holds InSnapshotDoState() true for its lifetime.
 class SnapshotScope

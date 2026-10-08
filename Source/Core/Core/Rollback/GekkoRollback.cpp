@@ -1557,6 +1557,8 @@ static void MaybeLogPerformance(Core::System& system)
   const Common::ENet::RollbackDatagramStats udp = Common::ENet::GetRollbackDatagramStats();
   const ResimJitMemoryStats jit_memory = TakeResimJitMemoryStats();
   const std::vector<ResimGuestHotspot> guest_hotspots = TakeResimGuestHotspots(8);
+  const CoreTiming::RollbackThrottleStats throttle =
+      system.GetCoreTiming().TakeRollbackThrottleStats();
 
   NOTICE_LOG_FMT(
       CORE,
@@ -1674,6 +1676,26 @@ static void MaybeLogPerformance(Core::System& system)
                  g_manager.perf_real_gaps_over_20_ms, g_manager.perf_real_gaps_over_25_ms,
                  g_manager.perf_real_gaps_over_33_ms, g_manager.perf_real_gaps_over_50_ms,
                  g_manager.perf_real_interval_count);
+
+  NOTICE_LOG_FMT(
+      CORE,
+      "GekkoNet throttle: normal calls {}; requested {:.3f}/{:.3f} ms avg/max; actual "
+      "{:.3f}/{:.3f} ms avg/max; first-after-burst calls {}; requested {:.3f}/{:.3f} ms "
+      "avg/max; actual {:.3f}/{:.3f} ms avg/max",
+      throttle.normal_calls,
+      average(static_cast<double>(throttle.normal_requested_ns) / 1'000'000.0,
+              throttle.normal_calls),
+      static_cast<double>(throttle.normal_requested_max_ns) / 1'000'000.0,
+      average(static_cast<double>(throttle.normal_actual_ns) / 1'000'000.0,
+              throttle.normal_calls),
+      static_cast<double>(throttle.normal_actual_max_ns) / 1'000'000.0,
+      throttle.post_burst_calls,
+      average(static_cast<double>(throttle.post_burst_requested_ns) / 1'000'000.0,
+              throttle.post_burst_calls),
+      static_cast<double>(throttle.post_burst_requested_max_ns) / 1'000'000.0,
+      average(static_cast<double>(throttle.post_burst_actual_ns) / 1'000'000.0,
+              throttle.post_burst_calls),
+      static_cast<double>(throttle.post_burst_actual_max_ns) / 1'000'000.0);
 
   NOTICE_LOG_FMT(
       CORE,
@@ -1929,9 +1951,10 @@ static bool PrepareQueuedFrame(Core::System& system)
       const auto advance_now = std::chrono::steady_clock::now();
       if (!resimulating && g_manager.rollback_burst_start)
       {
-        const double elapsed =
-            std::chrono::duration<double, std::milli>(advance_now - *g_manager.rollback_burst_start)
-                .count();
+        const auto burst_duration = advance_now - *g_manager.rollback_burst_start;
+        const double elapsed = std::chrono::duration<double, std::milli>(burst_duration).count();
+        Rollback::RecordRollbackBurst(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(burst_duration).count()));
         ++g_manager.perf_rollback_burst_count;
         g_manager.perf_rollback_burst_ms += elapsed;
         g_manager.perf_rollback_burst_max_ms =
@@ -2208,6 +2231,11 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
 void OnFrameBoundary(const Core::CPUThreadGuard& guard)
 {
   ProcessFrameBoundary(guard, FrameBoundary::BrawlHook);
+  if (IsGekkoSessionActive())
+  {
+    auto& core_timing = guard.GetSystem().GetCoreTiming();
+    core_timing.ThrottleForRollbackBoundary(static_cast<s64>(core_timing.GetTicks()));
+  }
 }
 
 void SignalVIBoundary(FrameBoundary boundary)
@@ -2235,6 +2263,11 @@ void RunPendingVIBoundary(Core::System& system)
 
   const Core::CPUThreadGuard guard(system);
   ProcessFrameBoundary(guard, g_manager.frame_boundary);
+  if (IsGekkoSessionActive())
+  {
+    auto& core_timing = system.GetCoreTiming();
+    core_timing.ThrottleForRollbackBoundary(static_cast<s64>(core_timing.GetTicks()));
+  }
   static u32 s_early_returns = 0;
   if (g_manager.stress_test && s_early_returns++ < 16)
   {

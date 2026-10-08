@@ -33,6 +33,10 @@ std::atomic<bool> s_in_snapshot{false};
 std::atomic<bool> s_resimulating{false};
 std::atomic<u64> s_resim_jit_compile_blocks{0};
 std::atomic<u64> s_resim_jit_compile_nanoseconds{0};
+std::atomic<u64> s_rollback_burst_sequence{0};
+std::atomic<u64> s_rollback_burst_serial{0};
+std::atomic<u64> s_rollback_burst_end_time_ns{0};
+std::atomic<u64> s_rollback_burst_duration_ns{0};
 ResimEventStats s_resim_event_stats;
 std::unordered_map<u32, ResimGuestHotspot> s_resim_guest_hotspots;
 ResimJitMemoryStats s_resim_jit_memory_stats;
@@ -118,6 +122,36 @@ void SetResimulating(bool resimulating)
 {
   s_resimulating.store(resimulating, std::memory_order_relaxed);
   VideoCommon_SetSkipRender(resimulating);
+}
+
+void RecordRollbackBurst(u64 duration_ns)
+{
+  const u64 end_time_ns = static_cast<u64>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  s_rollback_burst_sequence.fetch_add(1, std::memory_order_acq_rel);
+  s_rollback_burst_duration_ns.store(duration_ns, std::memory_order_relaxed);
+  s_rollback_burst_end_time_ns.store(end_time_ns, std::memory_order_relaxed);
+  s_rollback_burst_serial.fetch_add(1, std::memory_order_relaxed);
+  s_rollback_burst_sequence.fetch_add(1, std::memory_order_release);
+}
+
+RollbackBurstMarker GetLastRollbackBurst()
+{
+  RollbackBurstMarker marker;
+  while (true)
+  {
+    const u64 sequence_before = s_rollback_burst_sequence.load(std::memory_order_acquire);
+    if ((sequence_before & 1) != 0)
+      continue;
+    marker.serial = s_rollback_burst_serial.load(std::memory_order_relaxed);
+    marker.end_time_ns = s_rollback_burst_end_time_ns.load(std::memory_order_relaxed);
+    marker.duration_ns = s_rollback_burst_duration_ns.load(std::memory_order_relaxed);
+    const u64 sequence_after = s_rollback_burst_sequence.load(std::memory_order_acquire);
+    if (sequence_before == sequence_after)
+      return marker;
+  }
 }
 
 void RecordResimJitCompile(u64 nanoseconds)

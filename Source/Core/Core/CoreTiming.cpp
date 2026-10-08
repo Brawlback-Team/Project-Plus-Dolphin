@@ -516,6 +516,13 @@ void CoreTimingManager::ResetThrottleToNow()
   ResetThrottle(static_cast<s64>(GetTicks()));
 }
 
+RollbackThrottleStats CoreTimingManager::TakeRollbackThrottleStats()
+{
+  RollbackThrottleStats result = m_rollback_throttle_stats;
+  m_rollback_throttle_stats = {};
+  return result;
+}
+
 void CoreTimingManager::SetTimesyncScale(float scale)
 {
   const float clamped_scale = std::clamp(scale, 0.97f, 1.03f);
@@ -567,6 +574,9 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
 void CoreTimingManager::Throttle(const s64 target_cycle)
 {
   const TimePoint time = Clock::now();
+
+  if (Rollback::IsResimulating())
+    m_rollback_throttle_pending = true;
 
   const bool already_throttled =
       m_throttled_after_presentation.exchange(true, std::memory_order_relaxed);
@@ -626,7 +636,46 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
 
   UpdateVISkip(time, target_time);
 
+  const bool measure_rollback_throttle = Rollback::IsGekkoSessionActive();
+  const bool first_after_burst = measure_rollback_throttle && m_rollback_throttle_pending;
+  const u64 requested_ns =
+      target_time > time ?
+          static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(target_time - time)
+                               .count()) :
+          0;
+  const TimePoint sleep_start = Clock::now();
   SleepUntil(target_time);
+  if (measure_rollback_throttle)
+  {
+    const u64 actual_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - sleep_start).count());
+    ++m_rollback_throttle_stats.normal_calls;
+    m_rollback_throttle_stats.normal_requested_ns += requested_ns;
+    m_rollback_throttle_stats.normal_requested_max_ns =
+        std::max(m_rollback_throttle_stats.normal_requested_max_ns, requested_ns);
+    m_rollback_throttle_stats.normal_actual_ns += actual_ns;
+    m_rollback_throttle_stats.normal_actual_max_ns =
+        std::max(m_rollback_throttle_stats.normal_actual_max_ns, actual_ns);
+    if (first_after_burst)
+    {
+      ++m_rollback_throttle_stats.post_burst_calls;
+      m_rollback_throttle_stats.post_burst_requested_ns += requested_ns;
+      m_rollback_throttle_stats.post_burst_requested_max_ns =
+          std::max(m_rollback_throttle_stats.post_burst_requested_max_ns, requested_ns);
+      m_rollback_throttle_stats.post_burst_actual_ns += actual_ns;
+      m_rollback_throttle_stats.post_burst_actual_max_ns =
+          std::max(m_rollback_throttle_stats.post_burst_actual_max_ns, actual_ns);
+      m_rollback_throttle_pending = false;
+    }
+  }
+}
+
+void CoreTimingManager::ThrottleForRollbackBoundary(const s64 target_cycle)
+{
+  // Gekko sessions pace at their authoritative frame boundary. Do not let Rush Frame
+  // Presentation suppress this replacement for Dolphin's earlier controller-poll throttle.
+  m_throttled_after_presentation.store(false, std::memory_order_relaxed);
+  Throttle(target_cycle);
 }
 
 void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)

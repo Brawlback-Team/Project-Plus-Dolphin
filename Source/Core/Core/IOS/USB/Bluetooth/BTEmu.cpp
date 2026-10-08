@@ -23,6 +23,7 @@
 #include "Core/Movie.h"
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
+#include "Core/Rollback/GekkoRollback.h"
 #include "Core/SysConf.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
@@ -341,7 +342,8 @@ void BluetoothEmuDevice::Update()
   if (now - m_last_ticks > interval)
   {
     // Throttle before Wii Remote update so input is taken just before needed. (lower input latency)
-    core_timing.Throttle(now);
+    if (!Rollback::IsGekkoSessionActive())
+      core_timing.Throttle(now);
     g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::Bluetooth);
     g_controller_interface.UpdateInput();
 
