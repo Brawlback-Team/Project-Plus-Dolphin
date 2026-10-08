@@ -30,6 +30,8 @@ namespace
 {
 std::atomic<bool> s_in_snapshot{false};
 std::atomic<bool> s_resimulating{false};
+std::atomic<u64> s_resim_jit_compile_blocks{0};
+std::atomic<u64> s_resim_jit_compile_nanoseconds{0};
 
 constexpr std::size_t RESTORE_PAGE = 4096;
 constexpr u32 MEM1_VIRTUAL = 0x80000000u;
@@ -102,6 +104,18 @@ void SetResimulating(bool resimulating)
 {
   s_resimulating.store(resimulating, std::memory_order_relaxed);
   VideoCommon_SetSkipRender(resimulating);
+}
+
+void RecordResimJitCompile(u64 nanoseconds)
+{
+  s_resim_jit_compile_blocks.fetch_add(1, std::memory_order_relaxed);
+  s_resim_jit_compile_nanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);
+}
+
+ResimJitCompileStats GetResimJitCompileStats()
+{
+  return {s_resim_jit_compile_blocks.load(std::memory_order_relaxed),
+          s_resim_jit_compile_nanoseconds.load(std::memory_order_relaxed)};
 }
 
 SnapshotScope::SnapshotScope()
@@ -360,6 +374,7 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   // Standalone ARAM is not CPU executable memory. FakeVMEM's canonical bitmap range maps back to
   // its physical fastmem address for invalidation.
   auto& jit = system.GetJitInterface();
+  const std::size_t jit_blocks_before = jit.GetBlockCount();
   const auto jit_start = std::chrono::steady_clock::now();
   for (const u32 physical : m_changed_blocks)
   {
@@ -374,6 +389,9 @@ bool SnapshotRing::LoadSlot(Core::System& system, s64 frame, bool redisplay)
   }
   ForgetLearnedJitAddresses(system, m_changed_blocks);
   m_last_load_timings.jit_ms = MillisecondsSince(jit_start);
+  const std::size_t jit_blocks_after = jit.GetBlockCount();
+  m_last_load_timings.jit_blocks_invalidated =
+      jit_blocks_before > jit_blocks_after ? jit_blocks_before - jit_blocks_after : 0;
   const auto l1_start = std::chrono::steady_clock::now();
   std::memcpy(memory.GetL1Cache(), slot->l1_cache.data(), slot->l1_cache.size());
   m_last_load_timings.l1_ms = MillisecondsSince(l1_start);

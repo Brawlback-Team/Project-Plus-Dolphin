@@ -410,9 +410,13 @@ struct GekkoManager
   u64 perf_delay_transition_max = 0;
   std::optional<std::chrono::steady_clock::time_point> frame_execution_start;
   bool frame_execution_resim = false;
+  int frame_execution_gekko_frame = -1;
+  ResimJitCompileStats frame_execution_jit_start{};
   u64 perf_replay_exec_count = 0;
   double perf_replay_exec_ms = 0.0;
   double perf_replay_exec_max_ms = 0.0;
+  u64 perf_replay_jit_blocks = 0;
+  u64 perf_replay_jit_nanoseconds = 0;
   u64 perf_replay_save_count = 0;
   double perf_replay_save_ms = 0.0;
   double perf_replay_save_max_ms = 0.0;
@@ -431,6 +435,7 @@ struct GekkoManager
   double current_burst_load_ms = 0.0;
   double current_burst_exec_ms = 0.0;
   double current_burst_save_ms = 0.0;
+  std::size_t current_burst_jit_blocks_invalidated = 0;
   u64 current_rollback_replays = 0;
   u64 perf_rollback_depth_total = 0;
   u64 perf_rollback_depth_max = 0;
@@ -1010,9 +1015,14 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.perf_delay_transition_min = 0;
   g_manager.perf_delay_transition_max = 0;
   g_manager.frame_execution_start.reset();
+  g_manager.frame_execution_resim = false;
+  g_manager.frame_execution_gekko_frame = -1;
+  g_manager.frame_execution_jit_start = GetResimJitCompileStats();
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
+  g_manager.perf_replay_jit_blocks = 0;
+  g_manager.perf_replay_jit_nanoseconds = 0;
   g_manager.perf_replay_save_count = 0;
   g_manager.perf_replay_save_ms = 0.0;
   g_manager.perf_replay_save_max_ms = 0.0;
@@ -1031,6 +1041,7 @@ bool StartGekkoSession(const std::string& game_name, u32 session_id, int players
   g_manager.current_burst_load_ms = 0.0;
   g_manager.current_burst_exec_ms = 0.0;
   g_manager.current_burst_save_ms = 0.0;
+  g_manager.current_burst_jit_blocks_invalidated = 0;
   g_manager.current_rollback_replays = 0;
   g_manager.perf_rollback_depth_total = 0;
   g_manager.perf_rollback_depth_max = 0;
@@ -1487,6 +1498,7 @@ static void AddSnapshotPhases(SnapshotPhaseTimings* total, const SnapshotPhaseTi
   total->journal_ms += sample.journal_ms;
   total->state_bytes += sample.state_bytes;
   total->changed_blocks += sample.changed_blocks;
+  total->jit_blocks_invalidated += sample.jit_blocks_invalidated;
 }
 
 // Native GekkoNet uses frame -1 for the snapshot immediately before frame 0. SnapshotRing uses
@@ -1523,7 +1535,8 @@ static void MaybeLogPerformance()
       CORE,
       "GekkoNet perf: {:.1f} fps over {} real frames; save {:.3f}/{:.3f} ms avg/max ({}); "
       "pump {:.3f}/{:.3f} ms ({}); load {:.3f}/{:.3f} ms ({}); replays {}; "
-      "replay_exec {:.3f}/{:.3f} ms ({}); replay_save {:.3f}/{:.3f} ms ({}); "
+      "replay_exec {:.3f}/{:.3f} ms ({}); replay_jit {:.3f} ms/frame, {:.2f} blocks/frame; "
+      "replay_save {:.3f}/{:.3f} ms ({}); "
       "burst {:.3f}/{:.3f} ms ({}); burst_parts load {:.3f}/{:.3f} exec {:.3f}/{:.3f} "
       "save {:.3f}/{:.3f} other {:.3f}/{:.3f} ms avg/max; "
       "real_interval {:.3f}/{:.3f} ms ({}); input_changes {} bytes [{},{},{},{},{},{},{},{}]; "
@@ -1539,6 +1552,10 @@ static void MaybeLogPerformance()
       g_manager.perf_load_max_ms, g_manager.perf_load_count, g_manager.perf_replay_frames,
       average(g_manager.perf_replay_exec_ms, g_manager.perf_replay_exec_count),
       g_manager.perf_replay_exec_max_ms, g_manager.perf_replay_exec_count,
+      average(static_cast<double>(g_manager.perf_replay_jit_nanoseconds) / 1'000'000.0,
+              g_manager.perf_replay_exec_count),
+      average(static_cast<double>(g_manager.perf_replay_jit_blocks),
+              g_manager.perf_replay_exec_count),
       average(g_manager.perf_replay_save_ms, g_manager.perf_replay_save_count),
       g_manager.perf_replay_save_max_ms, g_manager.perf_replay_save_count,
       average(g_manager.perf_rollback_burst_ms, g_manager.perf_rollback_burst_count),
@@ -1588,7 +1605,7 @@ static void MaybeLogPerformance()
       CORE,
       "GekkoNet snapshot phases: save state {:.3f} dirty {:.3f} l1 {:.3f} journal {:.3f} "
       "other {:.3f} ms, state {:.1f} KiB; load dirty {:.3f} jit {:.3f} l1 {:.3f} state "
-      "{:.3f} journal {:.3f} other {:.3f} ms, changed {:.1f} blocks",
+      "{:.3f} journal {:.3f} other {:.3f} ms, changed {:.1f} pages, invalidated {:.1f} JIT blocks",
       average(g_manager.perf_save_phases.state_ms, g_manager.perf_save_count),
       average(g_manager.perf_save_phases.dirty_pages_ms, g_manager.perf_save_count),
       average(g_manager.perf_save_phases.l1_ms, g_manager.perf_save_count),
@@ -1606,6 +1623,8 @@ static void MaybeLogPerformance()
       average(std::max(0.0, g_manager.perf_load_ms - load_known_ms),
               g_manager.perf_load_count),
       average(static_cast<double>(g_manager.perf_load_phases.changed_blocks),
+              g_manager.perf_load_count),
+      average(static_cast<double>(g_manager.perf_load_phases.jit_blocks_invalidated),
               g_manager.perf_load_count));
 
   g_manager.perf_window_start = now;
@@ -1636,6 +1655,8 @@ static void MaybeLogPerformance()
   g_manager.perf_replay_exec_count = 0;
   g_manager.perf_replay_exec_ms = 0.0;
   g_manager.perf_replay_exec_max_ms = 0.0;
+  g_manager.perf_replay_jit_blocks = 0;
+  g_manager.perf_replay_jit_nanoseconds = 0;
   g_manager.perf_replay_save_count = 0;
   g_manager.perf_replay_save_ms = 0.0;
   g_manager.perf_replay_save_max_ms = 0.0;
@@ -1711,6 +1732,7 @@ static bool PrepareQueuedFrame(Core::System& system)
           g_manager.current_burst_load_ms = 0.0;
           g_manager.current_burst_exec_ms = 0.0;
           g_manager.current_burst_save_ms = 0.0;
+          g_manager.current_burst_jit_blocks_invalidated = 0;
         }
         const auto start = std::chrono::steady_clock::now();
         if (!g_manager.ring->Load(system, SnapshotFrameKey(event.frame)))
@@ -1729,7 +1751,9 @@ static bool PrepareQueuedFrame(Core::System& system)
                          system.GetCoreTiming().GetTicks());
         }
         const double elapsed = ElapsedMs(start);
-        AddSnapshotPhases(&g_manager.perf_load_phases, g_manager.ring->GetLastLoadTimings());
+        const SnapshotPhaseTimings& load_timings = g_manager.ring->GetLastLoadTimings();
+        AddSnapshotPhases(&g_manager.perf_load_phases, load_timings);
+        g_manager.current_burst_jit_blocks_invalidated += load_timings.jit_blocks_invalidated;
         ++g_manager.perf_load_count;
         g_manager.perf_load_ms += elapsed;
         g_manager.perf_load_max_ms = std::max(g_manager.perf_load_max_ms, elapsed);
@@ -1806,6 +1830,8 @@ static bool PrepareQueuedFrame(Core::System& system)
       }
       g_manager.frame_execution_start = advance_now;
       g_manager.frame_execution_resim = resimulating;
+      g_manager.frame_execution_gekko_frame = event.frame;
+      g_manager.frame_execution_jit_start = GetResimJitCompileStats();
       system.GetSerialInterface().RelatchInputs();
       if (g_manager.stress_test && event.frame < 10)
       {
@@ -1861,11 +1887,26 @@ static void ProcessFrameBoundary(const Core::CPUThreadGuard& guard, FrameBoundar
     const double elapsed = ElapsedMs(*g_manager.frame_execution_start);
     if (g_manager.frame_execution_resim)
     {
+      const ResimJitCompileStats jit_now = GetResimJitCompileStats();
+      const u64 jit_blocks = jit_now.blocks - g_manager.frame_execution_jit_start.blocks;
+      const u64 jit_nanoseconds =
+          jit_now.nanoseconds - g_manager.frame_execution_jit_start.nanoseconds;
       ++g_manager.perf_replay_exec_count;
       g_manager.perf_replay_exec_ms += elapsed;
       g_manager.perf_replay_exec_max_ms = std::max(g_manager.perf_replay_exec_max_ms, elapsed);
+      g_manager.perf_replay_jit_blocks += jit_blocks;
+      g_manager.perf_replay_jit_nanoseconds += jit_nanoseconds;
       if (g_manager.rollback_burst_start)
         g_manager.current_burst_exec_ms += elapsed;
+      if (elapsed >= 10.0)
+      {
+        NOTICE_LOG_FMT(CORE,
+                       "GekkoNet replay spike: frame {} exec {:.3f} ms, JIT compiled {} blocks in "
+                       "{:.3f} ms after invalidating {} blocks in this burst",
+                       g_manager.frame_execution_gekko_frame, elapsed, jit_blocks,
+                       static_cast<double>(jit_nanoseconds) / 1'000'000.0,
+                       g_manager.current_burst_jit_blocks_invalidated);
+      }
     }
     g_manager.frame_execution_start.reset();
   }

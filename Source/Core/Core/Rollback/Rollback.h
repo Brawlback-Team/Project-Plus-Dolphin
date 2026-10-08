@@ -41,6 +41,13 @@ struct SnapshotPhaseTimings
   double journal_ms = 0.0;
   std::size_t state_bytes = 0;
   std::size_t changed_blocks = 0;
+  std::size_t jit_blocks_invalidated = 0;
+};
+
+struct ResimJitCompileStats
+{
+  u64 blocks = 0;
+  u64 nanoseconds = 0;
 };
 
 // True while a rollback snapshot is being saved or loaded (CPU thread; single core only).
@@ -49,6 +56,8 @@ bool InSnapshotDoState();
 // True while frames are re-run after a load: host rendering is skipped and their audio dropped.
 bool IsResimulating();
 void SetResimulating(bool resimulating);
+void RecordResimJitCompile(u64 nanoseconds);
+ResimJitCompileStats GetResimJitCompileStats();
 
 // Holds InSnapshotDoState() true for its lifetime.
 class SnapshotScope
